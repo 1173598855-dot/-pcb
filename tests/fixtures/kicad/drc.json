@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "source": "board.kicad_pcb",
+  "violations": [
+    {
+      "type": "clearance",
+      "severity": "warning",
+      "description": "Clearance violation",
+      "items": [
+        {
+          "description": "Track on net +3V3",
+          "uuid": "fixture-track-3v3"
+        },
+        {
+          "description": "Pad 1 of C4",
+          "uuid": "fixture-c4-pad1"
+        }
+      ]
+    }
+  ]
+}

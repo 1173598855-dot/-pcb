@@ -1,0 +1,17 @@
+{
+  "version": "1.0",
+  "source": "board.kicad_sch",
+  "violations": [
+    {
+      "type": "pin_not_connected",
+      "severity": "error",
+      "description": "Input pin is not driven",
+      "items": [
+        {
+          "description": "U1 pin 7",
+          "uuid": "fixture-u1-pin7"
+        }
+      ]
+    }
+  ]
+}

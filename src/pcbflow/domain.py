@@ -55,3 +55,17 @@ class TaskLease:
     lease_token: str
     lease_expires_at: datetime
     attempt_number: int
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedFinding:
+    rule_id: str
+    severity: str
+    subject: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationReport:
+    kind: str
+    findings: tuple[NormalizedFinding, ...]
