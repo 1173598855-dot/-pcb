@@ -1,2 +1,14 @@
 .superpowers/
 .worktrees/
+.venv/
+.pcbflow-data/
+.pytest_cache/
+.pytest-tmp/
+.coverage
+htmlcov/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+node_modules/

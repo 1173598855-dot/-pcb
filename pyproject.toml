@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcbflow"
+version = "0.1.0"
+description = "Local-first automated PCB development workflow"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "alembic>=1.14,<2",
+  "fastapi>=0.115,<1",
+  "pydantic>=2.10,<3",
+  "sqlalchemy>=2.0.36,<3",
+  "typer>=0.15,<1",
+  "uvicorn>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "hypothesis>=6.120,<7",
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<7",
+]
+
+[project.scripts]
+pcbflow = "pcbflow.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --basetemp=.pytest-tmp"
+markers = ["kicad: requires a real supported kicad-cli"]
