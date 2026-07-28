@@ -250,7 +250,6 @@ project_id: "01J..."
 name: "reference-controller"
 design_source: "kicad"
 current_stage: "SYSTEM_DESIGN"
-current_revision: "git:<object-id>"
 toolchain_lock: "sha256:..."
 rulepacks:
   - id: "electrical-mcu-v1"
@@ -262,7 +261,7 @@ assembly_target: "jlcpcb_smt"
 approval_policy: "human-four-gates-v1"
 ```
 
-`current_stage` 是便于人读的投影；数据库事件流和已签名检查点才是工作流权威状态。工程清单不得存放密钥、访问令牌或本机绝对路径。
+`current_stage` 是便于人读的投影；数据库事件流和已签名检查点才是工作流权威状态。`current_revision` 不能提交到该 commit 自身，否则会形成自引用；它由数据库和 Git ref 投影，在 API、CLI 和只读诊断视图中显示。工程清单不得存放密钥、访问令牌或本机绝对路径。
 
 ### 6.2 版本与提交策略
 

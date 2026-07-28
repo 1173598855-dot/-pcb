@@ -207,5 +207,7 @@ git diff --check
 
 设计规范与实施计划位于：
 
+- `docs/DEVELOPMENT_GUIDE.md`
 - `docs/superpowers/specs/2026-07-29-automated-pcb-development-platform-design.md`
+- `docs/superpowers/specs/2026-07-29-phase-2a-controlled-design-change-kernel-design.md`
 - `docs/superpowers/plans/2026-07-29-phase-0-1-read-only-validation.md`
