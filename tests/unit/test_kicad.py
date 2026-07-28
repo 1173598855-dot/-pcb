@@ -63,6 +63,20 @@ def test_probe_reports_nonzero_version_command(tmp_path: Path) -> None:
     assert report.reason == "version_command_failed"
 
 
+def test_probe_rejects_unsupported_major_version(tmp_path: Path) -> None:
+    executable = tmp_path / "kicad-cli.exe"
+    executable.write_bytes(b"fixture executable")
+    runner = VersionRunner(
+        ProcessResult((str(executable), "--version"), 0, "8.0.7\n", "", False)
+    )
+
+    report = KicadCli(runner, executable, 5).probe()
+
+    assert not report.available
+    assert report.version == "8.0.7"
+    assert report.reason == "unsupported_version"
+
+
 def test_locate_prefers_explicit_existing_path(tmp_path: Path) -> None:
     executable = tmp_path / "custom-kicad-cli.exe"
     executable.write_bytes(b"fixture")

@@ -283,3 +283,7 @@ def test_cli_commands_share_persisted_services(tmp_path: Path) -> None:
     findings = runner.invoke(app, ["findings", project_id, "--json"], env=env)
     assert findings.exit_code == 0, findings.output
     assert json.loads(findings.stdout) == []
+
+    evidence = runner.invoke(app, ["evidence", project_id, "--json"], env=env)
+    assert evidence.exit_code == 0, evidence.output
+    assert json.loads(evidence.stdout) == []

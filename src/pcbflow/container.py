@@ -44,6 +44,9 @@ class Container:
     validation: ValidationService
     worker: Worker
 
+    def dispose(self) -> None:
+        self.engine.dispose()
+
 
 def _run_migrations(database_url: str) -> None:
     root = Path(__file__).resolve().parents[2]

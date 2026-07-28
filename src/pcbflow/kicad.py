@@ -197,8 +197,13 @@ class KicadCli:
             return KicadCapability(
                 False, self._executable, None, digest, "version_unparseable"
             )
+        version = match.group(1)
+        if version.split(".", 1)[0] != "9":
+            return KicadCapability(
+                False, self._executable, version, digest, "unsupported_version"
+            )
         return KicadCapability(
-            True, self._executable, match.group(1), digest, None
+            True, self._executable, version, digest, None
         )
 
     def validate(

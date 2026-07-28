@@ -49,7 +49,7 @@ def doctor(
             "KiCad CLI available" if capability.available else "KiCad CLI unavailable",
         )
     finally:
-        container.engine.dispose()
+        container.dispose()
 
 
 @project_app.command("add")
@@ -64,7 +64,7 @@ def project_add(
         project = container.projects.create(name, path, idempotency_key)
         _emit(project, json_output, project.id)
     finally:
-        container.engine.dispose()
+        container.dispose()
 
 
 @project_app.command("list")
@@ -76,7 +76,7 @@ def project_list(
         projects = container.projects.list()
         _emit(projects, json_output, f"{len(projects)} project(s)")
     finally:
-        container.engine.dispose()
+        container.dispose()
 
 
 @app.command("validate")
@@ -90,7 +90,7 @@ def validate_project(
         task = container.validation.enqueue(project_id, idempotency_key)
         _emit(task, json_output, task.id)
     finally:
-        container.engine.dispose()
+        container.dispose()
 
 
 @app.command("worker")
@@ -105,7 +105,7 @@ def run_worker(
         handled = container.worker.run_once()
         _emit({"handled": handled}, json_output, "handled" if handled else "idle")
     finally:
-        container.engine.dispose()
+        container.dispose()
 
 
 @task_app.command("show")
@@ -118,7 +118,7 @@ def task_show(
         task = container.tasks.get(task_id)
         _emit(task, json_output, f"{task.id}: {task.status.value}")
     finally:
-        container.engine.dispose()
+        container.dispose()
 
 
 @app.command("findings")
@@ -132,7 +132,21 @@ def list_findings(
         findings = container.findings.list_for_project(project_id)
         _emit(findings, json_output, f"{len(findings)} finding(s)")
     finally:
-        container.engine.dispose()
+        container.dispose()
+
+
+@app.command("evidence")
+def list_evidence(
+    project_id: str,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    container = _build()
+    try:
+        container.projects.get(project_id)
+        evidence = container.evidence.list_for_project(project_id)
+        _emit(evidence, json_output, f"{len(evidence)} evidence record(s)")
+    finally:
+        container.dispose()
 
 
 @app.command("serve")
@@ -144,4 +158,4 @@ def serve(
     try:
         uvicorn.run(create_app(container), host=host, port=port)
     finally:
-        container.engine.dispose()
+        container.dispose()

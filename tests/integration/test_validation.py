@@ -1,9 +1,12 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from pcbflow.artifacts import ContentAddressedStore
+from pcbflow.config import Settings
+from pcbflow.container import build_container
 from pcbflow.domain import TaskStatus
 from pcbflow.kicad import RawValidationReport
 from pcbflow.repositories import (
@@ -13,6 +16,7 @@ from pcbflow.repositories import (
     TaskRepository,
 )
 from pcbflow.tasks import Worker
+from pcbflow.tables import TaskAttemptRow
 from pcbflow.validation import (
     VALIDATION_TASK_KIND,
     ProjectCopyLimitError,
@@ -175,3 +179,48 @@ def test_validation_rejects_project_over_file_limit(
         assert error.code == "PROJECT_FILE_LIMIT_EXCEEDED"
     else:
         raise AssertionError("expected ProjectCopyLimitError")
+
+
+def test_expired_running_validation_is_completed_after_container_restart(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "restart-source"
+    source.mkdir()
+    (source / "board.kicad_sch").write_text("schematic", encoding="utf-8")
+    (source / "board.kicad_pcb").write_text("board", encoding="utf-8")
+    fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "kicad"
+    settings = Settings.from_env({"PCBFLOW_DATA_DIR": str(tmp_path / "data")})
+    fake_kicad = FakeKicad(fixture_dir, source)
+    first = build_container(settings, kicad_override=fake_kicad, clock=lambda: NOW)
+    project = first.projects.create("Controller", source, "restart-project")
+    task = first.validation.enqueue(project.id, "restart-validation")
+    lease = first.tasks.claim_next("crashed-worker", NOW, 1)
+    assert lease is not None
+    first.tasks.start(task.id, lease.lease_token)
+
+    first.dispose()
+
+    after_expiry = lease.lease_expires_at + timedelta(seconds=1)
+    second = build_container(
+        settings,
+        kicad_override=fake_kicad,
+        clock=lambda: after_expiry,
+    )
+    try:
+        assert second.worker.run_once()
+        completed = second.tasks.get(task.id)
+        assert completed.status is TaskStatus.SUCCEEDED
+        assert completed.attempt_count == 2
+        assert len(second.evidence.list_for_project(project.id)) == 2
+        with second.sessions() as session:
+            attempts = session.scalars(
+                select(TaskAttemptRow)
+                .where(TaskAttemptRow.task_id == task.id)
+                .order_by(TaskAttemptRow.attempt_number)
+            ).all()
+        assert [attempt.attempt_number for attempt in attempts] == [1, 2]
+        assert attempts[0].finished_at is not None
+        assert attempts[0].outcome == "lease_expired"
+        assert attempts[1].outcome == "succeeded"
+    finally:
+        second.dispose()
