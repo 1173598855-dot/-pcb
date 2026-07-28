@@ -34,3 +34,18 @@ def test_settings_create_runtime_directories(tmp_path: Path) -> None:
 
     assert settings.data_dir.is_dir()
     assert settings.artifact_dir.is_dir()
+
+
+def test_settings_parse_validation_limits_and_remote_mode(tmp_path: Path) -> None:
+    settings = Settings.from_env(
+        {
+            "PCBFLOW_DATA_DIR": str(tmp_path / "runtime"),
+            "PCBFLOW_MAX_PROJECT_FILES": "321",
+            "PCBFLOW_MAX_PROJECT_BYTES": "654321",
+            "PCBFLOW_REMOTE_MODE": "true",
+        }
+    )
+
+    assert settings.max_project_files == 321
+    assert settings.max_project_bytes == 654321
+    assert settings.remote_mode is True

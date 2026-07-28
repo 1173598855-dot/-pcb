@@ -112,6 +112,14 @@ class ProjectRepository:
         self._sessions = sessions
 
     def create(self, name: str, source_path: Path, idempotency_key: str) -> Project:
+        project, _created = self.create_with_status(
+            name, source_path, idempotency_key
+        )
+        return project
+
+    def create_with_status(
+        self, name: str, source_path: Path, idempotency_key: str
+    ) -> tuple[Project, bool]:
         resolved = source_path.resolve(strict=True)
         if not resolved.is_dir():
             raise ValueError("project source must be a directory")
@@ -122,7 +130,7 @@ class ProjectRepository:
             if row is not None:
                 if row.name != name or Path(row.source_path) != resolved:
                     raise IdempotencyConflictError(idempotency_key)
-                return _project(row)
+                return _project(row), False
             row = ProjectRow(
                 id=new_id("prj"),
                 name=name,
@@ -131,7 +139,7 @@ class ProjectRepository:
                 created_at=utc_now(),
             )
             session.add(row)
-        return _project(row)
+        return _project(row), True
 
     def get(self, project_id: str) -> Project:
         with self._sessions() as session:

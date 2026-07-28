@@ -15,6 +15,9 @@ class Settings:
     task_lease_seconds: int = 60
     process_timeout_seconds: int = 120
     max_process_output_bytes: int = 2_000_000
+    max_project_files: int = 10_000
+    max_project_bytes: int = 1_000_000_000
+    remote_mode: bool = False
 
     @classmethod
     def from_env(
@@ -44,6 +47,14 @@ class Settings:
             max_process_output_bytes=int(
                 values.get("PCBFLOW_MAX_PROCESS_OUTPUT_BYTES", "2000000")
             ),
+            max_project_files=int(
+                values.get("PCBFLOW_MAX_PROJECT_FILES", "10000")
+            ),
+            max_project_bytes=int(
+                values.get("PCBFLOW_MAX_PROJECT_BYTES", "1000000000")
+            ),
+            remote_mode=values.get("PCBFLOW_REMOTE_MODE", "false").lower()
+            in {"1", "true", "yes", "on"},
         )
 
     def ensure_directories(self) -> None:
