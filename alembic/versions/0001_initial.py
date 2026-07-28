@@ -96,6 +96,7 @@ def upgrade() -> None:
         sa.Column("subject", sa.Text(), nullable=False),
         sa.Column("verdict", sa.String(32), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.UniqueConstraint("task_id", "kind", name="uq_evidence_task_kind"),
     )
     op.create_index("ix_evidence_project_id", "evidence", ["project_id"])
     op.create_index("ix_evidence_task_id", "evidence", ["task_id"])
@@ -126,6 +127,13 @@ def upgrade() -> None:
         sa.Column("message", sa.Text(), nullable=False),
         sa.Column("status", sa.String(32), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.UniqueConstraint(
+            "evidence_id",
+            "rule_id",
+            "subject",
+            "message",
+            name="uq_finding_evidence_identity",
+        ),
     )
     op.create_index(
         "ix_findings_project_status", "findings", ["project_id", "status"]

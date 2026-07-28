@@ -87,6 +87,9 @@ class ArtifactRow(Base):
 
 class EvidenceRow(Base):
     __tablename__ = "evidence"
+    __table_args__ = (
+        UniqueConstraint("task_id", "kind", name="uq_evidence_task_kind"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     project_id: Mapped[str] = mapped_column(
@@ -106,7 +109,16 @@ class EvidenceRow(Base):
 
 class FindingRow(Base):
     __tablename__ = "findings"
-    __table_args__ = (Index("ix_findings_project_status", "project_id", "status"),)
+    __table_args__ = (
+        Index("ix_findings_project_status", "project_id", "status"),
+        UniqueConstraint(
+            "evidence_id",
+            "rule_id",
+            "subject",
+            "message",
+            name="uq_finding_evidence_identity",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     project_id: Mapped[str] = mapped_column(

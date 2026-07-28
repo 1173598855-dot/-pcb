@@ -69,3 +69,29 @@ class NormalizedFinding:
 class ValidationReport:
     kind: str
     findings: tuple[NormalizedFinding, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Evidence:
+    id: str
+    project_id: str
+    task_id: str
+    kind: str
+    artifact_digest: str
+    subject: str
+    verdict: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class Finding:
+    id: str
+    project_id: str
+    task_id: str
+    evidence_id: str
+    rule_id: str
+    severity: str
+    subject: str
+    message: str
+    status: str
+    created_at: datetime

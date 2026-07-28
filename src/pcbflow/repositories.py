@@ -9,8 +9,26 @@ from uuid import uuid4
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from pcbflow.domain import Project, Task, TaskLease, TaskStatus, new_id, utc_now
-from pcbflow.tables import ProjectRow, TaskAttemptRow, TaskRow
+from pcbflow.artifacts import ArtifactDescriptor
+from pcbflow.domain import (
+    Evidence,
+    Finding,
+    NormalizedFinding,
+    Project,
+    Task,
+    TaskLease,
+    TaskStatus,
+    new_id,
+    utc_now,
+)
+from pcbflow.tables import (
+    ArtifactRow,
+    EvidenceRow,
+    FindingRow,
+    ProjectRow,
+    TaskAttemptRow,
+    TaskRow,
+)
 
 
 class ProjectNotFoundError(LookupError):
@@ -26,6 +44,10 @@ class TaskNotFoundError(LookupError):
 
 
 class StaleLeaseError(RuntimeError):
+    pass
+
+
+class EvidenceConflictError(RuntimeError):
     pass
 
 
@@ -54,6 +76,34 @@ def _task(row: TaskRow) -> Task:
         last_error_code=row.last_error_code,
         created_at=_utc(row.created_at),
         updated_at=_utc(row.updated_at),
+    )
+
+
+def _evidence(row: EvidenceRow) -> Evidence:
+    return Evidence(
+        id=row.id,
+        project_id=row.project_id,
+        task_id=row.task_id,
+        kind=row.kind,
+        artifact_digest=row.artifact_digest,
+        subject=row.subject,
+        verdict=row.verdict,
+        created_at=_utc(row.created_at),
+    )
+
+
+def _finding(row: FindingRow) -> Finding:
+    return Finding(
+        id=row.id,
+        project_id=row.project_id,
+        task_id=row.task_id,
+        evidence_id=row.evidence_id,
+        rule_id=row.rule_id,
+        severity=row.severity,
+        subject=row.subject,
+        message=row.message,
+        status=row.status,
+        created_at=_utc(row.created_at),
     )
 
 
@@ -351,3 +401,131 @@ class TaskRepository:
                 )
                 .values(finished_at=now, outcome=outcome, error_code=error_code)
             )
+
+
+class EvidenceRepository:
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+
+    def add_report(
+        self,
+        project_id: str,
+        task_id: str,
+        descriptor: ArtifactDescriptor,
+        kind: str,
+        subject: str,
+        verdict: str,
+    ) -> Evidence:
+        with self._sessions.begin() as session:
+            artifact = session.get(ArtifactRow, descriptor.digest)
+            if artifact is None:
+                session.add(
+                    ArtifactRow(
+                        digest=descriptor.digest,
+                        size=descriptor.size,
+                        media_type=descriptor.media_type,
+                        storage_path=str(descriptor.path),
+                        created_at=utc_now(),
+                    )
+                )
+            elif (
+                artifact.size != descriptor.size
+                or artifact.media_type != descriptor.media_type
+                or Path(artifact.storage_path) != descriptor.path
+            ):
+                raise EvidenceConflictError(descriptor.digest)
+
+            row = session.scalar(
+                select(EvidenceRow).where(
+                    EvidenceRow.task_id == task_id,
+                    EvidenceRow.kind == kind,
+                )
+            )
+            if row is not None:
+                if (
+                    row.project_id != project_id
+                    or row.artifact_digest != descriptor.digest
+                    or row.subject != subject
+                    or row.verdict != verdict
+                ):
+                    raise EvidenceConflictError(f"{task_id}:{kind}")
+                return _evidence(row)
+            row = EvidenceRow(
+                id=new_id("evd"),
+                project_id=project_id,
+                task_id=task_id,
+                kind=kind,
+                artifact_digest=descriptor.digest,
+                subject=subject,
+                verdict=verdict,
+                created_at=utc_now(),
+            )
+            session.add(row)
+        return _evidence(row)
+
+    def list_for_project(self, project_id: str) -> list[Evidence]:
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(EvidenceRow)
+                .where(EvidenceRow.project_id == project_id)
+                .order_by(EvidenceRow.created_at, EvidenceRow.id)
+            ).all()
+            return [_evidence(row) for row in rows]
+
+
+class FindingRepository:
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+
+    def add_many(
+        self,
+        project_id: str,
+        task_id: str,
+        evidence_id: str,
+        findings: tuple[NormalizedFinding, ...],
+    ) -> list[Finding]:
+        result: list[Finding] = []
+        with self._sessions.begin() as session:
+            evidence = session.get(EvidenceRow, evidence_id)
+            if (
+                evidence is None
+                or evidence.project_id != project_id
+                or evidence.task_id != task_id
+            ):
+                raise EvidenceConflictError(evidence_id)
+            for finding in findings:
+                row = session.scalar(
+                    select(FindingRow).where(
+                        FindingRow.evidence_id == evidence_id,
+                        FindingRow.rule_id == finding.rule_id,
+                        FindingRow.subject == finding.subject,
+                        FindingRow.message == finding.message,
+                    )
+                )
+                if row is None:
+                    row = FindingRow(
+                        id=new_id("fnd"),
+                        project_id=project_id,
+                        task_id=task_id,
+                        evidence_id=evidence_id,
+                        rule_id=finding.rule_id,
+                        severity=finding.severity,
+                        subject=finding.subject,
+                        message=finding.message,
+                        status="open",
+                        created_at=utc_now(),
+                    )
+                    session.add(row)
+                elif row.severity != finding.severity:
+                    raise EvidenceConflictError(finding.rule_id)
+                result.append(_finding(row))
+        return result
+
+    def list_for_project(self, project_id: str) -> list[Finding]:
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(FindingRow)
+                .where(FindingRow.project_id == project_id)
+                .order_by(FindingRow.created_at, FindingRow.id)
+            ).all()
+            return [_finding(row) for row in rows]

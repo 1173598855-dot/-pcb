@@ -9,7 +9,7 @@ from pcbflow.repositories import (
     StaleLeaseError,
     TaskRepository,
 )
-from pcbflow.tasks import RetryableTaskError, Worker
+from pcbflow.tasks import RetryableTaskError, TerminalTaskError, Worker
 
 NOW = datetime(2026, 7, 29, 1, 0, tzinfo=UTC)
 
@@ -80,14 +80,19 @@ def test_worker_completes_registered_handler(
     worker = Worker(
         task_repository,
         "worker-a",
-        {"double": lambda payload: {"value": int(payload["value"]) * 2}},
+        {
+            "double": lambda lease: {
+                "value": int(lease.payload["value"]) * 2,
+                "task_id": lease.task_id,
+            }
+        },
         lambda: NOW,
         30,
     )
 
     assert worker.run_once()
     assert task_repository.get(task.id).status is TaskStatus.SUCCEEDED
-    assert task_repository.get(task.id).result == {"value": 8}
+    assert task_repository.get(task.id).result == {"value": 8, "task_id": task.id}
     assert not worker.run_once()
 
 
@@ -96,7 +101,7 @@ def test_worker_marks_retryable_failure(
 ) -> None:
     task = task_repository.enqueue("unstable", {}, "unstable-1", None)
 
-    def fail(_payload):
+    def fail(_lease):
         raise RetryableTaskError("TOOL_BUSY", "tool is busy")
 
     worker = Worker(
@@ -123,3 +128,25 @@ def test_worker_marks_unknown_kind_terminal(
     failed = task_repository.get(task.id)
     assert failed.status is TaskStatus.FAILED_TERMINAL
     assert failed.last_error_code == "UNKNOWN_TASK_KIND"
+
+
+def test_worker_preserves_declared_terminal_error_code(
+    task_repository: TaskRepository,
+) -> None:
+    task = task_repository.enqueue("invalid", {}, "invalid-1", None)
+
+    def fail(_lease):
+        raise TerminalTaskError("INVALID_PROJECT", "project cannot be read")
+
+    worker = Worker(
+        task_repository,
+        "worker-a",
+        {"invalid": fail},
+        lambda: NOW,
+        30,
+    )
+
+    assert worker.run_once()
+    failed = task_repository.get(task.id)
+    assert failed.status is TaskStatus.FAILED_TERMINAL
+    assert failed.last_error_code == "INVALID_PROJECT"

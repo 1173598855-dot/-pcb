@@ -5,14 +5,21 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
+from pcbflow.domain import TaskLease
 from pcbflow.repositories import TaskRepository
 
 logger = logging.getLogger(__name__)
 
-TaskHandler = Callable[[dict[str, Any]], dict[str, Any]]
+TaskHandler = Callable[[TaskLease], dict[str, Any]]
 
 
 class RetryableTaskError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class TerminalTaskError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
@@ -47,10 +54,14 @@ class Worker:
             )
             return True
         try:
-            result = handler(lease.payload)
+            result = handler(lease)
         except RetryableTaskError as error:
             self._repository.fail(
                 lease.task_id, lease.lease_token, error.code, True
+            )
+        except TerminalTaskError as error:
+            self._repository.fail(
+                lease.task_id, lease.lease_token, error.code, False
             )
         except Exception:
             logger.exception("Unhandled task error", extra={"task_id": lease.task_id})
