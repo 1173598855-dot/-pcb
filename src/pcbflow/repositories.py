@@ -296,13 +296,14 @@ class TaskRepository:
                 )
         return None
 
-    def start(self, task_id: str, lease_token: str) -> None:
+    def start(self, task_id: str, lease_token: str, now: datetime) -> None:
         self._transition_with_lease(
             task_id,
             lease_token,
             [TaskStatus.LEASED],
+            now,
             status=TaskStatus.RUNNING.value,
-            updated_at=utc_now(),
+            updated_at=now,
         )
 
     def complete(
@@ -310,9 +311,9 @@ class TaskRepository:
         task_id: str,
         lease_token: str,
         result: dict[str, Any],
+        now: datetime,
     ) -> None:
         json.dumps(result, sort_keys=True, allow_nan=False)
-        now = utc_now()
         self._finish_attempt(
             task_id,
             lease_token,
@@ -330,8 +331,8 @@ class TaskRepository:
         lease_token: str,
         error_code: str,
         retryable: bool,
+        now: datetime,
     ) -> None:
-        now = utc_now()
         status = (
             TaskStatus.RETRY_WAIT.value
             if retryable
@@ -353,6 +354,7 @@ class TaskRepository:
         task_id: str,
         lease_token: str,
         allowed: list[TaskStatus],
+        now: datetime,
         **values: Any,
     ) -> None:
         with self._sessions.begin() as session:
@@ -362,12 +364,28 @@ class TaskRepository:
                     TaskRow.id == task_id,
                     TaskRow.lease_token == lease_token,
                     TaskRow.status.in_([status.value for status in allowed]),
+                    TaskRow.lease_expires_at.is_not(None),
+                    TaskRow.lease_expires_at > now,
                 )
                 .values(**values, version=TaskRow.version + 1)
                 .execution_options(synchronize_session=False)
             )
             if changed.rowcount != 1:
                 raise StaleLeaseError(task_id)
+
+    def assert_active(self, task_id: str, lease_token: str, now: datetime) -> None:
+        with self._sessions() as session:
+            active = session.scalar(
+                select(TaskRow.id).where(
+                    TaskRow.id == task_id,
+                    TaskRow.lease_token == lease_token,
+                    TaskRow.status == TaskStatus.RUNNING.value,
+                    TaskRow.lease_expires_at.is_not(None),
+                    TaskRow.lease_expires_at > now,
+                )
+            )
+        if active is None:
+            raise StaleLeaseError(task_id)
 
     def _finish_attempt(
         self,
@@ -387,6 +405,8 @@ class TaskRepository:
                     TaskRow.status.in_(
                         [TaskStatus.LEASED.value, TaskStatus.RUNNING.value]
                     ),
+                    TaskRow.lease_expires_at.is_not(None),
+                    TaskRow.lease_expires_at > now,
                 )
                 .values(
                     **values,

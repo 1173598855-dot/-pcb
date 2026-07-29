@@ -46,28 +46,38 @@ class Worker:
         )
         if lease is None:
             return False
-        self._repository.start(lease.task_id, lease.lease_token)
+        self._repository.start(lease.task_id, lease.lease_token, self._clock())
         handler = self._handlers.get(lease.kind)
         if handler is None:
             self._repository.fail(
-                lease.task_id, lease.lease_token, "UNKNOWN_TASK_KIND", False
+                lease.task_id,
+                lease.lease_token,
+                "UNKNOWN_TASK_KIND",
+                False,
+                self._clock(),
             )
             return True
         try:
             result = handler(lease)
         except RetryableTaskError as error:
             self._repository.fail(
-                lease.task_id, lease.lease_token, error.code, True
+                lease.task_id, lease.lease_token, error.code, True, self._clock()
             )
         except TerminalTaskError as error:
             self._repository.fail(
-                lease.task_id, lease.lease_token, error.code, False
+                lease.task_id, lease.lease_token, error.code, False, self._clock()
             )
         except Exception:
             logger.exception("Unhandled task error", extra={"task_id": lease.task_id})
             self._repository.fail(
-                lease.task_id, lease.lease_token, "UNHANDLED_TASK_ERROR", False
+                lease.task_id,
+                lease.lease_token,
+                "UNHANDLED_TASK_ERROR",
+                False,
+                self._clock(),
             )
         else:
-            self._repository.complete(lease.task_id, lease.lease_token, result)
+            self._repository.complete(
+                lease.task_id, lease.lease_token, result, self._clock()
+            )
         return True

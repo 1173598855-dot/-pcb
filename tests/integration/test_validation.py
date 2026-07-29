@@ -196,7 +196,7 @@ def test_expired_running_validation_is_completed_after_container_restart(
     task = first.validation.enqueue(project.id, "restart-validation")
     lease = first.tasks.claim_next("crashed-worker", NOW, 1)
     assert lease is not None
-    first.tasks.start(task.id, lease.lease_token)
+    first.tasks.start(task.id, lease.lease_token, NOW)
 
     first.dispose()
 

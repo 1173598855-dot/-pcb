@@ -64,13 +64,89 @@ def test_expired_lease_is_reclaimed_and_old_token_is_fenced(
     assert first.lease_token != second.lease_token
     assert second.attempt_number == 2
     with pytest.raises(StaleLeaseError):
-        task_repository.complete(task.id, first.lease_token, {})
+        task_repository.complete(
+            task.id, first.lease_token, {}, NOW + timedelta(seconds=11)
+        )
 
-    task_repository.start(task.id, second.lease_token)
-    task_repository.complete(task.id, second.lease_token, {"evidence": 2})
+    task_repository.start(task.id, second.lease_token, NOW + timedelta(seconds=11))
+    task_repository.complete(
+        task.id,
+        second.lease_token,
+        {"evidence": 2},
+        NOW + timedelta(seconds=11),
+    )
     completed = task_repository.get(task.id)
     assert completed.status is TaskStatus.SUCCEEDED
     assert completed.result == {"evidence": 2}
+
+
+def test_expired_token_cannot_transition_or_remain_active(
+    session_factory: sessionmaker[Session],
+) -> None:
+    repository = TaskRepository(session_factory)
+    task = repository.enqueue("example", {}, "expired-transition", None)
+    claimed_at = datetime(2026, 7, 29, tzinfo=UTC)
+    lease = repository.claim_next("worker-a", claimed_at, 1)
+    assert lease is not None
+    expired_at = claimed_at + timedelta(seconds=1)
+
+    with pytest.raises(StaleLeaseError):
+        repository.start(task.id, lease.lease_token, expired_at)
+
+    with pytest.raises(StaleLeaseError):
+        repository.complete(task.id, lease.lease_token, {"ok": True}, expired_at)
+
+    with pytest.raises(StaleLeaseError):
+        repository.fail(
+            task.id,
+            lease.lease_token,
+            "EXPIRED",
+            False,
+            expired_at,
+        )
+
+    with pytest.raises(StaleLeaseError):
+        repository.assert_active(task.id, lease.lease_token, expired_at)
+
+
+def test_worker_passes_its_clock_to_fenced_transitions(
+    task_repository: TaskRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = task_repository.enqueue("double", {"value": 4}, "clocked-double", None)
+    calls: list[datetime] = []
+    clock = {"now": NOW}
+    original_start = task_repository.start
+    original_complete = task_repository.complete
+
+    def now() -> datetime:
+        current = clock["now"]
+        clock["now"] = current + timedelta(seconds=1)
+        return current
+
+    def record_start(task_id: str, lease_token: str, now: datetime) -> None:
+        calls.append(now)
+        original_start(task_id, lease_token, now)
+
+    def record_complete(
+        task_id: str, lease_token: str, result: dict[str, object], now: datetime
+    ) -> None:
+        calls.append(now)
+        original_complete(task_id, lease_token, result, now)
+
+    monkeypatch.setattr(task_repository, "start", record_start)
+    monkeypatch.setattr(task_repository, "complete", record_complete)
+    worker = Worker(
+        task_repository,
+        "worker-a",
+        {"double": lambda lease: {"value": int(lease.payload["value"]) * 2}},
+        now,
+        30,
+    )
+
+    assert worker.run_once()
+    assert calls == [NOW + timedelta(seconds=1), NOW + timedelta(seconds=2)]
+    assert task_repository.get(task.id).status is TaskStatus.SUCCEEDED
 
 
 def test_worker_completes_registered_handler(
