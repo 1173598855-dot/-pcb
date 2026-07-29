@@ -102,6 +102,20 @@ def test_create_persists_batch_commands_task_proposal_and_outbox_once(
         assert session.scalar(select(func.count()).select_from(ChangeProposalRow)) == 1
         assert session.scalar(select(func.count()).select_from(TaskRow)) >= 1
         assert session.scalar(select(func.count()).select_from(OutboxEventRow)) >= 1
+        events = session.scalars(
+            select(OutboxEventRow).where(
+                OutboxEventRow.aggregate_type == "change_proposal",
+                OutboxEventRow.aggregate_id == first.id,
+                OutboxEventRow.event_type == "proposal.queued",
+            )
+        ).all()
+
+    assert len(events) == 1
+    assert events[0].payload_json == {
+        "project_id": first.project_id,
+        "command_batch_id": first.command_batch_id,
+        "task_id": first.task_id,
+    }
 
 
 def test_create_rejects_same_key_with_different_canonical_input(
@@ -111,10 +125,78 @@ def test_create_rejects_same_key_with_different_canonical_input(
     value = _batch(project, frozen_requirement_set)
     key = str(value["idempotency_key"])
     container.proposals.create(json.dumps(value).encode(), key)
-    value["intent"] = "A different intent"
+    commands = value["commands"]
+    assert isinstance(commands, list)
+    command = commands[0]
+    assert isinstance(command, dict)
+    operation = command["operation"]
+    assert isinstance(operation, dict)
+    payload = operation["payload"]
+    assert isinstance(payload, dict)
+    payload["value"] = "RED"
 
     with pytest.raises(IdempotencyConflictError):
         container.proposals.create(json.dumps(value).encode(), key)
+
+
+def test_create_replays_existing_proposal_after_project_revision_advances(
+    container, frozen_requirement_set
+) -> None:
+    project = container.projects.get(frozen_requirement_set.project_id)
+    value = _batch(project, frozen_requirement_set)
+    data = json.dumps(value).encode()
+
+    first = container.proposals.create(data, str(value["idempotency_key"]))
+    advanced = container.projects.compare_and_set_revision(
+        project.id,
+        expected_revision=project.current_revision,
+        new_revision="git:" + "f" * 40,
+        snapshot_digest="sha256:" + "0" * 64,
+        expected_version=project.version,
+    )
+
+    assert advanced.current_revision != project.current_revision
+    repeated = container.proposals.create(data, str(value["idempotency_key"]))
+
+    assert repeated == first
+
+
+def test_command_batch_get_rejects_tampered_invalid_json_shape(
+    container, frozen_requirement_set
+) -> None:
+    project = container.projects.get(frozen_requirement_set.project_id)
+    value = _batch(project, frozen_requirement_set)
+    proposal = container.proposals.create(
+        json.dumps(value).encode(), str(value["idempotency_key"])
+    )
+
+    with container.sessions.begin() as session:
+        row = session.get(DesignCommandBatchRow, proposal.command_batch_id)
+        assert row is not None
+        row.commands_json = [{}]
+
+    with pytest.raises(RuntimeError, match="^stored command batch is invalid$"):
+        container.command_batches.get(proposal.command_batch_id)
+
+
+def test_command_batch_get_rejects_tampered_canonical_digest(
+    container, frozen_requirement_set
+) -> None:
+    project = container.projects.get(frozen_requirement_set.project_id)
+    value = _batch(project, frozen_requirement_set)
+    proposal = container.proposals.create(
+        json.dumps(value).encode(), str(value["idempotency_key"])
+    )
+
+    with container.sessions.begin() as session:
+        row = session.get(DesignCommandBatchRow, proposal.command_batch_id)
+        assert row is not None
+        row.canonical_digest = "sha256:" + "0" * 64
+
+    with pytest.raises(
+        RuntimeError, match="^stored command batch digest mismatch$"
+    ):
+        container.command_batches.get(proposal.command_batch_id)
 
 
 def test_create_concurrent_replay_serializes_before_inserting_batch(
