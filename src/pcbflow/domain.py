@@ -38,6 +38,18 @@ class Project:
     version: int
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectRevision:
+    id: str
+    project_id: str
+    revision: str
+    parent_revision: str | None
+    snapshot_digest: str
+    requirement_set_id: str | None
+    command_batch_id: str | None
+    created_at: datetime
+
+
 class TaskStatus(StrEnum):
     QUEUED = "queued"
     LEASED = "leased"
