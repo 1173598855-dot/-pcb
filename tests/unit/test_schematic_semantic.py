@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pcbflow.schematic.semantic import inspect_schematic, parse_schematic
+import pytest
+
+from pcbflow.schematic.semantic import (
+    KicadSemanticError,
+    inspect_schematic,
+    parse_schematic,
+)
 
 
 def test_inspect_uses_kicad_uuid_as_symbol_identity() -> None:
@@ -56,3 +62,68 @@ def test_child_sheet_uuid_scopes_its_contained_symbols(tmp_path: Path) -> None:
     assert child_sheet.ref.sheet_uuid == "00000000-0000-0000-0000-000000000010"
     assert child_sheet.ref.object_uuid == "00000000-0000-0000-0000-000000000011"
     assert parsed.document.symbols[0].ref.sheet_uuid == child_sheet.ref.object_uuid
+
+
+def test_reused_child_file_creates_symbols_in_each_sheet_instance(tmp_path: Path) -> None:
+    (tmp_path / "root.kicad_sch").write_text(
+        """(kicad_sch
+  (version 20250114)
+  (uuid 00000000-0000-0000-0000-000000000020)
+  (sheet
+    (uuid 00000000-0000-0000-0000-000000000021)
+    (property "Sheetname" "First")
+    (property "Sheetfile" "child.kicad_sch"))
+  (sheet
+    (uuid 00000000-0000-0000-0000-000000000022)
+    (property "Sheetname" "Second")
+    (property "Sheetfile" "child.kicad_sch")))
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "child.kicad_sch").write_text(
+        """(kicad_sch
+  (version 20250114)
+  (uuid 00000000-0000-0000-0000-000000000023)
+  (symbol (lib_id "Device:R") (at 1 2 0) (unit 1)
+    (uuid 00000000-0000-0000-0000-000000000024)
+    (property "Reference" "R1")
+    (property "Value" "1k")))
+""",
+        encoding="utf-8",
+    )
+
+    parsed = parse_schematic(tmp_path)
+
+    assert len(parsed.document.sheets) == 3
+    assert {symbol.ref.sheet_uuid for symbol in parsed.document.symbols} == {
+        "00000000-0000-0000-0000-000000000021",
+        "00000000-0000-0000-0000-000000000022",
+    }
+    assert all(parsed.location(symbol.ref).file_path.name == "child.kicad_sch" for symbol in parsed.document.symbols)
+
+
+def test_wire_based_connectivity_is_rejected_until_graph_extraction_exists(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "board.kicad_sch").write_text(
+        """(kicad_sch
+  (version 20250114)
+  (uuid 00000000-0000-0000-0000-000000000030)
+  (symbol (lib_id "Device:R") (at 1 2 0) (unit 1)
+    (uuid 00000000-0000-0000-0000-000000000031)
+    (property "Reference" "R1")
+    (property "Value" "1k")
+    (pin "1" (uuid 00000000-0000-0000-0000-000000000032)))
+  (wire (pts (xy 1 2) (xy 3 2))
+    (stroke (width 0) (type default))
+    (uuid 00000000-0000-0000-0000-000000000033))
+  (junction (at 3 2) (diameter 0) (color 0 0 0 0)
+    (uuid 00000000-0000-0000-0000-000000000034))
+  (label "NET" (at 3 2 0)
+    (uuid 00000000-0000-0000-0000-000000000035)))
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KicadSemanticError, match="wire/junction"):
+        parse_schematic(tmp_path)

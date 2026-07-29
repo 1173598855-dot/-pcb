@@ -91,6 +91,7 @@ def build_semantic_diff(
             _index_footprints(before.footprints),
             _index_footprints(after.footprints),
             changed_symbol_footprints,
+            set(before_symbols) & set(after_symbols),
         )
     )
 
@@ -220,6 +221,7 @@ def _footprint_assignment_changes(
     before: dict[str, object],
     after: dict[str, object],
     already_changed: set[str],
+    unchanged_symbol_identity: set[str],
 ) -> list[tuple[ChangeKind, SchematicObjectRef, object | None, object | None, str | None]]:
     changes: list[tuple[ChangeKind, SchematicObjectRef, object | None, object | None, str | None]] = []
     for key in sorted(set(before) | set(after)):
@@ -227,7 +229,11 @@ def _footprint_assignment_changes(
         current = after.get(key)
         old_library_id = None if previous is None else previous.library_id
         new_library_id = None if current is None else current.library_id
-        if key not in already_changed and old_library_id != new_library_id:
+        if (
+            key in unchanged_symbol_identity
+            and key not in already_changed
+            and old_library_id != new_library_id
+        ):
             reference = current.symbol_ref if current is not None else previous.symbol_ref
             changes.append(
                 (

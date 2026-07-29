@@ -129,6 +129,22 @@ class _FileRecord:
     sheet_uuid: str
 
 
+@dataclass(frozen=True, slots=True)
+class _SheetLink:
+    parent_path: Path
+    child_path: Path
+    node: CstList
+
+
+@dataclass(frozen=True, slots=True)
+class _SheetInstance:
+    record: _FileRecord
+    ref: SchematicObjectRef
+    node: CstList
+    parent_sheet_uuid: str | None
+    location_record: _FileRecord
+
+
 def object_ref_key(reference: SchematicObjectRef) -> str:
     pin = "" if reference.pin_number is None else f":{reference.pin_number}"
     return (
@@ -151,13 +167,15 @@ def parse_schematic(project: Path) -> ParsedSchematic:
 
     paths = _schematic_paths(project_root)
     records = {path: _parse_file(path, project_root) for path in paths}
-    incoming = _resolve_hierarchy(records, project_root)
-    root_paths = sorted(set(records) - set(incoming), key=lambda path: path.as_posix())
+    links = _resolve_hierarchy(records, project_root)
+    root_paths = sorted(
+        set(records) - {link.child_path for link in links},
+        key=lambda path: path.as_posix(),
+    )
     if len(root_paths) != 1:
         raise KicadSemanticError("schematic hierarchy requires exactly one root")
     root_path = root_paths[0]
-    _validate_hierarchy_connected(root_path, records, incoming)
-    sheet_contexts = _sheet_contexts(root_path, records, incoming)
+    instances = _sheet_instances(root_path, records, links)
 
     locations: dict[str, CstLocation] = {}
     sheets: list[Sheet] = []
@@ -166,29 +184,23 @@ def parse_schematic(project: Path) -> ParsedSchematic:
     nets: list[NetConnectivity] = []
     footprints: list[FootprintAssignment] = []
 
-    for path in sorted(records, key=lambda item: item.as_posix()):
-        record = records[path]
-        parent = incoming.get(path)
-        sheet_context = sheet_contexts[path]
-        if parent is None:
-            sheet_ref = _reference("sheet", sheet_context, sheet_context)
-            sheet_node = record.cst.root
+    for instance in instances:
+        record = instance.record
+        sheet_ref = instance.ref
+        sheet_node = instance.node
+        parent_sheet_uuid = instance.parent_sheet_uuid
+        if parent_sheet_uuid is None:
             parent_sheet_uuid = None
-            name = path.stem
+            name = record.path.stem
             ports: tuple[HierarchicalPort, ...] = ()
-            location_record = record
         else:
-            parent_record, sheet_node = parent
-            parent_sheet_uuid = sheet_contexts[parent_record.path]
-            sheet_ref = _reference("sheet", parent_sheet_uuid, sheet_context)
-            name = _sheet_name(sheet_node, path.stem)
+            name = _sheet_name(sheet_node, record.path.stem)
             ports = _extract_ports(
-                sheet_node, parent_record, parent_sheet_uuid, locations
+                sheet_node, instance.location_record, parent_sheet_uuid, locations
             )
-            location_record = parent_record
         locations[object_ref_key(sheet_ref)] = CstLocation(
-            file_path=location_record.path,
-            document=location_record.cst,
+            file_path=instance.location_record.path,
+            document=instance.location_record.cst,
             node=sheet_node,
         )
         sheets.append(
@@ -201,17 +213,15 @@ def parse_schematic(project: Path) -> ParsedSchematic:
             )
         )
         file_symbols, file_footprints = _extract_symbols(
-            record, sheet_context, locations
+            record, sheet_ref.object_uuid, locations
         )
         symbols.extend(file_symbols)
         footprints.extend(file_footprints)
-        labels.extend(_extract_labels(record, sheet_context, locations))
-        nets.extend(_extract_nets(record, sheet_context, locations))
+        labels.extend(_extract_labels(record, sheet_ref.object_uuid, locations))
+        nets.extend(_extract_nets(record, sheet_ref.object_uuid, locations))
 
     root_record = records[root_path]
-    root_sheet_ref = _reference(
-        "sheet", sheet_contexts[root_path], sheet_contexts[root_path]
-    )
+    root_sheet_ref = instances[0].ref
     return ParsedSchematic(
         document=SchematicDocument(
             kicad_major=9,
@@ -264,8 +274,8 @@ def _parse_file(path: Path, project_root: Path) -> _FileRecord:
 
 def _resolve_hierarchy(
     records: dict[Path, _FileRecord], project_root: Path
-) -> dict[Path, tuple[_FileRecord, CstList]]:
-    incoming: dict[Path, tuple[_FileRecord, CstList]] = {}
+) -> tuple[_SheetLink, ...]:
+    links: list[_SheetLink] = []
     for record in records.values():
         for sheet_node in record.cst.root.find_children("sheet"):
             file_name = _property_value(sheet_node, "Sheetfile", required=True)
@@ -275,12 +285,14 @@ def _resolve_hierarchy(
                 raise KicadSemanticError(
                     f"hierarchical sheet is not a project schematic: {file_name}"
                 )
-            if child_path in incoming:
-                raise KicadSemanticError(
-                    f"hierarchical sheet has multiple parents: {child_path}"
+            links.append(
+                _SheetLink(
+                    parent_path=record.path,
+                    child_path=child_path,
+                    node=sheet_node,
                 )
-            incoming[child_path] = (record, sheet_node)
-    return incoming
+            )
+    return tuple(links)
 
 
 def _child_path(parent: Path, file_name: str, project_root: Path) -> Path:
@@ -306,52 +318,52 @@ def _child_path(parent: Path, file_name: str, project_root: Path) -> Path:
     return resolved
 
 
-def _validate_hierarchy_connected(
+def _sheet_instances(
     root: Path,
     records: dict[Path, _FileRecord],
-    incoming: dict[Path, tuple[_FileRecord, CstList]],
-) -> None:
-    children: dict[Path, list[Path]] = {path: [] for path in records}
-    for child, (parent, _) in incoming.items():
-        children[parent.path].append(child)
-    visited: set[Path] = set()
+    links: tuple[_SheetLink, ...],
+) -> tuple[_SheetInstance, ...]:
+    links_by_parent: dict[Path, list[_SheetLink]] = {path: [] for path in records}
+    for link in links:
+        links_by_parent[link.parent_path].append(link)
+    root_record = records[root]
+    root_ref = _reference("sheet", root_record.sheet_uuid, root_record.sheet_uuid)
+    instances: list[_SheetInstance] = [
+        _SheetInstance(
+            record=root_record,
+            ref=root_ref,
+            node=root_record.cst.root,
+            parent_sheet_uuid=None,
+            location_record=root_record,
+        )
+    ]
+    reachable: set[Path] = set()
     active: set[Path] = set()
 
-    def visit(path: Path) -> None:
+    def visit(instance: _SheetInstance) -> None:
+        path = instance.record.path
         if path in active:
             raise KicadSemanticError("schematic hierarchy contains a cycle")
-        if path in visited:
-            return
         active.add(path)
-        for child in children[path]:
-            visit(child)
-        active.remove(path)
-        visited.add(path)
-
-    visit(root)
-    if visited != set(records):
-        raise KicadSemanticError("schematic hierarchy is not connected to its root")
-
-
-def _sheet_contexts(
-    root: Path,
-    records: dict[Path, _FileRecord],
-    incoming: dict[Path, tuple[_FileRecord, CstList]],
-) -> dict[Path, str]:
-    contexts = {root: records[root].sheet_uuid}
-    pending = [root]
-    children: dict[Path, list[Path]] = {path: [] for path in records}
-    for child, (parent, _) in incoming.items():
-        children[parent.path].append(child)
-    while pending:
-        parent_path = pending.pop()
-        for child_path in children[parent_path]:
-            parent_record, sheet_node = incoming[child_path]
-            contexts[child_path] = _node_uuid(
-                sheet_node, parent_record.path, "hierarchical sheet"
+        reachable.add(path)
+        for link in links_by_parent[path]:
+            child_record = records[link.child_path]
+            child_uuid = _node_uuid(link.node, instance.record.path, "hierarchical sheet")
+            child_instance = _SheetInstance(
+                record=child_record,
+                ref=_reference("sheet", instance.ref.object_uuid, child_uuid),
+                node=link.node,
+                parent_sheet_uuid=instance.ref.object_uuid,
+                location_record=instance.record,
             )
-            pending.append(child_path)
-    return contexts
+            instances.append(child_instance)
+            visit(child_instance)
+        active.remove(path)
+
+    visit(instances[0])
+    if reachable != set(records):
+        raise KicadSemanticError("schematic hierarchy is not connected to its root")
+    return tuple(instances)
 
 
 def _extract_ports(
@@ -467,6 +479,16 @@ def _extract_labels(
 def _extract_nets(
     record: _FileRecord, sheet_uuid: str, locations: dict[str, CstLocation]
 ) -> tuple[NetConnectivity, ...]:
+    unsupported_graph_nodes = tuple(
+        head
+        for head in ("wire", "junction", "bus", "bus_entry")
+        if record.cst.root.find_children(head)
+    )
+    if unsupported_graph_nodes:
+        raise KicadSemanticError(
+            "wire/junction connectivity extraction is not supported: "
+            + ", ".join(unsupported_graph_nodes)
+        )
     nets: list[NetConnectivity] = []
     for node in record.cst.root.find_children("net"):
         net_uuid = _node_uuid(node, record.path, "net")

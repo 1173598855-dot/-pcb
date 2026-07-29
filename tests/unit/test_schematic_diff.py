@@ -109,3 +109,40 @@ def test_footprint_assignment_collection_change_is_reported() -> None:
     assert result.changes[0].kind is ChangeKind.FOOTPRINT_CHANGED
     assert result.changes[0].before == "LED_THT:LED_D5.0mm"
     assert result.changes[0].after == "LED_SMD:LED_0603_1608Metric"
+
+
+@pytest.mark.parametrize("direction", ["added", "removed"])
+def test_symbol_add_remove_does_not_duplicate_derived_footprint_change(
+    direction: str,
+) -> None:
+    before = _document()
+    symbol = before.symbols[0]
+    if direction == "added":
+        added_ref = symbol.ref.model_copy(
+            update={"object_uuid": "00000000-0000-0000-0000-000000000099"}
+        )
+        added_symbol = replace(symbol, ref=added_ref)
+        after = replace(
+            before,
+            symbols=before.symbols + (added_symbol,),
+            footprints=before.footprints
+            + (FootprintAssignment(added_ref, symbol.footprint or ""),),
+        )
+        kind = ChangeKind.SYMBOL_ADDED
+        reference = added_ref
+    else:
+        after = replace(before, symbols=(), footprints=())
+        kind = ChangeKind.SYMBOL_REMOVED
+        reference = symbol.ref
+    attribution = CommandAttribution(
+        command_id=f"cmd_symbol_{direction}",
+        requirement_ids=("REQ-FUNC-003",),
+        risk=RiskLevel.LOW,
+        selectors=(ChangeSelector(kind=kind, subject_ref=reference, field=None),),
+    )
+
+    result = build_semantic_diff(before, after, (attribution,))
+
+    assert [(change.kind, change.subject_ref) for change in result.changes] == [
+        (kind, reference)
+    ]
