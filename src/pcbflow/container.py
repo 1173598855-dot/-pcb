@@ -16,18 +16,21 @@ from pcbflow.db import create_engine_and_session
 from pcbflow.domain import new_id, utc_now
 from pcbflow.kicad import KicadCli, KicadPort
 from pcbflow.process import ProcessRunner
+from pcbflow.revision_store import ProjectRevisionStore
 from pcbflow.repositories import (
     EvidenceRepository,
     FindingRepository,
     ProjectRepository,
     TaskRepository,
 )
+from pcbflow.revisions import GitCli, RevisionService
 from pcbflow.tasks import Worker
 from pcbflow.validation import (
     VALIDATION_TASK_KIND,
     ValidationService,
     ValidationTaskHandler,
 )
+from pcbflow.workspaces import WorkspaceCopier
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +39,8 @@ class Container:
     engine: Engine
     sessions: sessionmaker[Session]
     projects: ProjectRepository
+    revision_store: ProjectRevisionStore
+    revisions: RevisionService
     tasks: TaskRepository
     evidence: EvidenceRepository
     findings: FindingRepository
@@ -70,6 +75,20 @@ def build_container(
     findings = FindingRepository(sessions)
     artifacts = ContentAddressedStore(settings.artifact_dir)
     runner = ProcessRunner(settings.max_process_output_bytes)
+    revision_store = ProjectRevisionStore(sessions)
+    git = GitCli(runner, timeout_seconds=settings.process_timeout_seconds)
+    workspace_copier = WorkspaceCopier(
+        max_files=settings.max_project_files,
+        max_bytes=settings.max_project_bytes,
+    )
+    revisions = RevisionService(
+        projects=projects,
+        revision_store=revision_store,
+        git=git,
+        copier=workspace_copier,
+        projects_dir=settings.projects_dir,
+        workspaces_dir=settings.workspaces_dir,
+    )
     kicad = KicadCli(
         runner,
         KicadCli.locate(settings.kicad_cli),
@@ -97,6 +116,8 @@ def build_container(
         engine=engine,
         sessions=sessions,
         projects=projects,
+        revision_store=revision_store,
+        revisions=revisions,
         tasks=tasks,
         evidence=evidence,
         findings=findings,
