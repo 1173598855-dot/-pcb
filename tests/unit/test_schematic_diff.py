@@ -190,3 +190,51 @@ def test_wire_net_name_change_is_attributed_to_one_selector(tmp_path: Path) -> N
     assert len(result.changes) == 1
     assert result.changes[0].kind is ChangeKind.NET_CONNECTIVITY_CHANGED
     assert result.changes[0].command_id == "cmd_rename_net"
+
+
+def test_wire_member_change_requires_exactly_one_net_attribution(tmp_path: Path) -> None:
+    before_project = tmp_path / "before"
+    after_project = tmp_path / "after"
+    before_project.mkdir()
+    after_project.mkdir()
+    before_source = """(kicad_sch
+  (version 20250114)
+  (uuid 00000000-0000-0000-0000-000000000100)
+  (wire (pts (xy 0 0) (xy 4 0))
+    (uuid 00000000-0000-0000-0000-000000000101)))
+"""
+    after_source = """(kicad_sch
+  (version 20250114)
+  (uuid 00000000-0000-0000-0000-000000000100)
+  (wire (pts (xy 0 0) (xy 4 0))
+    (uuid 00000000-0000-0000-0000-000000000101))
+  (wire (pts (xy 4 0) (xy 8 0))
+    (uuid 00000000-0000-0000-0000-000000000102)))
+"""
+    (before_project / "board.kicad_sch").write_text(before_source, encoding="utf-8")
+    (after_project / "board.kicad_sch").write_text(after_source, encoding="utf-8")
+    before = inspect_schematic(before_project)
+    after = inspect_schematic(after_project)
+    net = before.nets[0]
+    attribution = CommandAttribution(
+        command_id="cmd_extend_net",
+        requirement_ids=("REQ-FUNC-005",),
+        risk=RiskLevel.LOW,
+        selectors=(
+            ChangeSelector(
+                kind=ChangeKind.NET_CONNECTIVITY_CHANGED,
+                subject_ref=net.ref,
+                field=None,
+            ),
+        ),
+    )
+
+    with pytest.raises(UnattributedSemanticChangeError):
+        build_semantic_diff(before, after, ())
+    with pytest.raises(UnattributedSemanticChangeError):
+        build_semantic_diff(before, after, (attribution, attribution))
+
+    result = build_semantic_diff(before, after, (attribution,))
+
+    assert len(result.changes) == 1
+    assert result.changes[0].before["members"] != result.changes[0].after["members"]

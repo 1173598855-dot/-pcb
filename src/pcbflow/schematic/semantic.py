@@ -166,6 +166,18 @@ class _SheetInstance:
     location_record: _FileRecord
 
 
+@dataclass(frozen=True, slots=True)
+class _LibraryPin:
+    name: str
+    position: Point
+
+
+_WirePrimitive = tuple[CstList, str | None, tuple[Point, ...]]
+_JunctionPrimitive = tuple[CstList, str | None, Point]
+_GraphLabel = tuple[SchematicObjectRef, CstList, Point, str]
+_GraphObject = tuple[SchematicObjectRef, CstList, Point]
+
+
 def object_ref_key(reference: SchematicObjectRef) -> str:
     pin = "" if reference.pin_number is None else f":{reference.pin_number}"
     return (
@@ -439,8 +451,9 @@ def _extract_symbols(
         value = _required_property(property_values, "Value", record.path)
         footprint = property_values.get("Footprint") or None
         pins: list[PinReference] = []
-        for pin_node in node.find_children("pin"):
-            number = _atom(pin_node, 1, record.path, "pin number")
+        for pin_node, number, pin_name, pin_position in _instance_pin_geometry(
+            record, node
+        ):
             pin_uuid = _node_uuid(pin_node, record.path, "pin")
             pin_ref = _reference("pin", sheet_uuid, pin_uuid, number)
             locations[object_ref_key(pin_ref)] = CstLocation(
@@ -451,8 +464,8 @@ def _extract_symbols(
                     ref=pin_ref,
                     symbol_ref=ref,
                     number=number,
-                    name=number,
-                    position=_point(node, record.path),
+                    name=pin_name,
+                    position=pin_position,
                 )
             )
         symbol = Symbol(
@@ -524,12 +537,56 @@ def _extract_nets(
 def _wire_nets(
     record: _FileRecord, sheet_uuid: str, locations: dict[str, CstLocation]
 ) -> list[NetConnectivity]:
-    wires = [
-        (node, _optional_node_uuid(node, record.path, "wire"), _wire_points(node, record.path))
-        for node in record.cst.root.find_children("wire")
-    ]
+    wires = _wire_primitives(record)
     if not wires:
         return []
+    junctions = _junction_primitives(record)
+    components = _wire_components(wires, junctions)
+    labels = _graph_labels(record, sheet_uuid)
+    pins = _graph_pins(record, sheet_uuid)
+    ports = _graph_ports(record, sheet_uuid)
+    return [
+        _component_net(
+            record,
+            sheet_uuid,
+            wires,
+            indexes,
+            junctions,
+            labels,
+            pins,
+            ports,
+            locations,
+        )
+        for indexes in components
+    ]
+
+
+def _wire_primitives(
+    record: _FileRecord,
+) -> tuple[_WirePrimitive, ...]:
+    return tuple(
+        (
+            node,
+            _optional_node_uuid(node, record.path, "wire"),
+            _wire_points(node, record.path),
+        )
+        for node in record.cst.root.find_children("wire")
+    )
+
+
+def _junction_primitives(
+    record: _FileRecord,
+) -> tuple[_JunctionPrimitive, ...]:
+    return tuple(
+        (node, _optional_node_uuid(node, record.path, "junction"), _point(node, record.path))
+        for node in record.cst.root.find_children("junction")
+    )
+
+
+def _wire_components(
+    wires: tuple[_WirePrimitive, ...],
+    junctions: tuple[_JunctionPrimitive, ...],
+) -> tuple[tuple[int, ...], ...]:
     parents = list(range(len(wires)))
 
     def find(index: int) -> int:
@@ -538,114 +595,134 @@ def _wire_nets(
             index = parents[index]
         return index
 
-    def union(left: int, right: int) -> None:
-        left_root = find(left)
-        right_root = find(right)
-        if left_root != right_root:
-            parents[right_root] = left_root
+    def join(indexes: list[int]) -> None:
+        for index in indexes[1:]:
+            left, right = find(indexes[0]), find(index)
+            if left != right:
+                parents[right] = left
 
     endpoints: dict[Point, list[int]] = {}
     for index, (_, _, points) in enumerate(wires):
         for point in points:
             endpoints.setdefault(point, []).append(index)
     for indexes in endpoints.values():
-        for index in indexes[1:]:
-            union(indexes[0], index)
-
-    junctions = [
-        (
-            node,
-            _optional_node_uuid(node, record.path, "junction"),
-            _point(node, record.path),
+        join(indexes)
+    for _, _, point in junctions:
+        join(
+            [
+                index
+                for index, (_, _, points) in enumerate(wires)
+                if _point_on_wire(point, points)
+            ]
         )
-        for node in record.cst.root.find_children("junction")
-    ]
-    for _, _, junction_point in junctions:
-        touching = [
-            index
-            for index, (_, _, points) in enumerate(wires)
-            if _point_on_wire(junction_point, points)
-        ]
-        for index in touching[1:]:
-            union(touching[0], index)
-
     components: dict[int, list[int]] = {}
     for index in range(len(wires)):
         components.setdefault(find(index), []).append(index)
-    labels = _graph_labels(record, sheet_uuid)
-    pins = _graph_pins(record, sheet_uuid)
-    ports = _graph_ports(record, sheet_uuid)
-    nets: list[NetConnectivity] = []
-    for indexes in components.values():
-        component_wires = tuple(wires[index][2] for index in indexes)
+    return tuple(tuple(indexes) for indexes in components.values())
 
-        def contains(point: Point) -> bool:
-            return any(_point_on_wire(point, wire_points) for wire_points in component_wires)
 
-        component_junctions = [
-            junction
-            for junction in junctions
-            if contains(junction[2])
-        ]
-        component_labels = [
-            label for label in labels if contains(label[2])
-        ]
-        component_pins = [
-            pin for pin in pins if contains(pin[2])
-        ]
-        component_ports = [
-            port for port in ports if contains(port[2])
-        ]
-        candidates: list[tuple[str, CstList]] = [
-            (uuid, node)
-            for index in indexes
-            for node, uuid, _ in (wires[index],)
-            if uuid is not None
-        ]
-        candidates.extend(
-            (uuid, node)
-            for node, uuid, _ in component_junctions
-            if uuid is not None
-        )
-        candidates.extend((reference.object_uuid, node) for reference, node, _, _ in component_labels)
-        if not candidates:
-            candidates.extend(
-                (reference.object_uuid, node) for reference, node, _ in component_pins
-            )
-            candidates.extend(
-                (reference.object_uuid, node) for reference, node, _ in component_ports
-            )
-        if not candidates:
-            raise KicadSemanticError("wire connectivity component has no UUID anchor")
-        anchor_uuid, anchor_node = min(candidates, key=lambda item: item[0])
-        ref = _reference("net", sheet_uuid, anchor_uuid)
-        locations[object_ref_key(ref)] = CstLocation(record.path, record.cst, anchor_node)
-        members: list[str] = []
-        for index in indexes:
-            _, uuid, _ = wires[index]
-            if uuid is not None:
-                members.append(f"wire:{sheet_uuid}:{uuid}")
-        for _, uuid, _ in component_junctions:
-            if uuid is not None:
-                members.append(f"junction:{sheet_uuid}:{uuid}")
-        members.extend(object_ref_key(reference) for reference, _, _, _ in component_labels)
-        members.extend(object_ref_key(reference) for reference, _, _ in component_pins)
-        members.extend(object_ref_key(reference) for reference, _, _ in component_ports)
-        names = sorted(name for _, _, _, name in component_labels)
-        nets.append(
-            NetConnectivity(
-                ref=ref,
-                name=names[0] if names else None,
-                members=tuple(sorted(members)),
-            )
-        )
-    return nets
+def _component_net(
+    record: _FileRecord,
+    sheet_uuid: str,
+    wires: tuple[_WirePrimitive, ...],
+    indexes: tuple[int, ...],
+    junctions: tuple[_JunctionPrimitive, ...],
+    labels: tuple[_GraphLabel, ...],
+    pins: tuple[_GraphObject, ...],
+    ports: tuple[_GraphObject, ...],
+    locations: dict[str, CstLocation],
+) -> NetConnectivity:
+    component_wires = tuple(wires[index][2] for index in indexes)
+
+    def contains(point: Point) -> bool:
+        return any(_point_on_wire(point, wire_points) for wire_points in component_wires)
+
+    component_junctions = tuple(junction for junction in junctions if contains(junction[2]))
+    component_labels = tuple(label for label in labels if contains(label[2]))
+    component_pins = tuple(pin for pin in pins if contains(pin[2]))
+    component_ports = tuple(port for port in ports if contains(port[2]))
+    anchor_uuid, anchor_node = _component_anchor(
+        wires,
+        indexes,
+        component_junctions,
+        component_labels,
+        component_pins,
+        component_ports,
+    )
+    ref = _reference("net", sheet_uuid, anchor_uuid)
+    locations[object_ref_key(ref)] = CstLocation(record.path, record.cst, anchor_node)
+    return NetConnectivity(
+        ref=ref,
+        name=_component_name(component_labels),
+        members=_component_members(
+            sheet_uuid,
+            wires,
+            indexes,
+            component_junctions,
+            component_labels,
+            component_pins,
+            component_ports,
+        ),
+    )
+
+
+def _component_anchor(
+    wires: tuple[_WirePrimitive, ...],
+    indexes: tuple[int, ...],
+    junctions: tuple[_JunctionPrimitive, ...],
+    labels: tuple[_GraphLabel, ...],
+    pins: tuple[_GraphObject, ...],
+    ports: tuple[_GraphObject, ...],
+) -> tuple[str, CstList]:
+    candidates = [
+        (uuid, node)
+        for index in indexes
+        for node, uuid, _ in (wires[index],)
+        if uuid is not None
+    ]
+    candidates.extend((uuid, node) for node, uuid, _ in junctions if uuid is not None)
+    candidates.extend((reference.object_uuid, node) for reference, node, _, _ in labels)
+    if not candidates:
+        candidates.extend((reference.object_uuid, node) for reference, node, _ in pins)
+        candidates.extend((reference.object_uuid, node) for reference, node, _ in ports)
+    if not candidates:
+        raise KicadSemanticError("wire connectivity component has no UUID anchor")
+    return min(candidates, key=lambda item: item[0])
+
+
+def _component_name(
+    labels: tuple[_GraphLabel, ...],
+) -> str | None:
+    names = sorted(name for _, _, _, name in labels)
+    return names[0] if names else None
+
+
+def _component_members(
+    sheet_uuid: str,
+    wires: tuple[_WirePrimitive, ...],
+    indexes: tuple[int, ...],
+    junctions: tuple[_JunctionPrimitive, ...],
+    labels: tuple[_GraphLabel, ...],
+    pins: tuple[_GraphObject, ...],
+    ports: tuple[_GraphObject, ...],
+) -> tuple[str, ...]:
+    members = [
+        f"wire:{sheet_uuid}:{uuid}"
+        for index in indexes
+        for _, uuid, _ in (wires[index],)
+        if uuid is not None
+    ]
+    members.extend(f"junction:{sheet_uuid}:{uuid}" for _, uuid, _ in junctions if uuid)
+    members.extend(object_ref_key(reference) for reference, _, _, _ in labels)
+    members.extend(object_ref_key(reference) for reference, _, _ in pins)
+    members.extend(object_ref_key(reference) for reference, _, _ in ports)
+    return tuple(sorted(members))
 
 
 def _graph_labels(
     record: _FileRecord, sheet_uuid: str
-) -> tuple[tuple[SchematicObjectRef, CstList, Point, str], ...]:
-    labels: list[tuple[SchematicObjectRef, CstList, Point, str]] = []
+) -> tuple[_GraphLabel, ...]:
+    labels: list[_GraphLabel] = []
     for head in ("label", "global_label", "hierarchical_label"):
         for node in record.cst.root.find_children(head):
             uuid = _node_uuid(node, record.path, "label")
@@ -662,12 +739,10 @@ def _graph_labels(
 
 def _graph_pins(
     record: _FileRecord, sheet_uuid: str
-) -> tuple[tuple[SchematicObjectRef, CstList, Point], ...]:
-    pins: list[tuple[SchematicObjectRef, CstList, Point]] = []
+) -> tuple[_GraphObject, ...]:
+    pins: list[_GraphObject] = []
     for symbol_node in record.cst.root.find_children("symbol"):
-        position = _point(symbol_node, record.path)
-        for pin_node in symbol_node.find_children("pin"):
-            number = _atom(pin_node, 1, record.path, "pin number")
+        for pin_node, number, _, position in _instance_pin_geometry(record, symbol_node):
             uuid = _node_uuid(pin_node, record.path, "pin")
             pins.append(
                 (
@@ -679,10 +754,165 @@ def _graph_pins(
     return tuple(pins)
 
 
+def _instance_pin_geometry(
+    record: _FileRecord, symbol_node: CstList
+) -> tuple[tuple[CstList, str, str, Point], ...]:
+    instance_pins = symbol_node.find_children("pin")
+    if not instance_pins:
+        return ()
+    lib_id = _atom(
+        _required_child(symbol_node, "lib_id", record.path),
+        1,
+        record.path,
+        "library id",
+    )
+    unit = _integer(
+        _atom(
+            _required_child(symbol_node, "unit", record.path),
+            1,
+            record.path,
+            "unit",
+        ),
+        record.path,
+        "unit",
+    )
+    definitions = _library_pin_definitions(record, lib_id, unit)
+    seen_numbers: set[str] = set()
+    pins: list[tuple[CstList, str, str, Point]] = []
+    for pin_node in instance_pins:
+        number = _atom(pin_node, 1, record.path, "pin number")
+        if number in seen_numbers:
+            raise KicadSemanticError(f"duplicate instance pin {number}: {record.path}")
+        seen_numbers.add(number)
+        try:
+            definition = definitions[number]
+        except KeyError as error:
+            raise KicadSemanticError(
+                f"missing library pin {number} for {lib_id}: {record.path}"
+            ) from error
+        pins.append(
+            (
+                pin_node,
+                number,
+                definition.name,
+                _transform_pin_point(definition.position, symbol_node, record.path),
+            )
+        )
+    return tuple(pins)
+
+
+def _library_pin_definitions(
+    record: _FileRecord, lib_id: str, unit: int
+) -> dict[str, _LibraryPin]:
+    library_root = _library_symbol(record, lib_id)
+    unit_nodes = tuple(
+        node
+        for node in _nested_symbol_nodes(library_root)
+        if _library_symbol_unit(node, lib_id) == unit
+    )
+    source_nodes = unit_nodes or (library_root,)
+    definitions: dict[str, _LibraryPin] = {}
+    for source in source_nodes:
+        for pin_node in source.find_children("pin"):
+            number = _atom(
+                _required_child(pin_node, "number", record.path),
+                1,
+                record.path,
+                "library pin number",
+            )
+            if number in definitions:
+                raise KicadSemanticError(
+                    f"duplicate library pin {number} for {lib_id}: {record.path}"
+                )
+            name_node = _child(pin_node, "name")
+            name = (
+                number
+                if name_node is None
+                else _atom(name_node, 1, record.path, "library pin name")
+            )
+            definitions[number] = _LibraryPin(
+                name=name,
+                position=_point(pin_node, record.path),
+            )
+    if not definitions:
+        raise KicadSemanticError(
+            f"missing pin definitions for {lib_id} unit {unit}: {record.path}"
+        )
+    return definitions
+
+
+def _library_symbol(record: _FileRecord, lib_id: str) -> CstList:
+    lib_symbols = _required_child(record.cst.root, "lib_symbols", record.path)
+    matches = [
+        node
+        for node in lib_symbols.find_children("symbol")
+        if _atom(node, 1, record.path, "library symbol name") == lib_id
+    ]
+    if len(matches) != 1:
+        raise KicadSemanticError(
+            f"expected one library symbol {lib_id}: {record.path}"
+        )
+    return matches[0]
+
+
+def _nested_symbol_nodes(node: CstList) -> tuple[CstList, ...]:
+    nodes: list[CstList] = [node]
+    for child in node.find_children("symbol"):
+        nodes.extend(_nested_symbol_nodes(child))
+    return tuple(nodes)
+
+
+def _library_symbol_unit(node: CstList, lib_id: str) -> int | None:
+    name = _atom(node, 1, Path("<library>"), "library symbol name")
+    if name == lib_id:
+        return None
+    parts = name.rsplit("_", 2)
+    if len(parts) != 3 or parts[0] != lib_id:
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
+
+
+def _transform_pin_point(local: Point, symbol_node: CstList, path: Path) -> Point:
+    at = _required_child(symbol_node, "at", path)
+    origin = Point(
+        x=_number(_atom(at, 1, path, "symbol x coordinate"), path, "symbol x coordinate"),
+        y=_number(_atom(at, 2, path, "symbol y coordinate"), path, "symbol y coordinate"),
+    )
+    angle = (
+        0.0
+        if len(at.items) < 4
+        else _number(_atom(at, 3, path, "symbol rotation"), path, "symbol rotation")
+    )
+    x, y = local.x, local.y
+    mirror = _child(symbol_node, "mirror")
+    if mirror is not None:
+        axis = _atom(mirror, 1, path, "mirror axis")
+        if axis == "x":
+            y = -y
+        elif axis == "y":
+            x = -x
+        else:
+            raise KicadSemanticError(f"unsupported mirror axis {axis}: {path}")
+    radians = math.radians(angle)
+    cosine = math.cos(radians)
+    sine = math.sin(radians)
+    return Point(
+        x=_normal_coordinate(origin.x + x * cosine - y * sine),
+        y=_normal_coordinate(origin.y + x * sine + y * cosine),
+    )
+
+
+def _normal_coordinate(value: float) -> float:
+    return 0.0 if math.isclose(value, 0.0, abs_tol=1e-12) else round(value, 12)
+
+
 def _graph_ports(
     record: _FileRecord, sheet_uuid: str
-) -> tuple[tuple[SchematicObjectRef, CstList, Point], ...]:
-    ports: list[tuple[SchematicObjectRef, CstList, Point]] = []
+) -> tuple[_GraphObject, ...]:
+    ports: list[_GraphObject] = []
     for sheet_node in record.cst.root.find_children("sheet"):
         for port_node in sheet_node.find_children("pin"):
             uuid = _node_uuid(port_node, record.path, "hierarchical port")
