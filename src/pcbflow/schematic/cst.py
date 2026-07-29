@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -97,48 +98,44 @@ def parse_cst(data: bytes, limits: CstLimits = CstLimits()) -> CstDocument:
         raise TypeError("CST source must be bytes")
     if len(data) > limits.max_file_bytes:
         raise CstLimitError("file_size limit exceeded")
-    if b"\x00" in data:
-        raise CstParseError("NUL byte is not permitted")
-    try:
-        data.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise CstParseError("source is not valid UTF-8") from error
 
-    tokens = _tokenize(data, limits)
-    return _parse_tokens(data, tokens, limits)
+    return _parse_tokens(data, _tokenize(data, limits), limits)
 
 
-def _tokenize(data: bytes, limits: CstLimits) -> tuple[Token, ...]:
-    tokens: list[Token] = []
+def _tokenize(data: bytes, limits: CstLimits) -> Iterator[Token]:
     index = 0
     length = len(data)
     while index < length:
         start = index
         current = data[index]
+        if current == 0:
+            raise CstParseError("NUL byte is not permitted")
         if current in _ASCII_WHITESPACE:
             index += 1
             while index < length and data[index] in _ASCII_WHITESPACE:
                 index += 1
-            tokens.append(Token(TokenKind.TRIVIA, start, index, data[start:index]))
+            yield Token(TokenKind.TRIVIA, start, index, data[start:index])
             continue
         if current == ord("("):
             index += 1
-            tokens.append(Token(TokenKind.LEFT, start, index, data[start:index]))
+            yield Token(TokenKind.LEFT, start, index, data[start:index])
             continue
         if current == ord(")"):
             index += 1
-            tokens.append(Token(TokenKind.RIGHT, start, index, data[start:index]))
+            yield Token(TokenKind.RIGHT, start, index, data[start:index])
             continue
         if current == ord('"'):
             index = _string_end(data, start, limits)
             raw = data[start:index]
             try:
                 value = json.loads(raw.decode("utf-8"))
+            except UnicodeDecodeError as error:
+                raise CstParseError("source is not valid UTF-8") from error
             except json.JSONDecodeError as error:
                 raise CstParseError("invalid JSON-compatible string") from error
             if not isinstance(value, str):
                 raise CstParseError("string token did not decode to text")
-            tokens.append(Token(TokenKind.STRING, start, index, raw))
+            yield Token(TokenKind.STRING, start, index, raw)
             continue
 
         index += 1
@@ -147,6 +144,8 @@ def _tokenize(data: bytes, limits: CstLimits) -> tuple[Token, ...]:
             and data[index] not in _ASCII_WHITESPACE
             and data[index] not in (ord("("), ord(")"))
         ):
+            if data[index] == 0:
+                raise CstParseError("NUL byte is not permitted")
             index += 1
         raw = data[start:index]
         if b'"' in raw:
@@ -154,33 +153,38 @@ def _tokenize(data: bytes, limits: CstLimits) -> tuple[Token, ...]:
         try:
             raw.decode("utf-8")
         except UnicodeDecodeError as error:
-            raise CstParseError("atom is not valid UTF-8") from error
-        tokens.append(Token(TokenKind.ATOM, start, index, raw))
-    return tuple(tokens)
+            raise CstParseError("source is not valid UTF-8") from error
+        yield Token(TokenKind.ATOM, start, index, raw)
 
 
 def _string_end(data: bytes, start: int, limits: CstLimits) -> int:
     index = start + 1
     while index < len(data):
+        if index - start - 1 > limits.max_string_bytes:
+            raise CstLimitError("string limit exceeded")
         current = data[index]
+        if current == 0:
+            raise CstParseError("NUL byte is not permitted")
         if current == ord('"'):
-            string_bytes = index - start - 1
-            if string_bytes > limits.max_string_bytes:
-                raise CstLimitError("string limit exceeded")
             return index + 1
         if current == ord("\\"):
+            if index + 1 < len(data) and data[index + 1] == 0:
+                raise CstParseError("NUL byte is not permitted")
             index += 2
         else:
             index += 1
+    if len(data) - start - 1 > limits.max_string_bytes:
+        raise CstLimitError("string limit exceeded")
     raise CstParseError("unterminated string")
 
 
 def _parse_tokens(
-    source: bytes, tokens: tuple[Token, ...], limits: CstLimits
+    source: bytes, tokens: Iterator[Token], limits: CstLimits
 ) -> CstDocument:
     stack: list[tuple[int, list[CstNode]]] = []
     root: CstList | None = None
     node_count = 0
+    token_list: list[Token] = []
 
     def add_node(node: CstNode) -> None:
         nonlocal root
@@ -198,6 +202,7 @@ def _parse_tokens(
             raise CstLimitError("nodes limit exceeded")
 
     for token in tokens:
+        token_list.append(token)
         if token.kind is TokenKind.TRIVIA:
             continue
         if token.kind is TokenKind.LEFT:
@@ -237,7 +242,7 @@ def _parse_tokens(
         raise CstParseError("unmatched opening parenthesis")
     if root is None:
         raise CstParseError("document must contain exactly one root list")
-    return CstDocument(source=source, tokens=tokens, root=root)
+    return CstDocument(source=source, tokens=tuple(token_list), root=root)
 
 
 def make_atom(value: str) -> CstAtom:
@@ -304,6 +309,11 @@ def insert_before_close(
 
 
 def apply_edits(document: CstDocument, edits: tuple[CstEdit, ...]) -> bytes:
+    """Apply source-coordinate splices by stable ascending ``(start, end)`` order.
+
+    Insertions at a replacement's start precede it, while insertions at its end
+    follow it. Insertions with matching spans retain their caller order.
+    """
     ordered = sorted(edits, key=lambda edit: (edit.start, edit.end))
     cursor = 0
     output = bytearray()

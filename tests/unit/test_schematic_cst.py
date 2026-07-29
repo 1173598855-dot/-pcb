@@ -6,6 +6,7 @@ import pytest
 from hypothesis import given, strategies as st
 
 from pcbflow.schematic.cst import (
+    CstEdit,
     CstLimitError,
     CstLimits,
     CstParseError,
@@ -98,6 +99,29 @@ def test_parser_enforces_size_depth_node_and_string_limits() -> None:
         parse_cst(b'(x "long")', CstLimits(max_string_bytes=3))
 
 
+def test_unclosed_string_over_limit_raises_string_limit_first() -> None:
+    with pytest.raises(CstLimitError, match="string limit exceeded"):
+        parse_cst(b'(root "long', CstLimits(max_string_bytes=3))
+
+
+@pytest.mark.parametrize(
+    ("source", "limits", "message"),
+    [
+        (
+            b'(root item "unterminated',
+            CstLimits(max_nodes=2),
+            "nodes limit exceeded",
+        ),
+        (b'((( "\\q")', CstLimits(max_depth=2), "depth limit exceeded"),
+    ],
+)
+def test_parser_enforces_structural_limits_before_later_invalid_tokens(
+    source: bytes, limits: CstLimits, message: str
+) -> None:
+    with pytest.raises(CstLimitError, match=message):
+        parse_cst(source, limits)
+
+
 def test_tokenizer_retains_original_trivia_bytes() -> None:
     document = parse_cst(b"(root\tvalue  \r\n)")
 
@@ -151,6 +175,43 @@ def test_insert_before_close_splices_controlled_subtree() -> None:
     assert apply_edits(document, (edit,)) == (
         b'(root\r\n  (known item)\r\n\n  (added "value"))'
     )
+
+
+@pytest.mark.parametrize(
+    "edits",
+    [
+        (CstEdit(1, 5, b"first"), CstEdit(3, 5, b"second")),
+        (CstEdit(-1, 0, b"outside"),),
+        (CstEdit(0, 7, b"outside"),),
+    ],
+)
+def test_apply_edits_rejects_overlapping_or_out_of_range_splices(
+    edits: tuple[CstEdit, ...],
+) -> None:
+    with pytest.raises(ValueError, match="overlap or escape"):
+        apply_edits(parse_cst(b"(root)"), edits)
+
+
+def test_apply_edits_keeps_same_position_insertions_in_input_order() -> None:
+    document = parse_cst(b"(root)")
+
+    assert apply_edits(
+        document,
+        (CstEdit(1, 1, b"first"), CstEdit(1, 1, b"second")),
+    ) == b"(firstsecondroot)"
+
+
+def test_apply_edits_orders_insertions_at_replacement_boundaries() -> None:
+    document = parse_cst(b"(root)")
+
+    assert apply_edits(
+        document,
+        (
+            CstEdit(1, 5, b"replacement"),
+            CstEdit(5, 5, b"after"),
+            CstEdit(1, 1, b"before"),
+        ),
+    ) == b"(beforereplacementafter)"
 
 
 def test_committed_kicad_9_fixture_is_crlf_and_roundtrips() -> None:
