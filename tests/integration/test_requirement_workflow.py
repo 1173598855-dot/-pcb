@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC
 from pathlib import Path
+from threading import Event, Lock
 
 import pytest
 from sqlalchemy import select
 
 from pcbflow.approvals import ApprovalDigestMismatchError, GateDecisionStore
 from pcbflow.canonical import canonical_json_bytes
+from pcbflow.container import build_container
 from pcbflow.design_tables import GateDecisionRow, OutboxEventRow, RequirementSetRow
 from pcbflow.repositories import IdempotencyConflictError
 from pcbflow.requirement_store import RequirementStore
@@ -437,6 +440,101 @@ def test_g1_decision_persists_immutable_approval_artifact_and_replays_it(
     ).isoformat().replace("+00:00", "Z")
     assert recorded.id == replayed.id
     assert artifact_digests_after == artifact_digests_before | {artifact_digest}
+
+
+def test_concurrent_g1_replay_serializes_before_creating_approval_artifact(
+    container, managed_project, requirement_yaml: bytes, monkeypatch
+) -> None:
+    draft = container.requirements.import_draft(
+        managed_project.id,
+        requirement_yaml,
+        "requirements-concurrent-g1-import",
+    )
+    pending = container.requirements.submit(
+        draft.id, "requirements-concurrent-g1-submit"
+    )
+    request = {
+        "requirement_set_id": pending.id,
+        "subject_digest": pending.subject_digest(),
+        "decision": "reject",
+        "actor_type": "human",
+        "actor_id": "local-user",
+        "comment": "concurrent idempotency replay",
+        "idempotency_key": "g1-concurrent-replay",
+    }
+    first_artifact_started = Event()
+    second_artifact_started = Event()
+    release_first_artifact = Event()
+    calls_lock = Lock()
+    artifact_calls = 0
+    original_create = GateDecisionStore._create_g1_approval_artifact
+
+    def pause_first_artifact(store, **kwargs):
+        nonlocal artifact_calls
+        with calls_lock:
+            artifact_calls += 1
+            call_number = artifact_calls
+        if call_number == 1:
+            first_artifact_started.set()
+            assert release_first_artifact.wait(timeout=5)
+        else:
+            second_artifact_started.set()
+        return original_create(store, **kwargs)
+
+    monkeypatch.setattr(
+        GateDecisionStore, "_create_g1_approval_artifact", pause_first_artifact
+    )
+    second_container = build_container(container.settings)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(container.approvals.decide_g1, **request)
+            assert first_artifact_started.wait(timeout=5)
+            second = executor.submit(second_container.approvals.decide_g1, **request)
+
+            # Before the fix, a deferred transaction lets this request reach CAS.
+            second_artifact_started.wait(timeout=1)
+            release_first_artifact.set()
+            first_result = first.result(timeout=10)
+            second_result = second.result(timeout=10)
+
+        assert not second_artifact_started.is_set()
+        assert first_result == second_result
+        with container.sessions() as session:
+            decisions = session.scalars(
+                select(GateDecisionRow).where(
+                    GateDecisionRow.project_id == managed_project.id,
+                    GateDecisionRow.idempotency_key == request["idempotency_key"],
+                )
+            ).all()
+            assert len(decisions) == 1
+            events = [
+                row
+                for row in session.scalars(select(OutboxEventRow))
+                if row.payload_json.get("gate_decision_id") == decisions[0].id
+            ]
+            approval_rows = [
+                row
+                for row in session.scalars(select(ArtifactRow))
+                if row.media_type == "application/vnd.pcbflow.g1-approval+json"
+            ]
+
+        assert len(events) == 1
+        assert len(approval_rows) == 1
+        approval_digest = events[0].payload_json["approval_artifact_digest"]
+        assert approval_rows[0].digest == approval_digest
+        assert container.artifacts._path(approval_digest).exists()
+        approval_objects = []
+        for artifact_path in container.artifacts.root.glob("objects/sha256/*/*/*"):
+            try:
+                artifact = json.loads(artifact_path.read_bytes())
+            except json.JSONDecodeError:
+                continue
+            if artifact.get("gate") == "G1":
+                approval_objects.append(artifact_path)
+        assert approval_objects == [container.artifacts._path(approval_digest)]
+    finally:
+        release_first_artifact.set()
+        second_container.dispose()
 
 
 def test_submit_blocks_open_blocking_assumptions_before_creating_candidate(

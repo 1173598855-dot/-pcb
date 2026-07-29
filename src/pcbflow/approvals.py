@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -286,6 +286,7 @@ class GateDecisionStore:
         }
         try:
             with self._sessions.begin() as session:
+                session.execute(text("BEGIN IMMEDIATE"))
                 existing = session.scalar(
                     select(GateDecisionRow).where(
                         GateDecisionRow.project_id == project_id,
