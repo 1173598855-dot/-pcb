@@ -8,6 +8,7 @@ from threading import Event, Lock
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from pcbflow.approvals import ApprovalDigestMismatchError, GateDecisionStore
 from pcbflow.canonical import canonical_json_bytes
@@ -464,10 +465,13 @@ def test_concurrent_g1_replay_serializes_before_creating_approval_artifact(
     }
     first_artifact_started = Event()
     second_artifact_started = Event()
+    second_transaction_attempted = Event()
     release_first_artifact = Event()
     calls_lock = Lock()
     artifact_calls = 0
+    begin_calls = 0
     original_create = GateDecisionStore._create_g1_approval_artifact
+    original_execute = Session.execute
 
     def pause_first_artifact(store, **kwargs):
         nonlocal artifact_calls
@@ -484,6 +488,18 @@ def test_concurrent_g1_replay_serializes_before_creating_approval_artifact(
     monkeypatch.setattr(
         GateDecisionStore, "_create_g1_approval_artifact", pause_first_artifact
     )
+
+    def observe_begin_immediate(session, statement, *args, **kwargs):
+        nonlocal begin_calls
+        if getattr(statement, "text", None) == "BEGIN IMMEDIATE":
+            with calls_lock:
+                begin_calls += 1
+                begin_number = begin_calls
+            if begin_number == 2:
+                second_transaction_attempted.set()
+        return original_execute(session, statement, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "execute", observe_begin_immediate)
     second_container = build_container(container.settings)
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -491,8 +507,8 @@ def test_concurrent_g1_replay_serializes_before_creating_approval_artifact(
             assert first_artifact_started.wait(timeout=5)
             second = executor.submit(second_container.approvals.decide_g1, **request)
 
-            # Before the fix, a deferred transaction lets this request reach CAS.
-            second_artifact_started.wait(timeout=1)
+            assert second_transaction_attempted.wait(timeout=5)
+            assert not second_artifact_started.wait(timeout=0.1)
             release_first_artifact.set()
             first_result = first.result(timeout=10)
             second_result = second.result(timeout=10)
