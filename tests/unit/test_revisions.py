@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import errno
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import pytest
 
 from pcbflow.process import ProcessResult, ProcessRunner
-from pcbflow.revisions import GitCli, GitOperationError
+from pcbflow.revisions import (
+    GitCli,
+    GitOperationError,
+    _acquire_windows_file_lock,
+)
 from pcbflow.workspaces import (
     WorkspaceCopier,
     WorkspaceEntryError,
@@ -231,3 +237,67 @@ def test_read_source_head_uses_controlled_git_configuration(tmp_path: Path) -> N
     assert "core.autocrlf=false" in runner.argv
     assert any(value.startswith("core.attributesFile=") for value in runner.argv)
     assert any(value.startswith("core.hooksPath=") for value in runner.argv)
+
+
+def test_windows_file_lock_retries_contention_beyond_primitive_limit(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "adoption.lock"
+    release_contention = Event()
+    contention_exceeded = Event()
+    attempts = 0
+    waits = 0
+    errors: list[BaseException] = []
+
+    def locking(_descriptor: int, _mode: int, _length: int) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 11:
+            raise OSError(errno.EACCES, "lock contention", None, 33)
+
+    def wait_for_retry(_seconds: float) -> None:
+        nonlocal waits
+        waits += 1
+        if waits == 11:
+            contention_exceeded.set()
+            assert release_contention.wait(timeout=5)
+
+    def acquire() -> None:
+        try:
+            with lock_path.open("w+b") as lock_file:
+                _acquire_windows_file_lock(
+                    lock_file,
+                    locking=locking,
+                    wait=wait_for_retry,
+                )
+        except BaseException as error:
+            errors.append(error)
+
+    worker = Thread(target=acquire)
+    worker.start()
+    assert contention_exceeded.wait(timeout=5)
+    release_contention.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert attempts == 12
+    assert waits == 11
+
+
+def test_windows_file_lock_propagates_non_contention_errors(tmp_path: Path) -> None:
+    lock_path = tmp_path / "adoption.lock"
+    waits: list[float] = []
+
+    def locking(_descriptor: int, _mode: int, _length: int) -> None:
+        raise OSError(errno.EIO, "disk error")
+
+    with lock_path.open("w+b") as lock_file:
+        with pytest.raises(OSError, match="disk error"):
+            _acquire_windows_file_lock(
+                lock_file,
+                locking=locking,
+                wait=waits.append,
+            )
+
+    assert waits == []

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import re
 import shutil
 import stat
+import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -12,6 +14,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from threading import Lock
+from typing import BinaryIO
 
 import yaml
 
@@ -32,11 +35,36 @@ from pcbflow.workspaces import (
 _OBJECT_ID = re.compile(r"[0-9a-f]{40,64}")
 _ADOPTION_LOCKS_GUARD = Lock()
 _ADOPTION_LOCKS: dict[Path, Lock] = {}
+_WINDOWS_LOCK_CONTENTION_WINERRORS = frozenset({32, 33})
 
 
 def _in_process_adoption_lock(path: Path) -> Lock:
     with _ADOPTION_LOCKS_GUARD:
         return _ADOPTION_LOCKS.setdefault(path, Lock())
+
+
+def _is_windows_lock_contention(error: OSError) -> bool:
+    winerror = getattr(error, "winerror", None)
+    if winerror is not None:
+        return winerror in _WINDOWS_LOCK_CONTENTION_WINERRORS
+    return error.errno in {errno.EACCES, errno.EAGAIN}
+
+
+def _acquire_windows_file_lock(
+    lock_file: BinaryIO,
+    *,
+    locking: Callable[[int, int, int], None],
+    wait: Callable[[float], None],
+    lock_mode: int = 0,
+) -> None:
+    while True:
+        try:
+            locking(lock_file.fileno(), lock_mode, 1)
+            return
+        except OSError as error:
+            if not _is_windows_lock_contention(error):
+                raise
+            wait(0.1)
 
 
 class GitOperationError(RuntimeError):
@@ -427,7 +455,12 @@ class RevisionService:
             if os.name == "nt":
                 import msvcrt
 
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                _acquire_windows_file_lock(
+                    lock_file,
+                    locking=msvcrt.locking,
+                    wait=time.sleep,
+                    lock_mode=msvcrt.LK_NBLCK,
+                )
                 unlock = lambda: msvcrt.locking(
                     lock_file.fileno(), msvcrt.LK_UNLCK, 1
                 )
