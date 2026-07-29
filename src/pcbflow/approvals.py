@@ -7,6 +7,8 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from pcbflow.artifacts import ArtifactDescriptor, ContentAddressedStore
+from pcbflow.canonical import canonical_json_bytes
 from pcbflow.design_tables import (
     GateDecisionRow,
     OutboxEventRow,
@@ -27,7 +29,10 @@ from pcbflow.requirement_store import (
 )
 from pcbflow.requirements import RequirementSet, RequirementSetStatus
 from pcbflow.revisions import RevisionReconciler
-from pcbflow.tables import ProjectRow
+from pcbflow.tables import ArtifactRow, ProjectRow
+
+
+_G1_APPROVAL_MEDIA_TYPE = "application/vnd.pcbflow.g1-approval+json"
 
 
 class ApprovalDigestMismatchError(RuntimeError):
@@ -75,8 +80,71 @@ def _decision(row: GateDecisionRow) -> GateDecision:
 
 
 class GateDecisionStore:
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
+    def __init__(
+        self,
+        sessions: sessionmaker[Session],
+        artifacts: ContentAddressedStore | None = None,
+    ) -> None:
         self._sessions = sessions
+        self._artifacts = artifacts
+
+    @staticmethod
+    def _register_artifact(
+        session: Session, descriptor: ArtifactDescriptor, created_at: datetime
+    ) -> None:
+        row = session.get(ArtifactRow, descriptor.digest)
+        if row is None:
+            session.add(
+                ArtifactRow(
+                    digest=descriptor.digest,
+                    size=descriptor.size,
+                    media_type=descriptor.media_type,
+                    storage_path=str(descriptor.path),
+                    created_at=created_at,
+                )
+            )
+            return
+        if (
+            row.size != descriptor.size
+            or row.media_type != descriptor.media_type
+            or row.storage_path != str(descriptor.path)
+        ):
+            raise RuntimeError(f"artifact descriptor conflict: {descriptor.digest}")
+
+    def _create_g1_approval_artifact(
+        self,
+        *,
+        decision_id: str,
+        project: ProjectRow,
+        requirement_set: RequirementSet,
+        subject_digest: str,
+        decision: str,
+        actor_type: str,
+        actor_id: str,
+        comment: str,
+        created_at: datetime,
+    ) -> ArtifactDescriptor:
+        if self._artifacts is None:
+            raise RuntimeError("G1 approval artifacts require a content-addressed store")
+        record = {
+            "schema_version": "1.0",
+            "gate": "G1",
+            "gate_decision_id": decision_id,
+            "project_id": project.id,
+            "requirement_set_id": requirement_set.id,
+            "base_revision": requirement_set.base_revision,
+            "base_snapshot_digest": project.project_snapshot_digest,
+            "candidate_revision": requirement_set.candidate_revision,
+            "candidate_snapshot_digest": requirement_set.candidate_snapshot_digest,
+            "subject_digest": subject_digest,
+            "decision": decision,
+            "actor": {"type": actor_type, "id": actor_id},
+            "comment": comment,
+            "created_at": created_at.isoformat().replace("+00:00", "Z"),
+        }
+        return self._artifacts.put_bytes(
+            canonical_json_bytes(record), _G1_APPROVAL_MEDIA_TYPE
+        )
 
     @staticmethod
     def _replay(
@@ -253,9 +321,27 @@ class GateDecisionStore:
                 project = session.get(ProjectRow, project_id)
                 if project is None:
                     raise ProjectNotFoundError(project_id)
+                if decision == "approve" and (
+                    project.version != expected_project_version
+                    or project.current_revision != base_revision
+                ):
+                    raise RevisionConflictError(base_revision, project.current_revision)
                 now = utc_now()
+                decision_id = new_id("gdec")
+                approval_artifact = self._create_g1_approval_artifact(
+                    decision_id=decision_id,
+                    project=project,
+                    requirement_set=requirement_set,
+                    subject_digest=subject_digest,
+                    decision=decision,
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                    comment=comment,
+                    created_at=now,
+                )
+                self._register_artifact(session, approval_artifact, now)
                 decision_row = GateDecisionRow(
-                    id=new_id("gdec"),
+                    id=decision_id,
                     project_id=project_id,
                     created_at=now,
                     **replay_values,
@@ -263,13 +349,6 @@ class GateDecisionStore:
                 session.add(decision_row)
 
                 if decision == "approve":
-                    if (
-                        project.version != expected_project_version
-                        or project.current_revision != base_revision
-                    ):
-                        raise RevisionConflictError(
-                            base_revision, project.current_revision
-                        )
                     if project.active_requirement_set_id is not None:
                         superseded = session.get(
                             RequirementSetRow, project.active_requirement_set_id
@@ -329,6 +408,8 @@ class GateDecisionStore:
                         "revision": candidate_revision,
                         "snapshot_digest": candidate_snapshot_digest,
                         "decision": decision,
+                        "gate_decision_id": decision_id,
+                        "approval_artifact_digest": approval_artifact.digest,
                         "actor": {"type": actor_type, "id": actor_id},
                         "comment": comment,
                     }
@@ -342,6 +423,8 @@ class GateDecisionStore:
                         "subject_digest": subject_digest,
                         "base_revision": base_revision,
                         "decision": decision,
+                        "gate_decision_id": decision_id,
+                        "approval_artifact_digest": approval_artifact.digest,
                         "actor": {"type": actor_type, "id": actor_id},
                         "comment": comment,
                     }
@@ -426,5 +509,6 @@ class ApprovalService:
             actor_id=actor_id,
             comment=comment,
         )
-        self._reconciler.run_once()
+        if decision == "approve":
+            self._reconciler.run_once()
         return result

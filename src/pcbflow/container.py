@@ -97,7 +97,7 @@ def build_container(
         workspaces_dir=settings.workspaces_dir,
     )
     requirement_store = RequirementStore(sessions, artifacts)
-    gate_decisions = GateDecisionStore(sessions)
+    gate_decisions = GateDecisionStore(sessions, artifacts)
     reconciler = RevisionReconciler(projects, revision_store, revisions)
     requirements = RequirementService(requirement_store, projects, revisions)
     approvals = ApprovalService(

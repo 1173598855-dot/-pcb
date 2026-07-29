@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -7,7 +9,7 @@ from sqlalchemy import select
 
 from pcbflow.approvals import ApprovalDigestMismatchError, GateDecisionStore
 from pcbflow.canonical import canonical_json_bytes
-from pcbflow.design_tables import RequirementSetRow
+from pcbflow.design_tables import GateDecisionRow, OutboxEventRow, RequirementSetRow
 from pcbflow.repositories import IdempotencyConflictError
 from pcbflow.requirement_store import RequirementStore
 from pcbflow.requirements import (
@@ -329,6 +331,112 @@ def test_reject_g1_is_idempotent_and_does_not_advance_revision(
     assert project.current_revision == managed_project.current_revision
     assert project.active_requirement_set_id is None
     assert _snapshot(managed_project.source_path) == source_before
+
+
+def test_reject_g1_does_not_reconcile_a_drifted_design_ref(
+    container, managed_project, requirement_yaml: bytes
+) -> None:
+    draft = container.requirements.import_draft(
+        managed_project.id,
+        requirement_yaml,
+        "requirements-reject-drift-import",
+    )
+    pending = container.requirements.submit(
+        draft.id, "requirements-reject-drift-submit"
+    )
+    assert pending.candidate_revision is not None
+    container.revisions.git.update_ref(
+        container.revisions.repo_path(managed_project.id),
+        "refs/heads/design",
+        pending.candidate_revision,
+        expected_revision=managed_project.current_revision,
+    )
+
+    container.approvals.decide_g1(
+        requirement_set_id=pending.id,
+        subject_digest=pending.subject_digest(),
+        decision="reject",
+        actor_type="human",
+        actor_id="local-user",
+        comment="do not reconcile rejection",
+        idempotency_key="g1-reject-drift",
+    )
+
+    assert container.revisions.resolve_design_ref(managed_project.id) == (
+        pending.candidate_revision
+    )
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_g1_decision_persists_immutable_approval_artifact_and_replays_it(
+    container, managed_project, requirement_yaml: bytes, decision: str
+) -> None:
+    draft = container.requirements.import_draft(
+        managed_project.id,
+        requirement_yaml,
+        f"requirements-artifact-{decision}-import",
+    )
+    pending = container.requirements.submit(
+        draft.id, f"requirements-artifact-{decision}-submit"
+    )
+    with container.sessions() as session:
+        artifact_digests_before = set(session.scalars(select(ArtifactRow.digest)))
+
+    request = {
+        "requirement_set_id": pending.id,
+        "subject_digest": pending.subject_digest(),
+        "decision": decision,
+        "actor_type": "human",
+        "actor_id": "local-user",
+        "comment": f"artifact evidence for {decision}",
+        "idempotency_key": f"g1-artifact-{decision}",
+    }
+    recorded = container.approvals.decide_g1(**request)
+    replayed = container.approvals.decide_g1(**request)
+
+    with container.sessions() as session:
+        decision_row = session.scalar(
+            select(GateDecisionRow).where(
+                GateDecisionRow.project_id == managed_project.id,
+                GateDecisionRow.idempotency_key == request["idempotency_key"],
+            )
+        )
+        events = [
+            row
+            for row in session.scalars(select(OutboxEventRow))
+            if row.payload_json.get("requirement_set_id") == pending.id
+        ]
+        artifact_digests_after = set(session.scalars(select(ArtifactRow.digest)))
+        assert decision_row is not None
+        assert len(events) == 1
+        event = events[0]
+        artifact_digest = event.payload_json["approval_artifact_digest"]
+        assert event.payload_json["gate_decision_id"] == decision_row.id
+        artifact = session.get(ArtifactRow, artifact_digest)
+        assert artifact is not None
+        assert artifact.media_type == "application/vnd.pcbflow.g1-approval+json"
+
+    with container.artifacts.open(artifact_digest) as stored:
+        raw = stored.read()
+    approval = json.loads(raw)
+    assert raw == canonical_json_bytes(approval)
+    assert approval["schema_version"] == "1.0"
+    assert approval["gate"] == "G1"
+    assert approval["project_id"] == managed_project.id
+    assert approval["requirement_set_id"] == pending.id
+    assert approval["base_revision"] == pending.base_revision
+    assert approval["base_snapshot_digest"] == managed_project.project_snapshot_digest
+    assert approval["candidate_revision"] == pending.candidate_revision
+    assert approval["candidate_snapshot_digest"] == pending.candidate_snapshot_digest
+    assert approval["subject_digest"] == pending.subject_digest()
+    assert approval["decision"] == decision
+    assert approval["actor"] == {"type": "human", "id": "local-user"}
+    assert approval["comment"] == request["comment"]
+    assert approval["created_at"] == decision_row.created_at.replace(
+        tzinfo=UTC
+    ).isoformat().replace("+00:00", "Z")
+    assert recorded.id == replayed.id
+    assert artifact_digests_after == artifact_digests_before | {artifact_digest}
 
 
 def test_submit_blocks_open_blocking_assumptions_before_creating_candidate(
