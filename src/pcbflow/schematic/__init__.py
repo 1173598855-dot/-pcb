@@ -17,6 +17,23 @@ from .cst import (
     parse_cst,
     replace_node,
 )
+from .adapter import (
+    AdapterCapabilityReport,
+    ApplyResult,
+    CommandResult,
+    CstSchematicAdapter,
+    DesignCommandUnsupportedError,
+    SchematicAdapter,
+)
+from .modules import (
+    FileModuleCatalog,
+    ModuleCatalogPort,
+    ModuleIntegrityError,
+    ModuleManifest,
+    ModuleRevision,
+    ModuleRevisionNotFoundError,
+    derive_module_uuid,
+)
 
 __all__ = [
     "CstAtom",
@@ -36,4 +53,17 @@ __all__ = [
     "make_string",
     "parse_cst",
     "replace_node",
+    "AdapterCapabilityReport",
+    "ApplyResult",
+    "CommandResult",
+    "CstSchematicAdapter",
+    "DesignCommandUnsupportedError",
+    "SchematicAdapter",
+    "FileModuleCatalog",
+    "ModuleCatalogPort",
+    "ModuleIntegrityError",
+    "ModuleManifest",
+    "ModuleRevision",
+    "ModuleRevisionNotFoundError",
+    "derive_module_uuid",
 ]

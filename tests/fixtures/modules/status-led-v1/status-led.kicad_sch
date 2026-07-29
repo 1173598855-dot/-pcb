@@ -1,0 +1,20 @@
+(kicad_sch
+  (version 20250114)
+  (generator "pcbflow-module-fixture")
+  (uuid 10000000-0000-0000-0000-000000000001)
+  (lib_symbols
+    (symbol "Device:LED"
+      (symbol "Device:LED_1_1"
+        (pin passive line (at -3.81 0 0)
+          (name "K")
+          (number "1"))
+        (pin passive line (at 3.81 0 180)
+          (name "A")
+          (number "2")))))
+  (symbol (lib_id "Device:LED") (at 100 100 0) (unit 1)
+    (uuid 10000000-0000-0000-0000-000000000002)
+    (property "Reference" "D_STATUS")
+    (property "Value" "LED_VALUE")
+    (property "Footprint" "LED_SMD:LED_0603_1608Metric")
+    (pin "1" (uuid 10000000-0000-0000-0000-000000000003))
+    (pin "2" (uuid 10000000-0000-0000-0000-000000000004))))
