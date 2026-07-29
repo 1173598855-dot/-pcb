@@ -171,8 +171,41 @@ _RENDERED_SECTIONS = {
 }
 
 
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeySafeLoader,
+    node: yaml.MappingNode,
+    deep: bool = False,
+) -> dict[object, object]:
+    loader.flatten_mapping(node)
+    value: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in value
+        except TypeError as error:
+            raise ValueError("unhashable YAML key") from error
+        if duplicate:
+            raise ValueError(f"duplicate YAML key: {key}")
+        value[key] = loader.construct_object(value_node, deep=deep)
+    return value
+
+
+_UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
+def _safe_load(data: bytes) -> object:
+    return yaml.load(data, Loader=_UniqueKeySafeLoader)
+
+
 def load_requirement_payload(data: bytes) -> RequirementSetPayload:
-    value = yaml.safe_load(data)
+    value = _safe_load(data)
     return RequirementSetPayload.model_validate_json(
         canonical_json_bytes(value), strict=True
     )
@@ -206,7 +239,7 @@ def load_rendered_requirement_files(
 
     combined: dict[str, object] = {}
     for path, expected_sections in _RENDERED_SECTIONS.items():
-        value = yaml.safe_load(files[path])
+        value = _safe_load(files[path])
         if not isinstance(value, dict) or set(value) != set(expected_sections):
             raise ValueError(f"invalid requirement file sections: {path}")
         duplicate_sections = set(value) & set(combined)

@@ -124,6 +124,14 @@ def test_rendered_requirement_files_require_the_exact_view_contract() -> None:
     with pytest.raises(ValueError, match="sections"):
         load_rendered_requirement_files(duplicate_section)
 
+    duplicate_yaml_key = dict(files)
+    product = Path("requirements/product.yaml")
+    duplicate_yaml_key[product] = (
+        b'schema_version: "1.0"\n' + duplicate_yaml_key[product]
+    )
+    with pytest.raises(ValueError, match="duplicate YAML key"):
+        load_rendered_requirement_files(duplicate_yaml_key)
+
 
 def test_g1_digest_changes_when_candidate_snapshot_changes() -> None:
     payload = load_requirement_payload(VALID)
