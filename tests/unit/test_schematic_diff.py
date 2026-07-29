@@ -14,7 +14,10 @@ from pcbflow.schematic.diff import (
     build_semantic_diff,
     semantic_diff_bytes,
 )
-from pcbflow.schematic.semantic import FootprintAssignment, inspect_schematic
+from pcbflow.schematic.semantic import (
+    FootprintAssignment,
+    inspect_schematic,
+)
 
 
 def _document():
@@ -146,3 +149,44 @@ def test_symbol_add_remove_does_not_duplicate_derived_footprint_change(
     assert [(change.kind, change.subject_ref) for change in result.changes] == [
         (kind, reference)
     ]
+
+
+def test_wire_net_name_change_is_attributed_to_one_selector(tmp_path: Path) -> None:
+    before_project = tmp_path / "before"
+    after_project = tmp_path / "after"
+    before_project.mkdir()
+    after_project.mkdir()
+    for project, name in ((before_project, "NET_A"), (after_project, "NET_B")):
+        (project / "board.kicad_sch").write_text(
+            f"""(kicad_sch
+  (version 20250114)
+  (uuid 00000000-0000-0000-0000-000000000050)
+  (wire (pts (xy 0 0) (xy 5 0))
+    (uuid 00000000-0000-0000-0000-000000000051))
+  (junction (at 5 0) (uuid 00000000-0000-0000-0000-000000000052))
+  (label "{name}" (at 5 0 0)
+    (uuid 00000000-0000-0000-0000-000000000053)))
+""",
+            encoding="utf-8",
+        )
+    before = inspect_schematic(before_project)
+    after = inspect_schematic(after_project)
+    net = before.nets[0]
+    attribution = CommandAttribution(
+        command_id="cmd_rename_net",
+        requirement_ids=("REQ-FUNC-004",),
+        risk=RiskLevel.LOW,
+        selectors=(
+            ChangeSelector(
+                kind=ChangeKind.NET_CONNECTIVITY_CHANGED,
+                subject_ref=net.ref,
+                field=None,
+            ),
+        ),
+    )
+
+    result = build_semantic_diff(before, after, (attribution,))
+
+    assert len(result.changes) == 1
+    assert result.changes[0].kind is ChangeKind.NET_CONNECTIVITY_CHANGED
+    assert result.changes[0].command_id == "cmd_rename_net"

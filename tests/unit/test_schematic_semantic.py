@@ -87,7 +87,8 @@ def test_reused_child_file_creates_symbols_in_each_sheet_instance(tmp_path: Path
   (symbol (lib_id "Device:R") (at 1 2 0) (unit 1)
     (uuid 00000000-0000-0000-0000-000000000024)
     (property "Reference" "R1")
-    (property "Value" "1k")))
+    (property "Value" "1k")
+    (pin "1" (uuid 00000000-0000-0000-0000-000000000025))))
 """,
         encoding="utf-8",
     )
@@ -99,12 +100,26 @@ def test_reused_child_file_creates_symbols_in_each_sheet_instance(tmp_path: Path
         "00000000-0000-0000-0000-000000000021",
         "00000000-0000-0000-0000-000000000022",
     }
-    assert all(parsed.location(symbol.ref).file_path.name == "child.kicad_sch" for symbol in parsed.document.symbols)
+    assert all(
+        parsed.location(symbol.ref).file_path.name == "child.kicad_sch"
+        for symbol in parsed.document.symbols
+    )
+    first_symbol, second_symbol = parsed.document.symbols
+    assert parsed.location(first_symbol.ref).node is parsed.location(second_symbol.ref).node
+    assert parsed.aliases_for(first_symbol.ref) == (first_symbol.ref, second_symbol.ref)
+    first_pin = first_symbol.pins[0]
+    second_pin = second_symbol.pins[0]
+    assert parsed.aliases_for(first_pin.ref) == (first_pin.ref, second_pin.ref)
+    assert parsed.aliases_for_property(first_symbol.ref, "Value") == (
+        first_symbol.ref,
+        second_symbol.ref,
+    )
+    assert parsed.aliases_for(parsed.document.sheets[0].ref) == (
+        parsed.document.sheets[0].ref,
+    )
 
 
-def test_wire_based_connectivity_is_rejected_until_graph_extraction_exists(
-    tmp_path: Path,
-) -> None:
+def test_wire_junction_and_label_extract_stable_net_connectivity(tmp_path: Path) -> None:
     (tmp_path / "board.kicad_sch").write_text(
         """(kicad_sch
   (version 20250114)
@@ -125,5 +140,42 @@ def test_wire_based_connectivity_is_rejected_until_graph_extraction_exists(
         encoding="utf-8",
     )
 
-    with pytest.raises(KicadSemanticError, match="wire/junction"):
-        parse_schematic(tmp_path)
+    parsed = parse_schematic(tmp_path)
+
+    assert len(parsed.document.nets) == 1
+    net = parsed.document.nets[0]
+    assert net.ref.object_uuid == "00000000-0000-0000-0000-000000000033"
+    assert net.name == "NET"
+    assert any(member.endswith(":00000000-0000-0000-0000-000000000032:1") for member in net.members)
+    assert any(member.endswith(":00000000-0000-0000-0000-000000000035") for member in net.members)
+    assert parsed.location(net.ref).node.head == "wire"
+
+
+def test_bus_and_bus_entry_are_known_but_do_not_form_wire_nets(tmp_path: Path) -> None:
+    (tmp_path / "board.kicad_sch").write_text(
+        """(kicad_sch
+  (version 20250114)
+  (uuid 00000000-0000-0000-0000-000000000040)
+  (bus (pts (xy 0 0) (xy 5 0))
+    (uuid 00000000-0000-0000-0000-000000000041))
+  (bus_entry (at 5 0 0) (size 2 2)
+    (uuid 00000000-0000-0000-0000-000000000042)))
+""",
+        encoding="utf-8",
+    )
+
+    assert inspect_schematic(tmp_path).nets == ()
+
+
+def test_wire_component_without_a_uuid_anchor_is_rejected(tmp_path: Path) -> None:
+    (tmp_path / "board.kicad_sch").write_text(
+        """(kicad_sch
+  (version 20250114)
+  (uuid 00000000-0000-0000-0000-000000000060)
+  (wire (pts (xy 0 0) (xy 5 0))))
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KicadSemanticError, match="no UUID anchor"):
+        inspect_schematic(tmp_path)

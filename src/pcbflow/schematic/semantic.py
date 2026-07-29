@@ -105,12 +105,33 @@ class CstLocation:
 class ParsedSchematic:
     document: SchematicDocument
     locations: dict[str, CstLocation]
+    aliases: dict[str, tuple[SchematicObjectRef, ...]]
+    property_aliases: dict[str, tuple[SchematicObjectRef, ...]]
 
     def location(self, reference: SchematicObjectRef) -> CstLocation:
         try:
             return self.locations[object_ref_key(reference)]
         except KeyError as error:
             raise SemanticObjectNotFoundError(object_ref_key(reference)) from error
+
+    def aliases_for(
+        self, reference: SchematicObjectRef
+    ) -> tuple[SchematicObjectRef, ...]:
+        key = object_ref_key(reference)
+        self.location(reference)
+        try:
+            return self.aliases[key]
+        except KeyError as error:
+            raise SemanticObjectNotFoundError(key) from error
+
+    def aliases_for_property(
+        self, reference: SchematicObjectRef, name: str
+    ) -> tuple[SchematicObjectRef, ...]:
+        key = _property_location_key(reference, name)
+        try:
+            return self.property_aliases[key]
+        except KeyError as error:
+            raise SemanticObjectNotFoundError(key) from error
 
 
 class KicadSemanticError(ValueError):
@@ -222,20 +243,23 @@ def parse_schematic(project: Path) -> ParsedSchematic:
 
     root_record = records[root_path]
     root_sheet_ref = instances[0].ref
-    return ParsedSchematic(
-        document=SchematicDocument(
-            kicad_major=9,
-            root_file=root_record.relative_path,
-            root_sheet_ref=root_sheet_ref,
-            sheets=tuple(sorted(sheets, key=lambda item: object_ref_key(item.ref))),
-            symbols=tuple(sorted(symbols, key=lambda item: object_ref_key(item.ref))),
-            labels=tuple(sorted(labels, key=lambda item: object_ref_key(item.ref))),
-            nets=tuple(sorted(nets, key=lambda item: object_ref_key(item.ref))),
-            footprints=tuple(
-                sorted(footprints, key=lambda item: object_ref_key(item.symbol_ref))
-            ),
+    document = SchematicDocument(
+        kicad_major=9,
+        root_file=root_record.relative_path,
+        root_sheet_ref=root_sheet_ref,
+        sheets=tuple(sorted(sheets, key=lambda item: object_ref_key(item.ref))),
+        symbols=tuple(sorted(symbols, key=lambda item: object_ref_key(item.ref))),
+        labels=tuple(sorted(labels, key=lambda item: object_ref_key(item.ref))),
+        nets=tuple(sorted(nets, key=lambda item: object_ref_key(item.ref))),
+        footprints=tuple(
+            sorted(footprints, key=lambda item: object_ref_key(item.symbol_ref))
         ),
+    )
+    return ParsedSchematic(
+        document=document,
         locations=locations,
+        aliases=_build_aliases(document, locations),
+        property_aliases=_build_property_aliases(document, locations),
     )
 
 
@@ -479,17 +503,7 @@ def _extract_labels(
 def _extract_nets(
     record: _FileRecord, sheet_uuid: str, locations: dict[str, CstLocation]
 ) -> tuple[NetConnectivity, ...]:
-    unsupported_graph_nodes = tuple(
-        head
-        for head in ("wire", "junction", "bus", "bus_entry")
-        if record.cst.root.find_children(head)
-    )
-    if unsupported_graph_nodes:
-        raise KicadSemanticError(
-            "wire/junction connectivity extraction is not supported: "
-            + ", ".join(unsupported_graph_nodes)
-        )
-    nets: list[NetConnectivity] = []
+    nets = _wire_nets(record, sheet_uuid, locations)
     for node in record.cst.root.find_children("net"):
         net_uuid = _node_uuid(node, record.path, "net")
         ref = _reference("net", sheet_uuid, net_uuid)
@@ -501,7 +515,216 @@ def _extract_nets(
         )
         name = _atom(node, 1, record.path, "net name") if len(node.items) > 1 else None
         nets.append(NetConnectivity(ref=ref, name=name, members=tuple(sorted(members))))
+    net_keys = [object_ref_key(net.ref) for net in nets]
+    if len(set(net_keys)) != len(net_keys):
+        raise KicadSemanticError("duplicate net identity")
     return tuple(sorted(nets, key=lambda item: object_ref_key(item.ref)))
+
+
+def _wire_nets(
+    record: _FileRecord, sheet_uuid: str, locations: dict[str, CstLocation]
+) -> list[NetConnectivity]:
+    wires = [
+        (node, _optional_node_uuid(node, record.path, "wire"), _wire_points(node, record.path))
+        for node in record.cst.root.find_children("wire")
+    ]
+    if not wires:
+        return []
+    parents = list(range(len(wires)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    endpoints: dict[Point, list[int]] = {}
+    for index, (_, _, points) in enumerate(wires):
+        for point in points:
+            endpoints.setdefault(point, []).append(index)
+    for indexes in endpoints.values():
+        for index in indexes[1:]:
+            union(indexes[0], index)
+
+    junctions = [
+        (
+            node,
+            _optional_node_uuid(node, record.path, "junction"),
+            _point(node, record.path),
+        )
+        for node in record.cst.root.find_children("junction")
+    ]
+    for _, _, junction_point in junctions:
+        touching = [
+            index
+            for index, (_, _, points) in enumerate(wires)
+            if _point_on_wire(junction_point, points)
+        ]
+        for index in touching[1:]:
+            union(touching[0], index)
+
+    components: dict[int, list[int]] = {}
+    for index in range(len(wires)):
+        components.setdefault(find(index), []).append(index)
+    labels = _graph_labels(record, sheet_uuid)
+    pins = _graph_pins(record, sheet_uuid)
+    ports = _graph_ports(record, sheet_uuid)
+    nets: list[NetConnectivity] = []
+    for indexes in components.values():
+        component_wires = tuple(wires[index][2] for index in indexes)
+
+        def contains(point: Point) -> bool:
+            return any(_point_on_wire(point, wire_points) for wire_points in component_wires)
+
+        component_junctions = [
+            junction
+            for junction in junctions
+            if contains(junction[2])
+        ]
+        component_labels = [
+            label for label in labels if contains(label[2])
+        ]
+        component_pins = [
+            pin for pin in pins if contains(pin[2])
+        ]
+        component_ports = [
+            port for port in ports if contains(port[2])
+        ]
+        candidates: list[tuple[str, CstList]] = [
+            (uuid, node)
+            for index in indexes
+            for node, uuid, _ in (wires[index],)
+            if uuid is not None
+        ]
+        candidates.extend(
+            (uuid, node)
+            for node, uuid, _ in component_junctions
+            if uuid is not None
+        )
+        candidates.extend((reference.object_uuid, node) for reference, node, _, _ in component_labels)
+        if not candidates:
+            candidates.extend(
+                (reference.object_uuid, node) for reference, node, _ in component_pins
+            )
+            candidates.extend(
+                (reference.object_uuid, node) for reference, node, _ in component_ports
+            )
+        if not candidates:
+            raise KicadSemanticError("wire connectivity component has no UUID anchor")
+        anchor_uuid, anchor_node = min(candidates, key=lambda item: item[0])
+        ref = _reference("net", sheet_uuid, anchor_uuid)
+        locations[object_ref_key(ref)] = CstLocation(record.path, record.cst, anchor_node)
+        members: list[str] = []
+        for index in indexes:
+            _, uuid, _ = wires[index]
+            if uuid is not None:
+                members.append(f"wire:{sheet_uuid}:{uuid}")
+        for _, uuid, _ in component_junctions:
+            if uuid is not None:
+                members.append(f"junction:{sheet_uuid}:{uuid}")
+        members.extend(object_ref_key(reference) for reference, _, _, _ in component_labels)
+        members.extend(object_ref_key(reference) for reference, _, _ in component_pins)
+        members.extend(object_ref_key(reference) for reference, _, _ in component_ports)
+        names = sorted(name for _, _, _, name in component_labels)
+        nets.append(
+            NetConnectivity(
+                ref=ref,
+                name=names[0] if names else None,
+                members=tuple(sorted(members)),
+            )
+        )
+    return nets
+
+
+def _graph_labels(
+    record: _FileRecord, sheet_uuid: str
+) -> tuple[tuple[SchematicObjectRef, CstList, Point, str], ...]:
+    labels: list[tuple[SchematicObjectRef, CstList, Point, str]] = []
+    for head in ("label", "global_label", "hierarchical_label"):
+        for node in record.cst.root.find_children(head):
+            uuid = _node_uuid(node, record.path, "label")
+            labels.append(
+                (
+                    _reference("label", sheet_uuid, uuid),
+                    node,
+                    _point(node, record.path),
+                    _atom(node, 1, record.path, "label name"),
+                )
+            )
+    return tuple(labels)
+
+
+def _graph_pins(
+    record: _FileRecord, sheet_uuid: str
+) -> tuple[tuple[SchematicObjectRef, CstList, Point], ...]:
+    pins: list[tuple[SchematicObjectRef, CstList, Point]] = []
+    for symbol_node in record.cst.root.find_children("symbol"):
+        position = _point(symbol_node, record.path)
+        for pin_node in symbol_node.find_children("pin"):
+            number = _atom(pin_node, 1, record.path, "pin number")
+            uuid = _node_uuid(pin_node, record.path, "pin")
+            pins.append(
+                (
+                    _reference("pin", sheet_uuid, uuid, number),
+                    pin_node,
+                    position,
+                )
+            )
+    return tuple(pins)
+
+
+def _graph_ports(
+    record: _FileRecord, sheet_uuid: str
+) -> tuple[tuple[SchematicObjectRef, CstList, Point], ...]:
+    ports: list[tuple[SchematicObjectRef, CstList, Point]] = []
+    for sheet_node in record.cst.root.find_children("sheet"):
+        for port_node in sheet_node.find_children("pin"):
+            uuid = _node_uuid(port_node, record.path, "hierarchical port")
+            ports.append(
+                (
+                    _reference("hierarchical_port", sheet_uuid, uuid),
+                    port_node,
+                    _point(port_node, record.path),
+                )
+            )
+    return tuple(ports)
+
+
+def _wire_points(node: CstList, path: Path) -> tuple[Point, ...]:
+    points = _required_child(node, "pts", path).find_children("xy")
+    if len(points) < 2:
+        raise KicadSemanticError(f"wire requires at least two points: {path}")
+    return tuple(
+        Point(
+            x=_number(_atom(point, 1, path, "wire x coordinate"), path, "wire x coordinate"),
+            y=_number(_atom(point, 2, path, "wire y coordinate"), path, "wire y coordinate"),
+        )
+        for point in points
+    )
+
+
+def _point_on_wire(point: Point, wire_points: tuple[Point, ...]) -> bool:
+    return any(
+        _point_on_segment(point, start, end)
+        for start, end in zip(wire_points, wire_points[1:])
+    )
+
+
+def _point_on_segment(point: Point, start: Point, end: Point) -> bool:
+    tolerance = 1e-9
+    cross = (point.x - start.x) * (end.y - start.y) - (point.y - start.y) * (end.x - start.x)
+    if abs(cross) > tolerance:
+        return False
+    return (
+        min(start.x, end.x) - tolerance <= point.x <= max(start.x, end.x) + tolerance
+        and min(start.y, end.y) - tolerance <= point.y <= max(start.y, end.y) + tolerance
+    )
 
 
 def _sheet_name(node: CstList, default: str) -> str:
@@ -546,6 +769,20 @@ def _child(node: CstList, head: str) -> CstList | None:
 
 def _node_uuid(node: CstList, path: Path, description: str) -> str:
     uuid_node = _required_child(node, "uuid", path)
+    value = _atom(uuid_node, 1, path, f"{description} uuid")
+    try:
+        canonical = str(UUID(value))
+    except ValueError as error:
+        raise KicadSemanticError(f"invalid {description} uuid: {path}") from error
+    if canonical != value.lower():
+        raise KicadSemanticError(f"non-canonical {description} uuid: {path}")
+    return canonical
+
+
+def _optional_node_uuid(node: CstList, path: Path, description: str) -> str | None:
+    uuid_node = _child(node, "uuid")
+    if uuid_node is None:
+        return None
     value = _atom(uuid_node, 1, path, f"{description} uuid")
     try:
         canonical = str(UUID(value))
@@ -604,3 +841,54 @@ def _is_atom(node: CstNode, value: str) -> bool:
 
 def _property_location_key(reference: SchematicObjectRef, name: str) -> str:
     return f"{object_ref_key(reference)}:property:{name}"
+
+
+def _build_aliases(
+    document: SchematicDocument, locations: dict[str, CstLocation]
+) -> dict[str, tuple[SchematicObjectRef, ...]]:
+    references: list[SchematicObjectRef] = [document.root_sheet_ref]
+    references.extend(sheet.ref for sheet in document.sheets)
+    references.extend(port.ref for sheet in document.sheets for port in sheet.ports)
+    references.extend(symbol.ref for symbol in document.symbols)
+    references.extend(pin.ref for symbol in document.symbols for pin in symbol.pins)
+    references.extend(label.ref for label in document.labels)
+    references.extend(net.ref for net in document.nets)
+    groups: dict[tuple[Path, int, int], list[SchematicObjectRef]] = {}
+    for reference in references:
+        key = object_ref_key(reference)
+        location = locations.get(key)
+        if location is None:
+            raise KicadSemanticError(f"missing location for semantic object: {key}")
+        groups.setdefault(
+            (location.file_path, location.node.start, location.node.end), []
+        ).append(reference)
+    aliases: dict[str, tuple[SchematicObjectRef, ...]] = {}
+    for group in groups.values():
+        stable_group = tuple(sorted(set(group), key=object_ref_key))
+        for reference in stable_group:
+            aliases[object_ref_key(reference)] = stable_group
+    return aliases
+
+
+def _build_property_aliases(
+    document: SchematicDocument, locations: dict[str, CstLocation]
+) -> dict[str, tuple[SchematicObjectRef, ...]]:
+    groups: dict[tuple[Path, int, int], list[tuple[str, SchematicObjectRef]]] = {}
+    for symbol in document.symbols:
+        for property_ in symbol.properties:
+            key = _property_location_key(symbol.ref, property_.name)
+            location = locations.get(key)
+            if location is None:
+                raise KicadSemanticError(f"missing property location: {key}")
+            groups.setdefault(
+                (location.file_path, location.node.start, location.node.end), []
+            ).append((key, symbol.ref))
+    aliases: dict[str, tuple[SchematicObjectRef, ...]] = {}
+    for group in groups.values():
+        references = tuple(
+            reference
+            for _, reference in sorted(group, key=lambda item: object_ref_key(item[1]))
+        )
+        for key, _ in group:
+            aliases[key] = references
+    return aliases
