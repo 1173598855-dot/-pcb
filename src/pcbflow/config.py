@@ -18,6 +18,15 @@ class Settings:
     max_project_files: int = 10_000
     max_project_bytes: int = 1_000_000_000
     remote_mode: bool = False
+    module_catalog_dir: Path | None = None
+
+    @property
+    def projects_dir(self) -> Path:
+        return (self.data_dir / "projects").resolve()
+
+    @property
+    def workspaces_dir(self) -> Path:
+        return (self.data_dir / "workspaces").resolve()
 
     @classmethod
     def from_env(
@@ -29,6 +38,7 @@ class Settings:
         default_data_dir = (cwd or Path.cwd()) / ".pcbflow-data"
         data_dir = Path(values.get("PCBFLOW_DATA_DIR", str(default_data_dir))).resolve()
         configured_cli = values.get("PCBFLOW_KICAD_CLI")
+        configured_catalog = values.get("PCBFLOW_MODULE_CATALOG_DIR")
 
         return cls(
             data_dir=data_dir,
@@ -40,6 +50,9 @@ class Settings:
                 values.get("PCBFLOW_ARTIFACT_DIR", str(data_dir / "artifacts"))
             ).resolve(),
             kicad_cli=Path(configured_cli).resolve() if configured_cli else None,
+            module_catalog_dir=(
+                Path(configured_catalog).resolve() if configured_catalog else None
+            ),
             task_lease_seconds=int(values.get("PCBFLOW_TASK_LEASE_SECONDS", "60")),
             process_timeout_seconds=int(
                 values.get("PCBFLOW_PROCESS_TIMEOUT_SECONDS", "120")
@@ -60,3 +73,5 @@ class Settings:
     def ensure_directories(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
+        self.projects_dir.mkdir(parents=True, exist_ok=True)
+        self.workspaces_dir.mkdir(parents=True, exist_ok=True)

@@ -34,6 +34,8 @@ def test_settings_create_runtime_directories(tmp_path: Path) -> None:
 
     assert settings.data_dir.is_dir()
     assert settings.artifact_dir.is_dir()
+    assert settings.projects_dir.is_dir()
+    assert settings.workspaces_dir.is_dir()
 
 
 def test_settings_parse_validation_limits_and_remote_mode(tmp_path: Path) -> None:
@@ -49,3 +51,18 @@ def test_settings_parse_validation_limits_and_remote_mode(tmp_path: Path) -> Non
     assert settings.max_project_files == 321
     assert settings.max_project_bytes == 654321
     assert settings.remote_mode is True
+
+
+def test_settings_derive_managed_paths_and_optional_module_catalog(
+    tmp_path: Path,
+) -> None:
+    settings = Settings.from_env(
+        {
+            "PCBFLOW_DATA_DIR": str(tmp_path / "data"),
+            "PCBFLOW_MODULE_CATALOG_DIR": str(tmp_path / "modules"),
+        }
+    )
+
+    assert settings.projects_dir == (tmp_path / "data" / "projects").resolve()
+    assert settings.workspaces_dir == (tmp_path / "data" / "workspaces").resolve()
+    assert settings.module_catalog_dir == (tmp_path / "modules").resolve()

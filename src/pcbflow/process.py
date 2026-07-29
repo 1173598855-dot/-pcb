@@ -6,7 +6,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Protocol, Sequence
+from typing import BinaryIO, Mapping, Protocol, Sequence
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +16,8 @@ class ProcessResult:
     stdout: str
     stderr: str
     output_truncated: bool
+    stdout_bytes: bytes = b""
+    stderr_bytes: bytes = b""
 
 
 class ProcessTimeoutError(TimeoutError):
@@ -27,7 +29,12 @@ class ProcessTimeoutError(TimeoutError):
 
 class ProcessPort(Protocol):
     def run(
-        self, argv: Sequence[str], cwd: Path, timeout_seconds: float
+        self,
+        argv: Sequence[str],
+        cwd: Path,
+        timeout_seconds: float,
+        *,
+        env: Mapping[str, str] | None = None,
     ) -> ProcessResult: ...
 
 
@@ -48,8 +55,11 @@ class _BoundedCapture:
         finally:
             stream.close()
 
+    def bytes(self) -> bytes:
+        return bytes(self._data)
+
     def text(self) -> str:
-        return bytes(self._data).decode("utf-8", errors="replace")
+        return self.bytes().decode("utf-8", errors="replace")
 
 
 class ProcessRunner:
@@ -59,13 +69,33 @@ class ProcessRunner:
         self._max_output_bytes = max_output_bytes
 
     def run(
-        self, argv: Sequence[str], cwd: Path, timeout_seconds: float
+        self,
+        argv: Sequence[str],
+        cwd: Path,
+        timeout_seconds: float,
+        *,
+        env: Mapping[str, str] | None = None,
     ) -> ProcessResult:
         if not argv:
             raise ValueError("argv must not be empty")
         working_directory = cwd.resolve(strict=True)
         if not working_directory.is_dir():
             raise ValueError("cwd must be a directory")
+
+        allowed_names = (
+            "PATH",
+            "PATHEXT",
+            "SystemRoot",
+            "WINDIR",
+            "COMSPEC",
+            "TEMP",
+            "TMP",
+        )
+        process_env = {
+            name: os.environ[name] for name in allowed_names if name in os.environ
+        }
+        if env is not None:
+            process_env.update({str(key): str(value) for key, value in env.items()})
 
         options: dict[str, object] = {}
         if os.name == "nt":
@@ -80,6 +110,7 @@ class ProcessRunner:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             shell=False,
+            env=process_env,
             **options,
         )
         assert process.stdout is not None
@@ -94,7 +125,7 @@ class ProcessRunner:
         try:
             returncode = process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired as error:
-            self._terminate_tree(process)
+            self._terminate_tree(process, process_env)
             process.wait()
             stdout_thread.join()
             stderr_thread.join()
@@ -108,10 +139,14 @@ class ProcessRunner:
             stdout=stdout.text(),
             stderr=stderr.text(),
             output_truncated=stdout.truncated or stderr.truncated,
+            stdout_bytes=stdout.bytes(),
+            stderr_bytes=stderr.bytes(),
         )
 
     @staticmethod
-    def _terminate_tree(process: subprocess.Popen[bytes]) -> None:
+    def _terminate_tree(
+        process: subprocess.Popen[bytes], process_env: Mapping[str, str]
+    ) -> None:
         if process.poll() is not None:
             return
         if os.name == "nt":
@@ -124,6 +159,7 @@ class ProcessRunner:
                     shell=False,
                     timeout=5,
                     check=False,
+                    env=dict(process_env),
                 )
             except (OSError, subprocess.SubprocessError):
                 process.kill()
