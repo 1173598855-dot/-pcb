@@ -15,6 +15,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from pcbflow.domain import ProjectMode
+
 
 class Base(DeclarativeBase):
     pass
@@ -28,6 +30,27 @@ class ProjectRow(Base):
     source_path: Mapped[str] = mapped_column(Text, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    mode: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=ProjectMode.REGISTERED.value
+    )
+    managed_repo_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_revision: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    project_snapshot_digest: Mapped[str | None] = mapped_column(
+        String(71), nullable=True
+    )
+    active_requirement_set_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    adoption_idempotency_key: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, unique=True
+    )
+    adoption_input_digest: Mapped[str | None] = mapped_column(
+        String(71), nullable=True
+    )
+    managed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
 
 class TaskRow(Base):

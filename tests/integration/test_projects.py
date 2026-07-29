@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
+from pcbflow.domain import ProjectMode
 from pcbflow.repositories import (
     IdempotencyConflictError,
     ProjectNotFoundError,
@@ -57,3 +58,23 @@ def test_project_source_must_be_directory(
 
     with pytest.raises(ValueError, match="directory"):
         repository.create("Invalid", file_path, "invalid-source")
+
+
+def test_new_project_exposes_registered_phase_2a_defaults(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    repository = ProjectRepository(session_factory)
+    source = tmp_path / "registered"
+    source.mkdir()
+
+    project = repository.create("Registered", source, "registered-defaults")
+
+    assert project.mode is ProjectMode.REGISTERED
+    assert project.managed_repo_key is None
+    assert project.current_revision is None
+    assert project.project_snapshot_digest is None
+    assert project.active_requirement_set_id is None
+    assert project.adoption_idempotency_key is None
+    assert project.adoption_input_digest is None
+    assert project.managed_at is None
+    assert project.version == 1

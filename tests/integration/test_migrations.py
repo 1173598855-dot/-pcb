@@ -14,6 +14,13 @@ def test_initial_migration_creates_vertical_slice_tables(
     }
 
 
+def test_migrations_upgrade_to_phase_2a_head(migrated_engine: Engine) -> None:
+    with migrated_engine.connect() as connection:
+        version = connection.scalar(text("SELECT version_num FROM alembic_version"))
+
+    assert version == "0002_controlled_design_changes"
+
+
 def test_sqlite_connections_enable_required_pragmas(migrated_engine: Engine) -> None:
     with migrated_engine.connect() as connection:
         foreign_keys = connection.scalar(text("PRAGMA foreign_keys"))

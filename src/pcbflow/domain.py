@@ -16,12 +16,26 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+class ProjectMode(StrEnum):
+    REGISTERED = "registered"
+    MANAGED = "managed"
+
+
 @dataclass(frozen=True, slots=True)
 class Project:
     id: str
     name: str
     source_path: Path
     created_at: datetime
+    mode: ProjectMode
+    managed_repo_key: str | None
+    current_revision: str | None
+    project_snapshot_digest: str | None
+    active_requirement_set_id: str | None
+    adoption_idempotency_key: str | None
+    adoption_input_digest: str | None
+    managed_at: datetime | None
+    version: int
 
 
 class TaskStatus(StrEnum):

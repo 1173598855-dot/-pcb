@@ -15,6 +15,7 @@ from pcbflow.domain import (
     Finding,
     NormalizedFinding,
     Project,
+    ProjectMode,
     Task,
     TaskLease,
     TaskStatus,
@@ -61,6 +62,15 @@ def _project(row: ProjectRow) -> Project:
         name=row.name,
         source_path=Path(row.source_path),
         created_at=_utc(row.created_at),
+        mode=ProjectMode(row.mode),
+        managed_repo_key=row.managed_repo_key,
+        current_revision=row.current_revision,
+        project_snapshot_digest=row.project_snapshot_digest,
+        active_requirement_set_id=row.active_requirement_set_id,
+        adoption_idempotency_key=row.adoption_idempotency_key,
+        adoption_input_digest=row.adoption_input_digest,
+        managed_at=_utc(row.managed_at) if row.managed_at is not None else None,
+        version=row.version,
     )
 
 
