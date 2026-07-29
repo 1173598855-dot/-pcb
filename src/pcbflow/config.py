@@ -20,6 +20,11 @@ class Settings:
     remote_mode: bool = False
     module_catalog_dir: Path | None = None
 
+    def __post_init__(self) -> None:
+        scheme = self.database_url.split(":", 1)[0]
+        if scheme.split("+", 1)[0] != "sqlite":
+            raise ValueError("database_url must use SQLite")
+
     @property
     def projects_dir(self) -> Path:
         return (self.data_dir / "projects").resolve()

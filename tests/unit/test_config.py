@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from pcbflow.config import Settings
 
 
@@ -66,3 +68,26 @@ def test_settings_derive_managed_paths_and_optional_module_catalog(
     assert settings.projects_dir == (tmp_path / "data" / "projects").resolve()
     assert settings.workspaces_dir == (tmp_path / "data" / "workspaces").resolve()
     assert settings.module_catalog_dir == (tmp_path / "modules").resolve()
+
+
+@pytest.mark.parametrize("via_environment", [True, False])
+def test_settings_reject_non_sqlite_database_urls(
+    tmp_path: Path, via_environment: bool
+) -> None:
+    database_url = "postgresql+psycopg://localhost/pcbflow"
+
+    with pytest.raises(ValueError, match="^database_url must use SQLite$"):
+        if via_environment:
+            Settings.from_env(
+                {
+                    "PCBFLOW_DATA_DIR": str(tmp_path),
+                    "PCBFLOW_DATABASE_URL": database_url,
+                }
+            )
+        else:
+            Settings(
+                data_dir=tmp_path,
+                database_url=database_url,
+                artifact_dir=tmp_path / "artifacts",
+                kicad_cli=None,
+            )

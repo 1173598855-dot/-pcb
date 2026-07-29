@@ -118,22 +118,28 @@ def test_create_persists_batch_commands_task_proposal_and_outbox_once(
     }
 
 
+@pytest.mark.parametrize("change", ["intent", "risk", "command payload"])
 def test_create_rejects_same_key_with_different_canonical_input(
-    container, frozen_requirement_set
+    container, frozen_requirement_set, change: str
 ) -> None:
     project = container.projects.get(frozen_requirement_set.project_id)
     value = _batch(project, frozen_requirement_set)
     key = str(value["idempotency_key"])
     container.proposals.create(json.dumps(value).encode(), key)
-    commands = value["commands"]
-    assert isinstance(commands, list)
-    command = commands[0]
-    assert isinstance(command, dict)
-    operation = command["operation"]
-    assert isinstance(operation, dict)
-    payload = operation["payload"]
-    assert isinstance(payload, dict)
-    payload["value"] = "RED"
+    if change == "intent":
+        value["intent"] = "Set a different status indicator value"
+    elif change == "risk":
+        value["risk"] = "medium"
+    else:
+        commands = value["commands"]
+        assert isinstance(commands, list)
+        command = commands[0]
+        assert isinstance(command, dict)
+        operation = command["operation"]
+        assert isinstance(operation, dict)
+        payload = operation["payload"]
+        assert isinstance(payload, dict)
+        payload["value"] = "RED"
 
     with pytest.raises(IdempotencyConflictError):
         container.proposals.create(json.dumps(value).encode(), key)
