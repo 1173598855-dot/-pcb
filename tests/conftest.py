@@ -85,3 +85,20 @@ def requirement_yaml() -> bytes:
         / "reference-controller.yaml"
     )
     return fixture.read_bytes()
+
+
+@pytest.fixture
+def frozen_requirement_set(container, managed_project, requirement_yaml: bytes):
+    draft = container.requirements.import_draft(
+        managed_project.id, requirement_yaml, "command-test-requirements"
+    )
+    pending = container.requirements.submit(draft.id, "command-test-submit")
+    return container.approvals.decide_g1(
+        requirement_set_id=pending.id,
+        subject_digest=pending.subject_digest(),
+        decision="approve",
+        actor_type="human",
+        actor_id="local-user",
+        comment="approved",
+        idempotency_key="command-test-g1",
+    )

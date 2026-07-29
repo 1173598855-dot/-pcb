@@ -17,6 +17,8 @@ from pcbflow.db import create_engine_and_session
 from pcbflow.domain import new_id, utc_now
 from pcbflow.kicad import KicadCli, KicadPort
 from pcbflow.process import ProcessRunner
+from pcbflow.proposal_store import CommandBatchStore, ProposalStore
+from pcbflow.proposals import ProposalService
 from pcbflow.revision_store import ProjectRevisionStore
 from pcbflow.repositories import (
     EvidenceRepository,
@@ -49,6 +51,9 @@ class Container:
     approvals: ApprovalService
     reconciler: RevisionReconciler
     tasks: TaskRepository
+    command_batches: CommandBatchStore
+    proposal_store: ProposalStore
+    proposals: ProposalService
     evidence: EvidenceRepository
     findings: FindingRepository
     artifacts: ContentAddressedStore
@@ -78,6 +83,8 @@ def build_container(
 
     projects = ProjectRepository(sessions)
     tasks = TaskRepository(sessions)
+    command_batches = CommandBatchStore(sessions)
+    proposal_store = ProposalStore(sessions, clock)
     evidence = EvidenceRepository(sessions)
     findings = FindingRepository(sessions)
     artifacts = ContentAddressedStore(settings.artifact_dir)
@@ -100,6 +107,7 @@ def build_container(
     gate_decisions = GateDecisionStore(sessions, artifacts)
     reconciler = RevisionReconciler(projects, revision_store, revisions)
     requirements = RequirementService(requirement_store, projects, revisions)
+    proposals = ProposalService(projects, requirement_store, proposal_store)
     approvals = ApprovalService(
         requirement_store,
         projects,
@@ -141,6 +149,9 @@ def build_container(
         approvals=approvals,
         reconciler=reconciler,
         tasks=tasks,
+        command_batches=command_batches,
+        proposal_store=proposal_store,
+        proposals=proposals,
         evidence=evidence,
         findings=findings,
         artifacts=artifacts,
