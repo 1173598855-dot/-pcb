@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
+from threading import Lock
 
 import yaml
 
@@ -29,6 +30,13 @@ from pcbflow.workspaces import (
 
 
 _OBJECT_ID = re.compile(r"[0-9a-f]{40,64}")
+_ADOPTION_LOCKS_GUARD = Lock()
+_ADOPTION_LOCKS: dict[Path, Lock] = {}
+
+
+def _in_process_adoption_lock(path: Path) -> Lock:
+    with _ADOPTION_LOCKS_GUARD:
+        return _ADOPTION_LOCKS.setdefault(path, Lock())
 
 
 class GitOperationError(RuntimeError):
@@ -405,6 +413,34 @@ class RevisionService:
             raise ValueError("invalid project id")
         return self._projects_dir / project_id / "repo.git"
 
+    @contextmanager
+    def _adoption_lock(self, project_id: str) -> Iterator[None]:
+        lock_path = self._repo(project_id).parent / ".adoption.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        in_process_lock = _in_process_adoption_lock(lock_path)
+        with in_process_lock, lock_path.open("a+b") as lock_file:
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                unlock = lambda: msvcrt.locking(
+                    lock_file.fileno(), msvcrt.LK_UNLCK, 1
+                )
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                unlock = lambda: fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            try:
+                yield
+            finally:
+                unlock()
+
     @staticmethod
     def _manifest(source_snapshot_digest: str) -> bytes:
         value = {
@@ -459,6 +495,10 @@ class RevisionService:
     def adopt(self, project_id: str, idempotency_key: str) -> Project:
         if not idempotency_key:
             raise ValueError("idempotency key must not be empty")
+        with self._adoption_lock(project_id):
+            return self._adopt_locked(project_id, idempotency_key)
+
+    def _adopt_locked(self, project_id: str, idempotency_key: str) -> Project:
         existing_key = self._projects.find_by_adoption_key(idempotency_key)
         if existing_key is not None and existing_key.id != project_id:
             raise IdempotencyConflictError(idempotency_key)

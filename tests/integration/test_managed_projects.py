@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event, Lock, Thread, current_thread
 
 import pytest
 from sqlalchemy import select
@@ -323,3 +324,82 @@ def test_adopt_removes_new_repo_after_proof_failure_when_project_dir_exists(
 
     assert repo_root.is_dir()
     assert not (repo_root / "repo.git").exists()
+
+
+def test_adopt_serializes_concurrent_attempts_before_repository_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "board.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
+    container = build_container(_settings(tmp_path))
+    project = container.projects.create("Controller", source, "create-race")
+    repo = container.revisions._repo(project.id)
+    original_commit = container.revisions._git.commit_snapshot
+    original_exists = Path.exists
+    first_commit_entered = Event()
+    allow_first_commit = Event()
+    second_commit_entered = Event()
+    second_finished = Event()
+    call_lock = Lock()
+    outcome_lock = Lock()
+    outcomes: list[object] = []
+    commit_calls = 0
+    stale_observation_used = False
+
+    def controlled_commit(*args: object, **kwargs: object) -> str:
+        nonlocal commit_calls
+        with call_lock:
+            commit_calls += 1
+            ordinal = commit_calls
+        if ordinal == 1:
+            first_commit_entered.set()
+            assert allow_first_commit.wait(timeout=5)
+            return original_commit(*args, **kwargs)
+        second_commit_entered.set()
+        raise RuntimeError("forced second adoption failure")
+
+    def stale_repo_exists(path: Path) -> bool:
+        nonlocal stale_observation_used
+        if (
+            current_thread().name == "adopt-second"
+            and path == repo
+            and not stale_observation_used
+        ):
+            stale_observation_used = True
+            return False
+        return original_exists(path)
+
+    def adopt(key: str) -> None:
+        try:
+            outcome: object = container.revisions.adopt(project.id, key)
+        except BaseException as error:
+            outcome = error
+        with outcome_lock:
+            outcomes.append(outcome)
+        if key == "adopt-race-second":
+            second_finished.set()
+
+    monkeypatch.setattr(container.revisions._git, "commit_snapshot", controlled_commit)
+    monkeypatch.setattr(Path, "exists", stale_repo_exists)
+    first = Thread(target=adopt, args=("adopt-race-first",), name="adopt-first")
+    second = Thread(target=adopt, args=("adopt-race-second",), name="adopt-second")
+    first.start()
+    assert first_commit_entered.wait(timeout=5)
+    second.start()
+    second_reached_commit = second_commit_entered.wait(timeout=1)
+    if second_reached_commit:
+        assert second_finished.wait(timeout=5)
+    allow_first_commit.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert len(outcomes) == 2
+    assert all(
+        getattr(outcome, "mode", None) is ProjectMode.MANAGED for outcome in outcomes
+    ), outcomes
+    assert repo.is_dir()
+    assert not second_reached_commit
