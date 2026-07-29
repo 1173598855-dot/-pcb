@@ -805,12 +805,16 @@ def _library_pin_definitions(
     record: _FileRecord, lib_id: str, unit: int
 ) -> dict[str, _LibraryPin]:
     library_root = _library_symbol(record, lib_id)
+    nested_symbols = _nested_symbol_nodes(library_root)
     unit_nodes = tuple(
         node
-        for node in _nested_symbol_nodes(library_root)
+        for node in nested_symbols
         if _library_symbol_unit(node, lib_id) == unit
     )
-    source_nodes = unit_nodes or (library_root,)
+    has_unit_specific_definitions = any(
+        _library_symbol_unit(node, lib_id) is not None for node in nested_symbols
+    )
+    source_nodes = unit_nodes if has_unit_specific_definitions else (library_root,)
     definitions: dict[str, _LibraryPin] = {}
     for source in source_nodes:
         for pin_node in source.find_children("pin"):

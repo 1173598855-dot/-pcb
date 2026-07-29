@@ -234,6 +234,7 @@ def test_library_pin_geometry_uses_rotation_and_mirror_for_connectivity(
         (180, "", Point(8, 17)),
         (270, "", Point(13, 18)),
         (0, "(mirror x)", Point(12, 17)),
+        (0, "(mirror y)", Point(8, 23)),
     ],
 )
 def test_library_pin_geometry_supports_right_angle_rotation_and_mirror(
@@ -259,6 +260,55 @@ def test_library_pin_geometry_supports_right_angle_rotation_and_mirror(
     pin = inspect_schematic(tmp_path).symbols[0].pins[0]
 
     assert pin.position == expected
+
+
+def test_unit_specific_library_definition_does_not_fallback_to_root_pins(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "board.kicad_sch").write_text(
+        """(kicad_sch
+  (version 20250114)
+  (uuid 00000000-0000-0000-0000-000000000110)
+  (lib_symbols
+    (symbol "Test:Unit"
+      (pin passive line (at 0 0 0) (number "1"))
+      (symbol "Test:Unit_1_1"
+        (pin passive line (at 2 0 0) (number "1")))))
+  (symbol (lib_id "Test:Unit") (at 10 20 0) (unit 2)
+    (uuid 00000000-0000-0000-0000-000000000111)
+    (property "Reference" "U1")
+    (property "Value" "Unit")
+    (pin "1" (uuid 00000000-0000-0000-0000-000000000112))))
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KicadSemanticError, match="missing pin definitions.*unit 2"):
+        inspect_schematic(tmp_path)
+
+
+def test_root_level_library_pin_fallback_is_allowed_without_unit_definitions(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "board.kicad_sch").write_text(
+        """(kicad_sch
+  (version 20250114)
+  (uuid 00000000-0000-0000-0000-000000000120)
+  (lib_symbols
+    (symbol "Test:RootOnly"
+      (pin passive line (at 2 0 0) (name "A") (number "1"))))
+  (symbol (lib_id "Test:RootOnly") (at 10 20 0) (unit 2)
+    (uuid 00000000-0000-0000-0000-000000000121)
+    (property "Reference" "U1")
+    (property "Value" "RootOnly")
+    (pin "1" (uuid 00000000-0000-0000-0000-000000000122))))
+""",
+        encoding="utf-8",
+    )
+
+    pin = inspect_schematic(tmp_path).symbols[0].pins[0]
+
+    assert pin.position == Point(12, 20)
 
 
 def test_wire_crossing_requires_junction_and_endpoint_touch_does_not_join(
