@@ -144,6 +144,14 @@ class CstSchematicAdapter:
             _atomic_replace(target_file, root_bytes)
             root_changed = True
             after = inspect_schematic(project)
+            _validate_port_connectivity(
+                after,
+                sheet_uuid,
+                command,
+                revision,
+                manifest.ports,
+                payload.port_bindings,
+            )
             effects = _selectors_for_changes(before_document, after)
             attribution = CommandAttribution(
                 command_id=command.command_id,
@@ -247,11 +255,7 @@ def _render_child(revision: ModuleRevision, command: DesignCommand, parameter_bi
     if document.root.head != "kicad_sch":
         raise ValueError("module template is not a KiCad schematic")
     edits = []
-    for atom in _atoms(document.root):
-        try:
-            local_uuid = str(UUID(atom.value))
-        except ValueError:
-            continue
+    for atom, local_uuid in _uuid_atoms(document.root):
         if local_uuid not in revision.manifest.uuid_bindings:
             raise ValueError("module template UUID binding was not verified")
         edits.append(
@@ -274,12 +278,16 @@ def _render_child(revision: ModuleRevision, command: DesignCommand, parameter_bi
     return apply_edits(document, tuple(edits))
 
 
-def _atoms(node: CstList):
+def _uuid_atoms(node: CstList):
+    if node.head == "uuid" and len(node.items) == 2 and isinstance(node.items[1], CstAtom):
+        value = node.items[1].value
+        try:
+            yield node.items[1], str(UUID(value))
+        except ValueError as error:
+            raise ValueError("module template UUID is invalid") from error
     for item in node.items:
-        if isinstance(item, CstAtom):
-            yield item
-        else:
-            yield from _atoms(item)
+        if isinstance(item, CstList):
+            yield from _uuid_atoms(item)
 
 
 def _symbol_property_values(root: CstList, name: str) -> tuple[CstAtom, ...]:
@@ -330,14 +338,17 @@ def _make_sheet_nodes(
         make_list(make_atom("property"), make_string("Sheetfile"), make_string(child_relative)),
     ]
     labels: list[CstList] = []
+    wires: list[CstList] = []
     for index, name in enumerate(sorted(ports)):
         position = _binding_point(before, port_bindings[name])
+        port_position = Point(placement.x + 50, placement.y + 5 + index * 5)
         port_uuid = derive_module_uuid(command.project_id, command.batch_id, command.command_id, revision.manifest_digest, f"sheet-pin:{instance_name}:{name}")
         label_uuid = derive_module_uuid(command.project_id, command.batch_id, command.command_id, revision.manifest_digest, f"sheet-label:{instance_name}:{name}")
+        wire_uuid = derive_module_uuid(command.project_id, command.batch_id, command.command_id, revision.manifest_digest, f"sheet-wire:{instance_name}:{name}")
         children.append(
             make_list(
                 make_atom("pin"), make_string(name), make_atom(ports[name]),
-                make_list(make_atom("at"), make_atom(_number_text(placement.x + 50)), make_atom(_number_text(placement.y + 5 + index * 5)), make_atom("0")),
+                make_list(make_atom("at"), make_atom(_number_text(port_position.x)), make_atom(_number_text(port_position.y)), make_atom("0")),
                 make_list(make_atom("uuid"), make_atom(port_uuid)),
             )
         )
@@ -349,39 +360,98 @@ def _make_sheet_nodes(
                 make_list(make_atom("uuid"), make_atom(label_uuid)),
             )
         )
-    return (make_list(*children), *labels)
+        wires.append(
+            make_list(
+                make_atom("wire"),
+                make_list(
+                    make_atom("pts"),
+                    make_list(make_atom("xy"), make_atom(_number_text(position.x)), make_atom(_number_text(position.y))),
+                    make_list(make_atom("xy"), make_atom(_number_text(port_position.x)), make_atom(_number_text(port_position.y))),
+                ),
+                make_list(make_atom("uuid"), make_atom(wire_uuid)),
+            )
+        )
+    return (make_list(*children), *labels, *wires)
 
 
 def _binding_point(parsed: ParsedSchematic, target: SchematicObjectRef) -> Point:
     document = parsed.document
-    for symbol in document.symbols:
-        if symbol.ref == target:
-            return symbol.position
-        for pin in symbol.pins:
-            if pin.ref == target:
-                return pin.position
-    for label in document.labels:
-        if label.ref == target:
-            return label.position
-    for sheet in document.sheets:
-        for port in sheet.ports:
-            if port.ref == target:
-                return port.position
-    if target.kind == "net":
-        return _cst_anchor_point(parsed.location(target).node)
-    raise KicadSemanticError("module port binding target was not found")
+    if target.kind == "pin":
+        for symbol in document.symbols:
+            for pin in symbol.pins:
+                if pin.ref == target:
+                    return pin.position
+    if target.kind == "hierarchical_port":
+        for sheet in document.sheets:
+            for port in sheet.ports:
+                if port.ref == target:
+                    return port.position
+    raise KicadSemanticError("module port binding target must be a pin or hierarchical port")
 
 
-def _cst_anchor_point(node: CstList) -> Point:
-    at = node.find_children("at")
-    if len(at) == 1:
-        return Point(float(at[0].atom_text(1)), float(at[0].atom_text(2)))
-    points = node.find_children("pts")
-    if len(points) == 1:
-        xy = points[0].find_children("xy")
-        if xy:
-            return Point(float(xy[0].atom_text(1)), float(xy[0].atom_text(2)))
-    raise KicadSemanticError("module net binding has no geometric anchor")
+def _validate_port_connectivity(
+    after: SchematicDocument,
+    sheet_uuid: str,
+    command: DesignCommand,
+    revision: ModuleRevision,
+    ports,
+    bindings,
+) -> None:
+    if not ports:
+        return
+    sheet = next(
+        (item for item in after.sheets if item.ref.object_uuid == sheet_uuid),
+        None,
+    )
+    if sheet is None:
+        raise KicadSemanticError("instantiated sheet was not found")
+    child_pins = tuple(
+        pin
+        for symbol in after.symbols
+        if symbol.ref.sheet_uuid == sheet_uuid
+        for pin in symbol.pins
+    )
+    for name in sorted(ports):
+        port = next((item for item in sheet.ports if item.name == name), None)
+        label = next(
+            (
+                item
+                for item in after.labels
+                if item.name == name
+                and item.scope == "hierarchical"
+                and item.ref.sheet_uuid == sheet_uuid
+            ),
+            None,
+        )
+        parent_label_uuid = derive_module_uuid(
+            command.project_id,
+            command.batch_id,
+            command.command_id,
+            revision.manifest_digest,
+            f"sheet-label:{command.operation.payload.instance_name}:{name}",
+        )
+        parent_label = next(
+            (item for item in after.labels if item.ref.object_uuid == parent_label_uuid),
+            None,
+        )
+        if port is None or label is None or parent_label is None:
+            raise KicadSemanticError("module port endpoint was not created")
+        if not any(
+            {object_ref_key(label.ref), object_ref_key(pin.ref)} <= set(net.members)
+            for pin in child_pins
+            for net in after.nets
+        ):
+            raise KicadSemanticError("module child port is not connected to a pin")
+        target = bindings[name]
+        if not any(
+            {
+                object_ref_key(target),
+                object_ref_key(parent_label.ref),
+                object_ref_key(port.ref),
+            } <= set(net.members)
+            for net in after.nets
+        ):
+            raise KicadSemanticError("module parent port is not connected to target")
 
 
 def _number_text(value: float) -> str:

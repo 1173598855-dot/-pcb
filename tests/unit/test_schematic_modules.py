@@ -28,6 +28,7 @@ from pcbflow.schematic.cst import (
     parse_cst,
 )
 from pcbflow.schematic.diff import ChangeKind
+from pcbflow.schematic.semantic import KicadSemanticError, object_ref_key
 
 
 TEMPLATE_DIGEST = "sha256:af9e40b8da5a63158a95cff1d222eb8c7ce57e05e88759df50dacfc775ccfe4e"
@@ -211,7 +212,7 @@ def test_footprint_operation_without_catalog_returns_stable_not_found(tmp_path: 
         )
 
 
-def test_port_binding_adds_parent_label_as_a_root_sibling(tmp_path: Path) -> None:
+def test_symbol_port_binding_is_rejected(tmp_path: Path) -> None:
     project = tmp_path / "project"
     shutil.copytree(_fixture_root() / "kicad" / "controlled-design", project)
     catalog_root = tmp_path / "modules"
@@ -227,9 +228,8 @@ def test_port_binding_adds_parent_label_as_a_root_sibling(tmp_path: Path) -> Non
     }
     adapter = CstSchematicAdapter(FileModuleCatalog(catalog_root, max_files=16, max_bytes=1_000_000))
 
-    result = adapter.apply(project, (_command("prj_controller", "git:" + "1" * 40, port_bindings=binding),))
-
-    assert any(label.name == "OUT" for label in result.after.labels)
+    with pytest.raises(KicadSemanticError, match="port binding target"):
+        adapter.apply(project, (_command("prj_controller", "git:" + "1" * 40, port_bindings=binding),))
 
 
 def test_late_semantic_failure_restores_original_project(
@@ -482,12 +482,45 @@ def test_port_binding_uses_pin_position_and_exact_label_selectors(tmp_path: Path
     labels = [label for label in result.after.labels if label.name == "OUT"]
     assert any(label.scope == "local" and label.position.x == 123.19 for label in labels)
     assert any(label.scope == "hierarchical" for label in labels)
+    child_sheet = next(sheet for sheet in result.after.sheets if sheet.name == "STATUS_LED")
+    child_pin = next(
+        pin
+        for symbol in result.after.symbols
+        if symbol.ref.sheet_uuid == child_sheet.ref.object_uuid
+        for pin in symbol.pins
+        if pin.number == "1"
+    )
+    child_label = next(
+        label
+        for label in labels
+        if label.scope == "hierarchical" and label.ref.sheet_uuid == child_sheet.ref.object_uuid
+    )
+    parent_label = next(label for label in labels if label.scope == "local")
+    parent_port = child_sheet.ports[0]
+    parent_pin = next(
+        pin
+        for symbol in result.after.symbols
+        for pin in symbol.pins
+        if pin.ref.object_uuid == "00000000-0000-0000-0000-000000000003"
+    )
+    assert any(
+        {object_ref_key(child_pin.ref), object_ref_key(child_label.ref)} <= set(net.members)
+        for net in result.after.nets
+    )
+    assert any(
+        {
+            object_ref_key(parent_pin.ref),
+            object_ref_key(parent_label.ref),
+            object_ref_key(parent_port.ref),
+        } <= set(net.members)
+        for net in result.after.nets
+    )
     effects = result.command_results[0].effects
     assert sum(item.kind is ChangeKind.LABEL_ADDED for item in effects) == 2
     assert all(item.field is None for item in effects if item.kind is ChangeKind.LABEL_ADDED)
 
 
-def test_port_binding_uses_net_anchor_position(tmp_path: Path) -> None:
+def test_net_port_binding_is_rejected(tmp_path: Path) -> None:
     catalog_root = tmp_path / "modules"
     shutil.copytree(_fixture_root() / "modules", catalog_root)
     _add_out_port(catalog_root / "status-led-v1")
@@ -515,15 +548,32 @@ def test_port_binding_uses_net_anchor_position(tmp_path: Path) -> None:
     }
     adapter = CstSchematicAdapter(FileModuleCatalog(catalog_root, max_files=16, max_bytes=1_000_000))
 
-    result = adapter.apply(
-        project,
-        (_command("prj_controller", "git:" + "1" * 40, port_bindings=net_binding),),
-    )
+    with pytest.raises(KicadSemanticError, match="port binding target"):
+        adapter.apply(
+            project,
+            (_command("prj_controller", "git:" + "1" * 40, port_bindings=net_binding),),
+        )
 
-    assert any(
-        label.name == "OUT" and label.scope == "local" and label.position.x == 123.19
-        for label in result.after.labels
+
+def test_uuid_shaped_property_and_label_values_are_not_uuid_bindings(tmp_path: Path) -> None:
+    catalog_root = tmp_path / "modules"
+    shutil.copytree(_fixture_root() / "modules", catalog_root)
+    _add_uuid_shaped_values(catalog_root / "status-led-v1")
+    revision = FileModuleCatalog(catalog_root, max_files=16, max_bytes=1_000_000).get(
+        "modrev_status_led_v1"
     )
+    project = tmp_path / "project"
+    shutil.copytree(_fixture_root() / "kicad" / "controlled-design", project)
+    adapter = CstSchematicAdapter(FileModuleCatalog(catalog_root, max_files=16, max_bytes=1_000_000))
+
+    adapter.apply(project, (_command("prj_controller", "git:" + "1" * 40),))
+
+    child = project / "generated" / "status_led-cmd_status_led.kicad_sch"
+    rendered = child.read_text(encoding="utf-8")
+    assert "10000000-0000-0000-0000-000000000099" in rendered
+    assert "10000000-0000-0000-0000-000000000098" in rendered
+    assert "10000000-0000-0000-0000-000000000001" not in rendered
+    assert revision.manifest.uuid_bindings.get("10000000-0000-0000-0000-000000000099") is None
 
 
 def _add_out_port(module_dir: Path) -> None:
@@ -536,14 +586,61 @@ def _add_out_port(module_dir: Path) -> None:
         make_list(make_atom("at"), make_atom("100"), make_atom("100"), make_atom("0")),
         make_list(make_atom("uuid"), make_atom("10000000-0000-0000-0000-000000000005")),
     )
+    wire = make_list(
+        make_atom("wire"),
+        make_list(
+            make_atom("pts"),
+            make_list(make_atom("xy"), make_atom("96.19"), make_atom("100")),
+            make_list(make_atom("xy"), make_atom("100"), make_atom("100")),
+        ),
+        make_list(make_atom("uuid"), make_atom("10000000-0000-0000-0000-000000000006")),
+    )
     template.write_bytes(
-        apply_edits(document, (insert_before_close(document.root, (port,), indent=2),))
+        apply_edits(document, (insert_before_close(document.root, (port, wire), indent=2),))
     )
     digest = "sha256:" + hashlib.sha256(template.read_bytes()).hexdigest()
     manifest = module_dir / "module.yaml"
     text = manifest.read_text(encoding="utf-8")
     text = text.replace("ports: {}", "ports:\n  OUT: output")
-    text = text.replace("parameters:", "  10000000-0000-0000-0000-000000000005: out-port\nparameters:")
+    text = text.replace(
+        "parameters:",
+        "  10000000-0000-0000-0000-000000000005: out-port\n"
+        "  10000000-0000-0000-0000-000000000006: out-wire\nparameters:",
+    )
+    manifest.write_text(text.replace(TEMPLATE_DIGEST, digest), encoding="utf-8")
+
+
+def _add_uuid_shaped_values(module_dir: Path) -> None:
+    template = module_dir / "status-led.kicad_sch"
+    document = parse_cst(template.read_bytes())
+    symbol = document.root.find_children("symbol")[0]
+    property_node = make_list(
+        make_atom("property"),
+        make_string("UUID_NOTE"),
+        make_string("10000000-0000-0000-0000-000000000099"),
+    )
+    label = make_list(
+        make_atom("label"),
+        make_string("10000000-0000-0000-0000-000000000098"),
+        make_list(make_atom("at"), make_atom("110"), make_atom("100"), make_atom("0")),
+        make_list(make_atom("uuid"), make_atom("10000000-0000-0000-0000-000000000007")),
+    )
+    template.write_bytes(
+        apply_edits(
+            document,
+            (
+                insert_before_close(symbol, (property_node,), indent=4),
+                insert_before_close(document.root, (label,), indent=2),
+            ),
+        )
+    )
+    digest = "sha256:" + hashlib.sha256(template.read_bytes()).hexdigest()
+    manifest = module_dir / "module.yaml"
+    text = manifest.read_text(encoding="utf-8")
+    text = text.replace(
+        "parameters:",
+        "  10000000-0000-0000-0000-000000000007: uuid-label\nparameters:",
+    )
     manifest.write_text(text.replace(TEMPLATE_DIGEST, digest), encoding="utf-8")
 
 
