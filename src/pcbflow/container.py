@@ -10,6 +10,7 @@ from alembic.config import Config
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from pcbflow.approvals import ApprovalService, GateDecisionStore
 from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.config import Settings
 from pcbflow.db import create_engine_and_session
@@ -23,7 +24,8 @@ from pcbflow.repositories import (
     ProjectRepository,
     TaskRepository,
 )
-from pcbflow.revisions import GitCli, RevisionService
+from pcbflow.requirement_store import RequirementService, RequirementStore
+from pcbflow.revisions import GitCli, RevisionReconciler, RevisionService
 from pcbflow.tasks import Worker
 from pcbflow.validation import (
     VALIDATION_TASK_KIND,
@@ -41,6 +43,11 @@ class Container:
     projects: ProjectRepository
     revision_store: ProjectRevisionStore
     revisions: RevisionService
+    requirement_store: RequirementStore
+    gate_decisions: GateDecisionStore
+    requirements: RequirementService
+    approvals: ApprovalService
+    reconciler: RevisionReconciler
     tasks: TaskRepository
     evidence: EvidenceRepository
     findings: FindingRepository
@@ -89,6 +96,16 @@ def build_container(
         projects_dir=settings.projects_dir,
         workspaces_dir=settings.workspaces_dir,
     )
+    requirement_store = RequirementStore(sessions, artifacts)
+    gate_decisions = GateDecisionStore(sessions)
+    reconciler = RevisionReconciler(projects, revision_store, revisions)
+    requirements = RequirementService(requirement_store, projects, revisions)
+    approvals = ApprovalService(
+        requirement_store,
+        projects,
+        gate_decisions,
+        reconciler,
+    )
     kicad = KicadCli(
         runner,
         KicadCli.locate(settings.kicad_cli),
@@ -118,6 +135,11 @@ def build_container(
         projects=projects,
         revision_store=revision_store,
         revisions=revisions,
+        requirement_store=requirement_store,
+        gate_decisions=gate_decisions,
+        requirements=requirements,
+        approvals=approvals,
+        reconciler=reconciler,
         tasks=tasks,
         evidence=evidence,
         findings=findings,

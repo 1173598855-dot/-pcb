@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from sqlalchemy import select
 
@@ -8,7 +10,11 @@ from pcbflow.canonical import canonical_json_bytes
 from pcbflow.design_tables import RequirementSetRow
 from pcbflow.repositories import IdempotencyConflictError
 from pcbflow.requirement_store import RequirementStore
-from pcbflow.requirements import RequirementSetStatus, load_requirement_payload
+from pcbflow.requirements import (
+    RequirementSetStatus,
+    RequirementsBlockedError,
+    load_requirement_payload,
+)
 from pcbflow.tables import ArtifactRow
 
 
@@ -236,3 +242,116 @@ def test_gate_decision_rejects_digest_reuse_with_different_subject(
             actor_id="different-actor",
             comment="approved",
         )
+
+
+def _snapshot(root: Path) -> dict[Path, bytes]:
+    return {
+        path.relative_to(root): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_submit_and_approve_g1_advances_revision_without_touching_import_source(
+    container, managed_project, requirement_yaml: bytes
+) -> None:
+    source_before = _snapshot(managed_project.source_path)
+    draft = container.requirements.import_draft(
+        managed_project.id,
+        requirement_yaml,
+        "requirements-import-1",
+    )
+    pending = container.requirements.submit(draft.id, "requirements-submit-1")
+    assert pending.status is RequirementSetStatus.PENDING_APPROVAL
+    assert pending.candidate_revision is not None
+
+    subject_digest = pending.subject_digest()
+    frozen = container.approvals.decide_g1(
+        requirement_set_id=pending.id,
+        subject_digest=subject_digest,
+        decision="approve",
+        actor_type="human",
+        actor_id="local-user",
+        comment="requirements accepted",
+        idempotency_key="g1-approve-1",
+    )
+    repeated_submit = container.requirements.submit(
+        draft.id, "requirements-submit-1"
+    )
+    repeated_import = container.requirements.import_draft(
+        managed_project.id,
+        requirement_yaml,
+        "requirements-import-1",
+    )
+    project = container.projects.get(managed_project.id)
+    assert frozen.status is RequirementSetStatus.FROZEN
+    assert repeated_submit == frozen
+    assert repeated_import == frozen
+    assert frozen.frozen_revision == project.current_revision
+    assert project.active_requirement_set_id == frozen.id
+    assert _snapshot(managed_project.source_path) == source_before
+
+
+def test_reject_g1_is_idempotent_and_does_not_advance_revision(
+    container, managed_project, requirement_yaml: bytes
+) -> None:
+    source_before = _snapshot(managed_project.source_path)
+    draft = container.requirements.import_draft(
+        managed_project.id,
+        requirement_yaml,
+        "requirements-reject-import",
+    )
+    pending = container.requirements.submit(
+        draft.id, "requirements-reject-submit"
+    )
+    rejected = container.approvals.decide_g1(
+        requirement_set_id=pending.id,
+        subject_digest=pending.subject_digest(),
+        decision="reject",
+        actor_type="human",
+        actor_id="local-user",
+        comment="requirements need revision",
+        idempotency_key="g1-reject-1",
+    )
+    repeated = container.approvals.decide_g1(
+        requirement_set_id=pending.id,
+        subject_digest=pending.subject_digest(),
+        decision="reject",
+        actor_type="human",
+        actor_id="local-user",
+        comment="requirements need revision",
+        idempotency_key="g1-reject-1",
+    )
+
+    project = container.projects.get(managed_project.id)
+    assert rejected.status is RequirementSetStatus.REJECTED
+    assert repeated.id == rejected.id
+    assert project.current_revision == managed_project.current_revision
+    assert project.active_requirement_set_id is None
+    assert _snapshot(managed_project.source_path) == source_before
+
+
+def test_submit_blocks_open_blocking_assumptions_before_creating_candidate(
+    container, managed_project, requirement_yaml: bytes
+) -> None:
+    blocked_yaml = requirement_yaml.replace(
+        b"assumptions: []",
+        b"assumptions:\n"
+        b"  - id: ASM-POWER-001\n"
+        b"    statement: Input voltage is not confirmed.\n"
+        b"    blocking: true\n"
+        b"    owner: hardware-lead\n"
+        b"    closure_condition: Confirm the input voltage range.\n",
+    )
+    draft = container.requirements.import_draft(
+        managed_project.id, blocked_yaml, "requirements-blocked-import"
+    )
+
+    with pytest.raises(RequirementsBlockedError) as captured:
+        container.requirements.submit(draft.id, "requirements-blocked-submit")
+
+    assert captured.value.blocking_ids == ("ASM-POWER-001",)
+    assert container.requirement_store.get(draft.id).status is RequirementSetStatus.DRAFT
+    assert container.projects.get(managed_project.id).current_revision == (
+        managed_project.current_revision
+    )

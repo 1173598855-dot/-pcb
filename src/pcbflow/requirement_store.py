@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import yaml
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -11,14 +12,23 @@ from sqlalchemy.orm import Session, sessionmaker
 from pcbflow.artifacts import ArtifactDescriptor, ContentAddressedStore
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.design_tables import RequirementSetRow
-from pcbflow.domain import new_id, utc_now
-from pcbflow.repositories import IdempotencyConflictError
+from pcbflow.domain import ProjectMode, new_id, utc_now
+from pcbflow.repositories import (
+    IdempotencyConflictError,
+    ProjectRepository,
+    RevisionConflictError,
+)
 from pcbflow.requirements import (
     RequirementSet,
     RequirementSetPayload,
     RequirementSetStatus,
+    RequirementsBlockedError,
+    load_rendered_requirement_files,
+    load_requirement_payload,
+    render_requirement_files,
     requirement_digest,
 )
+from pcbflow.revisions import ProjectNotManagedError, RevisionService
 from pcbflow.tables import ArtifactRow
 
 
@@ -361,3 +371,121 @@ class RequirementStore:
             row.frozen_at = utc_now()
             session.flush()
             return _requirement_set(row)
+
+
+class RequirementService:
+    def __init__(
+        self,
+        store: RequirementStore,
+        projects: ProjectRepository,
+        revisions: RevisionService,
+    ) -> None:
+        self._store = store
+        self._projects = projects
+        self._revisions = revisions
+
+    @staticmethod
+    def _write_manifest_candidate(
+        workspace: Path, requirement_set: RequirementSet
+    ) -> None:
+        value = {
+            "schema_version": "1.0",
+            "project_id": requirement_set.project_id,
+            "mode": ProjectMode.MANAGED.value,
+            "requirement_candidate": {
+                "requirement_set_id": requirement_set.id,
+                "canonical_digest": requirement_set.canonical_digest,
+                "base_revision": requirement_set.base_revision,
+            },
+        }
+        (workspace / "pcbflow.yaml").write_bytes(
+            yaml.safe_dump(
+                value,
+                allow_unicode=True,
+                sort_keys=True,
+                default_flow_style=False,
+                line_break="\n",
+            ).encode("utf-8")
+        )
+
+    def import_draft(
+        self, project_id: str, data: bytes, idempotency_key: str
+    ) -> RequirementSet:
+        payload = load_requirement_payload(data)
+        existing = self._store.find_by_import_key(project_id, idempotency_key)
+        if existing is not None:
+            if existing.canonical_digest != requirement_digest(payload):
+                raise IdempotencyConflictError(idempotency_key)
+            return existing
+        project = self._projects.get(project_id)
+        if project.mode is not ProjectMode.MANAGED or project.current_revision is None:
+            raise ProjectNotManagedError(project.id)
+        return self._store.create_draft(
+            project.id,
+            project.current_revision,
+            payload,
+            idempotency_key,
+        )
+
+    def submit(
+        self, requirement_set_id: str, idempotency_key: str
+    ) -> RequirementSet:
+        requirement_set = self._store.get(requirement_set_id)
+        existing = self._store.find_by_submission_key(
+            requirement_set.project_id, idempotency_key
+        )
+        if existing is not None:
+            if existing.id != requirement_set.id:
+                raise IdempotencyConflictError(idempotency_key)
+            return existing
+        if requirement_set.submission_idempotency_key is not None:
+            raise IdempotencyConflictError(idempotency_key)
+
+        project = self._projects.get(requirement_set.project_id)
+        if project.mode is not ProjectMode.MANAGED or project.current_revision is None:
+            raise ProjectNotManagedError(project.id)
+        blocking_ids = tuple(
+            sorted(
+                item.id
+                for item in requirement_set.payload.assumptions
+                if item.blocking
+            )
+        )
+        if blocking_ids:
+            raise RequirementsBlockedError(blocking_ids)
+        if project.current_revision != requirement_set.base_revision:
+            raise RevisionConflictError(
+                requirement_set.base_revision, project.current_revision
+            )
+
+        files = render_requirement_files(requirement_set.payload)
+        with self._revisions.materialize(
+            project.id,
+            project.current_revision,
+            f"requirements-{requirement_set.id}",
+        ) as workspace:
+            for relative, contents in files.items():
+                target = workspace / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(contents)
+            written = {
+                relative: (workspace / relative).read_bytes() for relative in files
+            }
+            round_trip = load_rendered_requirement_files(written)
+            if requirement_digest(round_trip) != requirement_set.canonical_digest:
+                raise RuntimeError("rendered requirement digest mismatch")
+            self._write_manifest_candidate(workspace, requirement_set)
+            candidate = self._revisions.commit_candidate(
+                project=project,
+                workspace=workspace,
+                base_revision=project.current_revision,
+                ref=f"refs/pcbflow/requirements/{requirement_set.id}",
+                message=f"pcbflow: submit requirements {requirement_set.id}",
+                timestamp=requirement_set.created_at,
+            )
+        return self._store.mark_submitted(
+            requirement_set.id,
+            idempotency_key,
+            candidate.revision,
+            candidate.snapshot_digest,
+        )

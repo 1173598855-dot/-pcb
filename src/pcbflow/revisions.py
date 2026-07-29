@@ -78,6 +78,10 @@ class ProjectWorktreeDirtyError(RuntimeError):
     pass
 
 
+class ProjectNotManagedError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class CandidateRevision:
     revision: str
@@ -441,6 +445,13 @@ class RevisionService:
             raise ValueError("invalid project id")
         return self._projects_dir / project_id / "repo.git"
 
+    @property
+    def git(self) -> GitCli:
+        return self._git
+
+    def repo_path(self, project_id: str) -> Path:
+        return self._repo(project_id)
+
     @contextmanager
     def _adoption_lock(self, project_id: str) -> Iterator[None]:
         lock_path = self._repo(project_id).parent / ".adoption.lock"
@@ -494,9 +505,12 @@ class RevisionService:
     def _load_snapshot_excludes(workspace: Path) -> frozenset[str]:
         manifest = workspace / "pcbflow.yaml"
         value = yaml.safe_load(manifest.read_bytes())
-        if not isinstance(value, dict) or value.get("snapshot_policy_version") != 1:
+        if not isinstance(value, dict):
             raise ValueError("unsupported snapshot policy")
-        raw = value.get("snapshot_excludes")
+        policy_version = value.get("snapshot_policy_version")
+        if policy_version not in {None, 1}:
+            raise ValueError("unsupported snapshot policy")
+        raw = value.get("snapshot_excludes", [])
         if (
             not isinstance(raw, list)
             or any(not isinstance(item, str) for item in raw)
@@ -613,6 +627,7 @@ class RevisionService:
             character if character.isalnum() or character == "-" else "-"
             for character in purpose
         ).strip("-") or "revision"
+        safe_purpose = safe_purpose[:24]
         self._workspaces_dir.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(
             prefix=f"pcbflow-{safe_purpose}-", dir=self._workspaces_dir
@@ -650,6 +665,19 @@ class RevisionService:
     def resolve_design_ref(self, project_id: str) -> str | None:
         return self._git.resolve_ref(self._repo(project_id), "refs/heads/design")
 
+    def promote_design_ref(
+        self,
+        project_id: str,
+        revision: str,
+        expected_revision: str | None,
+    ) -> None:
+        self._git.update_ref(
+            self._repo(project_id),
+            "refs/heads/design",
+            revision,
+            expected_revision=expected_revision,
+        )
+
     def resolve_proposal_ref(
         self, project_id: str, proposal_id: str
     ) -> str | None:
@@ -677,3 +705,34 @@ class RevisionService:
         actual = self.snapshot_digest(workspace, excludes)
         if actual != stored.snapshot_digest:
             raise ProjectWorktreeDirtyError(project_id)
+
+
+class RevisionReconciler:
+    def __init__(
+        self,
+        projects: ProjectRepository,
+        revision_store: ProjectRevisionStore,
+        revisions: RevisionService,
+    ) -> None:
+        self._projects = projects
+        self._revision_store = revision_store
+        self._revisions = revisions
+
+    def run_once(self) -> int:
+        repaired = 0
+        for project in self._projects.list():
+            if project.mode is not ProjectMode.MANAGED:
+                continue
+            if project.current_revision is None:
+                raise ProjectNotManagedError(project.id)
+            self._revision_store.get(project.id, project.current_revision)
+            actual = self._revisions.resolve_design_ref(project.id)
+            if actual == project.current_revision:
+                continue
+            self._revisions.promote_design_ref(
+                project.id,
+                project.current_revision,
+                expected_revision=actual,
+            )
+            repaired += 1
+        return repaired

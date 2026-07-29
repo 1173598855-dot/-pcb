@@ -48,6 +48,12 @@ class RequirementSetStatus(StrEnum):
     SUPERSEDED = "superseded"
 
 
+class RequirementsBlockedError(ValueError):
+    def __init__(self, blocking_ids: tuple[str, ...]) -> None:
+        super().__init__("blocking requirements assumptions remain open")
+        self.blocking_ids = blocking_ids
+
+
 class Requirement(StrictModel):
     id: str = Field(pattern=r"^REQ-[A-Z0-9-]+$")
     kind: RequirementKind
