@@ -5,18 +5,21 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from types import MappingProxyType
+from typing import Mapping, Protocol
 from uuid import UUID, uuid5
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from pcbflow.canonical import canonical_digest
+from pcbflow.schematic.cst import CstAtom, CstList, parse_cst
 
 
 MODULE_UUID_NAMESPACE = UUID("9bcf613a-1ced-5b76-9a90-8fd90ac5f16d")
 _ALLOWED_SUFFIXES = frozenset((".yaml", ".kicad_sch"))
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_PORT_DIRECTIONS = frozenset(("input", "output", "bidirectional", "tri_state", "passive"))
 
 
 class ModuleIntegrityError(ValueError):
@@ -46,7 +49,7 @@ class FootprintEntry(_StrictManifest):
     digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
-class ModuleManifest(_StrictManifest):
+class _ManifestModel(_StrictManifest):
     schema_version: str = Field(pattern=r"^1\.0$")
     module_revision_id: str = Field(pattern=r"^modrev_[A-Za-z0-9_-]+$")
     status: str = Field(pattern=r"^verified$")
@@ -72,12 +75,34 @@ class ModuleManifest(_StrictManifest):
                 raise ValueError("uuid_bindings values must not be empty")
         return values
 
+    @field_validator("ports")
+    @classmethod
+    def supported_port_directions(cls, values: dict[str, str]) -> dict[str, str]:
+        if not all(name and direction in _PORT_DIRECTIONS for name, direction in values.items()):
+            raise ValueError("ports contain an unsupported direction")
+        return values
+
+
+@dataclass(frozen=True, slots=True)
+class ModuleManifest:
+    schema_version: str
+    module_revision_id: str
+    status: str
+    name: str
+    kicad_major: int
+    adapter_contract: str
+    template: TemplateEntry
+    uuid_bindings: Mapping[str, str]
+    parameters: Mapping[str, ParameterEntry]
+    ports: Mapping[str, str]
+    footprints: Mapping[str, FootprintEntry]
+
 
 @dataclass(frozen=True, slots=True)
 class ModuleRevision:
     manifest: ModuleManifest
     manifest_digest: str
-    template_path: Path
+    template_id: str
     template_bytes: bytes
 
 
@@ -135,11 +160,11 @@ class FileModuleCatalog:
         return index
 
     def _load_revision(self, manifest_path: Path, requested_id: str) -> ModuleRevision:
-        manifest = self._read_manifest(manifest_path)
-        if manifest.module_revision_id != requested_id:
+        wire_manifest = self._read_manifest(manifest_path)
+        if wire_manifest.module_revision_id != requested_id:
             raise ModuleIntegrityError("module revision id mismatch")
         module_dir = self._checked_directory(manifest_path.parent, "module directory")
-        template_path = module_dir / manifest.template.path
+        template_path = module_dir / wire_manifest.template.path
         if (
             template_path.parent != module_dir
             or template_path.suffix != ".kicad_sch"
@@ -152,20 +177,40 @@ class FileModuleCatalog:
         except OSError as error:
             raise ModuleIntegrityError("cannot read module template") from error
         digest = "sha256:" + hashlib.sha256(template_bytes).hexdigest()
-        if digest != manifest.template.digest:
+        if digest != wire_manifest.template.digest:
             raise ModuleIntegrityError("template digest mismatch")
+        template_uuids = _template_uuids(template_bytes)
+        if set(wire_manifest.uuid_bindings) != template_uuids:
+            raise ModuleIntegrityError("UUID bindings do not match template UUIDs")
+        if len(set(wire_manifest.uuid_bindings.values())) != len(wire_manifest.uuid_bindings):
+            raise ModuleIntegrityError("UUID binding roles must be unique")
+        if _template_port_labels(template_bytes) != dict(wire_manifest.ports):
+            raise ModuleIntegrityError("module port labels do not match manifest")
+        manifest = ModuleManifest(
+            schema_version=wire_manifest.schema_version,
+            module_revision_id=wire_manifest.module_revision_id,
+            status=wire_manifest.status,
+            name=wire_manifest.name,
+            kicad_major=wire_manifest.kicad_major,
+            adapter_contract=wire_manifest.adapter_contract,
+            template=wire_manifest.template,
+            uuid_bindings=MappingProxyType(dict(wire_manifest.uuid_bindings)),
+            parameters=MappingProxyType(dict(wire_manifest.parameters)),
+            ports=MappingProxyType(dict(wire_manifest.ports)),
+            footprints=MappingProxyType(dict(wire_manifest.footprints)),
+        )
         return ModuleRevision(
             manifest=manifest,
-            manifest_digest=canonical_digest(manifest.model_dump(mode="json")),
-            template_path=template_path.resolve(strict=True),
+            manifest_digest=canonical_digest(wire_manifest.model_dump(mode="json")),
+            template_id=wire_manifest.template.path,
             template_bytes=template_bytes,
         )
 
-    def _read_manifest(self, path: Path) -> ModuleManifest:
+    def _read_manifest(self, path: Path) -> _ManifestModel:
         self._checked_file(path)
         try:
             value = yaml.safe_load(path.read_bytes())
-            return ModuleManifest.model_validate(value, strict=True)
+            return _ManifestModel.model_validate(value, strict=True)
         except (OSError, yaml.YAMLError, ValidationError, TypeError, ValueError) as error:
             raise ModuleIntegrityError("invalid module manifest") from error
 
@@ -214,3 +259,52 @@ def _is_reparse_point(path: Path) -> bool:
         return bool(os.lstat(path).st_file_attributes & _REPARSE_POINT)
     except (AttributeError, OSError):
         return False
+
+
+def _template_uuids(data: bytes) -> set[str]:
+    try:
+        document = parse_cst(data)
+    except ValueError as error:
+        raise ModuleIntegrityError("invalid module template") from error
+    values: set[str] = set()
+    for node in _lists(document.root):
+        if node.head != "uuid" or len(node.items) != 2 or not isinstance(node.items[1], CstAtom):
+            continue
+        value = node.items[1].value
+        try:
+            if str(UUID(value)) != value.lower():
+                raise ValueError
+        except ValueError as error:
+            raise ModuleIntegrityError("template UUID is not canonical") from error
+        if value in values:
+            raise ModuleIntegrityError("template contains duplicate UUID")
+        values.add(value)
+    if not values:
+        raise ModuleIntegrityError("template contains no UUID bindings")
+    return values
+
+
+def _lists(node: CstList):
+    yield node
+    for item in node.items:
+        if isinstance(item, CstList):
+            yield from _lists(item)
+
+
+def _template_port_labels(data: bytes) -> dict[str, str]:
+    try:
+        document = parse_cst(data)
+        labels: dict[str, str] = {}
+        for node in _lists(document.root):
+            if node.head != "hierarchical_label":
+                continue
+            name = node.atom_text(1)
+            shape = node.find_children("shape")
+            if len(shape) != 1 or len(shape[0].items) != 2:
+                raise ModuleIntegrityError("module port label shape is invalid")
+            if name in labels:
+                raise ModuleIntegrityError("module port labels contain duplicates")
+            labels[name] = shape[0].atom_text(1)
+        return labels
+    except (ValueError, IndexError) as error:
+        raise ModuleIntegrityError("module port labels are invalid") from error

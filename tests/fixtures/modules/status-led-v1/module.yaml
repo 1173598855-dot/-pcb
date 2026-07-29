@@ -10,6 +10,8 @@ template:
 uuid_bindings:
   10000000-0000-0000-0000-000000000001: module-root
   10000000-0000-0000-0000-000000000002: led-symbol
+  10000000-0000-0000-0000-000000000003: led-pin-1
+  10000000-0000-0000-0000-000000000004: led-pin-2
 parameters:
   LED_VALUE:
     property_name: Value

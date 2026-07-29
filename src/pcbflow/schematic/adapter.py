@@ -11,7 +11,7 @@ from pcbflow.commands import DesignCommand, InstantiateModuleOperation, Schemati
 from pcbflow.schematic.cst import CstAtom, CstDocument, CstList, apply_edits, make_atom, make_list, make_string, parse_cst, replace_node
 from pcbflow.schematic.diff import ChangeKind, ChangeSelector, CommandAttribution, build_semantic_diff
 from pcbflow.schematic.modules import ModuleCatalogPort, ModuleRevision, ModuleRevisionNotFoundError, derive_module_uuid
-from pcbflow.schematic.semantic import KicadSemanticError, Point, SchematicDocument, inspect_schematic, object_ref_key, parse_schematic
+from pcbflow.schematic.semantic import KicadSemanticError, ParsedSchematic, Point, SchematicDocument, inspect_schematic, object_ref_key, parse_schematic
 
 
 class DesignCommandUnsupportedError(ValueError):
@@ -80,7 +80,7 @@ class CstSchematicAdapter:
         project_root = _checked_project(project)
         before = parse_schematic(project_root)
         revision = self._module_catalog.get(command.operation.payload.module_revision_id)
-        result, after, modified = self._instantiate(project_root, before.document, command, revision)
+        result, after, modified = self._instantiate(project_root, before, command, revision)
         return ApplyResult(
             modified_files=modified,
             command_results=(result,),
@@ -96,21 +96,24 @@ class CstSchematicAdapter:
     def _instantiate(
         self,
         project: Path,
-        before: SchematicDocument,
+        before: ParsedSchematic,
         command: DesignCommand,
         revision: ModuleRevision,
     ) -> tuple[CommandResult, SchematicDocument, tuple[str, ...]]:
         operation = command.operation
         assert isinstance(operation, InstantiateModuleOperation)
         payload = operation.payload
+        before_document = before.document
         manifest = revision.manifest
         if manifest.kicad_major != 9 or manifest.adapter_contract != self._ADAPTER_CONTRACT:
             raise ValueError("module adapter contract is unsupported")
+        if payload.placement_slot != "auto":
+            raise DesignCommandUnsupportedError("placement_slot")
         _validate_bindings(manifest.parameters, manifest.ports, payload.parameter_bindings, payload.port_bindings)
-        target_file, target_document = _target_document(project, before, payload.target_sheet_ref)
+        target_file, target_document = _target_document(project, before_document, payload.target_sheet_ref)
         child_relative = f"generated/{payload.instance_name.lower()}-{command.command_id}.kicad_sch"
-        child_path = project / Path(child_relative)
-        _validate_new_child_path(project, child_path)
+        child_path = target_file.parent / Path(child_relative)
+        _validate_new_child_path(project, target_file.parent, child_path)
         sheet_uuid = derive_module_uuid(
             command.project_id, command.batch_id, command.command_id, revision.manifest_digest, f"sheet:{payload.instance_name}"
         )
@@ -133,13 +136,15 @@ class CstSchematicAdapter:
         old_root_bytes = target_file.read_bytes()
         created = False
         root_changed = False
+        created_directory = False
         try:
+            created_directory = _ensure_generated_directory(child_path.parent)
             _atomic_create(child_path, child_bytes)
             created = True
             _atomic_replace(target_file, root_bytes)
             root_changed = True
             after = inspect_schematic(project)
-            effects = _selectors_for_changes(before, after)
+            effects = _selectors_for_changes(before_document, after)
             attribution = CommandAttribution(
                 command_id=command.command_id,
                 requirement_ids=command.provenance.requirement_ids,
@@ -147,20 +152,29 @@ class CstSchematicAdapter:
                 selectors=effects,
             )
             # This asserts that every observed semantic change has one exact selector.
-            build_semantic_diff(before, after, (attribution,))
+            build_semantic_diff(before_document, after, (attribution,))
         except Exception:
             if root_changed:
                 _atomic_replace(target_file, old_root_bytes)
             if created:
                 child_path.unlink(missing_ok=True)
+            if created_directory:
+                child_path.parent.rmdir()
             raise
-        modified = tuple(sorted((target_file.relative_to(project).as_posix(), child_relative)))
+        modified = tuple(
+            sorted(
+                (
+                    target_file.relative_to(project).as_posix(),
+                    child_path.relative_to(project).as_posix(),
+                )
+            )
+        )
         return (
             CommandResult(
                 command_id=command.command_id,
                 operation_type=operation.type,
                 effects=effects,
-                created_files=(child_relative,),
+                created_files=(child_path.relative_to(project).as_posix(),),
                 provenance_digests=(revision.manifest_digest, manifest.template.digest),
             ),
             after,
@@ -200,16 +214,32 @@ def _target_document(project: Path, document: SchematicDocument, target: Schemat
     return target_path, parse_cst(source)
 
 
-def _validate_new_child_path(project: Path, child: Path) -> None:
+def _validate_new_child_path(project: Path, target_directory: Path, child: Path) -> None:
     if not child.is_relative_to(project) or child.suffix != ".kicad_sch" or child.exists():
         raise ValueError("generated child path is invalid or already exists")
     parent = child.parent
+    if parent.parent != target_directory or parent.name != "generated":
+        raise KicadSemanticError("generated child path is unsafe")
     if parent.exists() and (parent.is_symlink() or _is_reparse_point(parent) or not parent.is_dir()):
         raise KicadSemanticError("generated directory is unsafe")
-    if not parent.exists():
-        parent.mkdir(mode=0o700)
-    if parent.is_symlink() or _is_reparse_point(parent):
+    if target_directory.is_symlink() or _is_reparse_point(target_directory):
         raise KicadSemanticError("generated directory is unsafe")
+
+
+def _ensure_generated_directory(path: Path) -> bool:
+    if path.exists():
+        return False
+    created = False
+    try:
+        path.mkdir(mode=0o700)
+        created = True
+        if path.is_symlink() or _is_reparse_point(path) or not path.is_dir():
+            raise KicadSemanticError("generated directory is unsafe")
+        return True
+    except Exception:
+        if created:
+            path.rmdir()
+        raise
 
 
 def _render_child(revision: ModuleRevision, command: DesignCommand, parameter_bindings: dict[str, str]) -> bytes:
@@ -222,6 +252,8 @@ def _render_child(revision: ModuleRevision, command: DesignCommand, parameter_bi
             local_uuid = str(UUID(atom.value))
         except ValueError:
             continue
+        if local_uuid not in revision.manifest.uuid_bindings:
+            raise ValueError("module template UUID binding was not verified")
         edits.append(
             replace_node(
                 atom,
@@ -320,7 +352,8 @@ def _make_sheet_nodes(
     return (make_list(*children), *labels)
 
 
-def _binding_point(document: SchematicDocument, target: SchematicObjectRef) -> Point:
+def _binding_point(parsed: ParsedSchematic, target: SchematicObjectRef) -> Point:
+    document = parsed.document
     for symbol in document.symbols:
         if symbol.ref == target:
             return symbol.position
@@ -334,7 +367,21 @@ def _binding_point(document: SchematicDocument, target: SchematicObjectRef) -> P
         for port in sheet.ports:
             if port.ref == target:
                 return port.position
+    if target.kind == "net":
+        return _cst_anchor_point(parsed.location(target).node)
     raise KicadSemanticError("module port binding target was not found")
+
+
+def _cst_anchor_point(node: CstList) -> Point:
+    at = node.find_children("at")
+    if len(at) == 1:
+        return Point(float(at[0].atom_text(1)), float(at[0].atom_text(2)))
+    points = node.find_children("pts")
+    if len(points) == 1:
+        xy = points[0].find_children("xy")
+        if xy:
+            return Point(float(xy[0].atom_text(1)), float(xy[0].atom_text(2)))
+    raise KicadSemanticError("module net binding has no geometric anchor")
 
 
 def _number_text(value: float) -> str:
