@@ -469,7 +469,7 @@ class ApprovalService:
         requirements: RequirementStore,
         projects: ProjectRepository,
         decisions: GateDecisionStore,
-        reconciler: RevisionReconciler,
+        reconciler: RevisionReconciler | None = None,
     ) -> None:
         self._requirements = requirements
         self._projects = projects
@@ -510,6 +510,6 @@ class ApprovalService:
             actor_id=actor_id,
             comment=comment,
         )
-        if decision == "approve":
+        if decision == "approve" and self._reconciler is not None:
             self._reconciler.run_once()
         return result

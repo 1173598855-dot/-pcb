@@ -147,6 +147,15 @@ class RequirementStore:
                 raise RequirementSetNotFoundError(requirement_set_id)
             return _requirement_set(row)
 
+    def list_for_project(self, project_id: str) -> tuple[RequirementSet, ...]:
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(RequirementSetRow).where(
+                    RequirementSetRow.project_id == project_id
+                )
+            ).all()
+            return tuple(_requirement_set(row) for row in rows)
+
     def find_by_import_key(
         self, project_id: str, idempotency_key: str
     ) -> RequirementSet | None:
@@ -379,10 +388,12 @@ class RequirementService:
         store: RequirementStore,
         projects: ProjectRepository,
         revisions: RevisionService,
+        reconciler=None,
     ) -> None:
         self._store = store
         self._projects = projects
         self._revisions = revisions
+        self._reconciler = reconciler
 
     @staticmethod
     def _write_manifest_candidate(
@@ -420,6 +431,8 @@ class RequirementService:
         project = self._projects.get(project_id)
         if project.mode is not ProjectMode.MANAGED or project.current_revision is None:
             raise ProjectNotManagedError(project.id)
+        if self._reconciler is not None:
+            self._reconciler.assert_writable(project.id)
         return self._store.create_draft(
             project.id,
             project.current_revision,
@@ -444,6 +457,8 @@ class RequirementService:
         project = self._projects.get(requirement_set.project_id)
         if project.mode is not ProjectMode.MANAGED or project.current_revision is None:
             raise ProjectNotManagedError(project.id)
+        if self._reconciler is not None:
+            self._reconciler.assert_writable(project.id)
         blocking_ids = tuple(
             sorted(
                 item.id

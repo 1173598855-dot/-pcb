@@ -18,7 +18,7 @@ from pcbflow.domain import new_id, utc_now
 from pcbflow.kicad import KicadCli, KicadPort
 from pcbflow.process import ProcessRunner
 from pcbflow.proposal_store import CommandBatchStore, ProposalStore
-from pcbflow.proposals import ProposalService, ProposalExecutor, DESIGN_PROPOSAL_TASK_KIND
+from pcbflow.proposals import ProposalService, ProposalExecutor, ProposalDecisionService, DESIGN_PROPOSAL_TASK_KIND
 from pcbflow.schematic.adapter import CstSchematicAdapter
 from pcbflow.schematic.modules import FileModuleCatalog
 from pcbflow.revision_store import ProjectRevisionStore
@@ -63,6 +63,7 @@ class Container:
     validation: ValidationService
     worker: Worker
     proposal_executor: ProposalExecutor
+    proposal_decisions: ProposalDecisionService
 
     def dispose(self) -> None:
         self.engine.dispose()
@@ -108,9 +109,19 @@ def build_container(
     )
     requirement_store = RequirementStore(sessions, artifacts)
     gate_decisions = GateDecisionStore(sessions, artifacts)
-    reconciler = RevisionReconciler(projects, revision_store, revisions)
-    requirements = RequirementService(requirement_store, projects, revisions)
-    proposals = ProposalService(projects, requirement_store, proposal_store)
+    reconciler = RevisionReconciler(
+        projects, revision_store, revisions,
+        requirements=requirement_store,
+        proposals=proposal_store,
+        sessions=sessions,
+        clock=clock,
+    )
+    requirements = RequirementService(
+        requirement_store, projects, revisions, reconciler=reconciler
+    )
+    proposals = ProposalService(
+        projects, requirement_store, proposal_store, reconciler=reconciler
+    )
     approvals = ApprovalService(
         requirement_store,
         projects,
@@ -126,6 +137,17 @@ def build_container(
     module_catalog = (FileModuleCatalog(settings.module_catalog_dir, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes) if settings.module_catalog_dir is not None else None)
     adapter = CstSchematicAdapter(module_catalog)
     proposal_executor = ProposalExecutor(proposal_store=proposal_store, command_batches=command_batches, projects=projects, requirements=requirement_store, tasks=tasks, revisions=revisions, adapter=adapter, kicad=selected_kicad, artifacts=artifacts, evidence=evidence, clock=clock, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes)
+    proposal_decisions = ProposalDecisionService(
+        proposal_store=proposal_store,
+        command_batches=command_batches,
+        projects=projects,
+        requirements=requirement_store,
+        revisions=revisions,
+        artifacts=artifacts,
+        evidence=evidence,
+        reconciler=reconciler,
+        clock=clock,
+    )
     handler = ValidationTaskHandler(
         projects,
         evidence,
@@ -143,7 +165,7 @@ def build_container(
         clock,
         settings.task_lease_seconds,
     )
-    return Container(
+    container = Container(
         settings=settings,
         engine=engine,
         sessions=sessions,
@@ -166,4 +188,11 @@ def build_container(
         validation=validation,
         worker=worker,
         proposal_executor=proposal_executor,
+        proposal_decisions=proposal_decisions,
     )
+    try:
+        reconciler.run_once()
+    except Exception:
+        container.dispose()
+        raise
+    return container

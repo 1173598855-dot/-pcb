@@ -7,6 +7,8 @@ import os
 import stat
 import tempfile
 import hashlib
+from sqlalchemy import select, text, update
+from sqlalchemy.orm import Session
 from pathlib import Path
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal
@@ -36,6 +38,17 @@ from pcbflow.schematic.semantic import SchematicDocument, object_ref_key
 from pcbflow.kicad import KicadPort, KicadCapability, parse_kicad_report, KicadUnavailableError, KicadProjectNotFoundError, KicadToolError
 from pcbflow.repositories import ProjectRepository
 from pcbflow.validation import assert_project_tree_safe
+from pcbflow.design_tables import GateDecisionRow, OutboxEventRow, ProjectRevisionRow, ChangeProposalRow, DesignCommandBatchRow, RequirementSetRow
+from pcbflow.tables import ArtifactRow, EvidenceRow, ProjectRow
+from pcbflow.domain import ProjectMode, new_id
+
+
+class CandidateNotReviewableError(RuntimeError):
+    pass
+
+
+class RevisionReconciliationRequiredError(RuntimeError):
+    pass
 
 if TYPE_CHECKING:
     from pcbflow.proposal_store import ProposalStore
@@ -146,10 +159,12 @@ class ProposalService:
         projects: ProjectRepository,
         requirements: RequirementStore,
         store: ProposalStore,
+        reconciler=None,
     ) -> None:
         self._projects = projects
         self._requirements = requirements
         self._store = store
+        self._reconciler = reconciler
 
     def create(self, data: bytes, idempotency_key: str) -> ChangeProposal:
         batch = load_command_batch(data)
@@ -161,6 +176,8 @@ class ProposalService:
         project = self._projects.get(batch.project_id)
         if project.mode is not ProjectMode.MANAGED:
             raise ProjectNotManagedError(project.id)
+        if self._reconciler is not None:
+            self._reconciler.assert_writable(project.id)
         if project.current_revision != batch.base_revision:
             raise RevisionConflictError(batch.base_revision, project.current_revision)
         requirement_set = self._requirements.get(batch.requirement_set_id)
@@ -428,3 +445,244 @@ def revisions_module_snapshot_files(root: Path):
             path = Path(directory) / name
             relative = path.relative_to(root).as_posix()
             yield path, relative, path.stat()
+
+
+class ProposalDecisionService:
+    def __init__(
+        self,
+        *,
+        proposal_store,
+        command_batches,
+        projects,
+        requirements,
+        revisions,
+        artifacts,
+        evidence,
+        reconciler,
+        clock,
+    ) -> None:
+        self._proposal_store = proposal_store
+        self._command_batches = command_batches
+        self._projects = projects
+        self._requirements = requirements
+        self._revisions = revisions
+        self._artifacts = artifacts
+        self._evidence = evidence
+        self._reconciler = reconciler
+        self._clock = clock
+
+    def _replay_or_none(
+        self,
+        *,
+        project_id: str,
+        proposal_id: str,
+        idempotency_key: str,
+        decision: str,
+        candidate_digest: str,
+        actor_type: str,
+        actor_id: str,
+        comment: str,
+    ) -> ChangeProposal | None:
+        existing = self._proposal_store.decision_for_key(project_id, idempotency_key)
+        if existing is None:
+            return None
+        from pcbflow.approvals import ApprovalDigestMismatchError
+        if existing["subject_digest"] != candidate_digest:
+            raise ApprovalDigestMismatchError(existing["subject_digest"], candidate_digest)
+        expected = {
+            "subject_id": proposal_id,
+            "actor_type": actor_type,
+            "actor_id": actor_id,
+            "comment": comment,
+        }
+        if any(existing[key] != value for key, value in expected.items()):
+            raise IdempotencyConflictError(idempotency_key)
+        allowed_decisions = {decision}
+        if decision == "approve":
+            allowed_decisions.add("stale")
+        if existing["decision"] not in allowed_decisions:
+            raise IdempotencyConflictError(idempotency_key)
+        return self._proposal_store.get(proposal_id)
+
+    def _validate_candidate(self, proposal: ChangeProposal, candidate_digest: str) -> tuple[object, object, object, dict[str, EvidenceItem]]:
+        if proposal.status is not ProposalStatus.READY_FOR_REVIEW:
+            raise CandidateNotReviewableError("candidate is not ready_for_review")
+        if proposal.review_digest != candidate_digest:
+            from pcbflow.approvals import ApprovalDigestMismatchError
+            raise ApprovalDigestMismatchError(proposal.review_digest or "", candidate_digest)
+        batch = self._command_batches.get(proposal.command_batch_id)
+        project = self._projects.get(proposal.project_id)
+        requirements = self._requirements.get(batch.requirement_set_id)
+        if project.mode is not ProjectMode.MANAGED:
+            raise CandidateNotReviewableError("project is not managed")
+        if requirements.status is not RequirementSetStatus.FROZEN or project.active_requirement_set_id != requirements.id:
+            raise CandidateNotReviewableError("requirement set is not the active frozen set")
+        if proposal.candidate_revision is None or proposal.candidate_snapshot_digest is None:
+            raise CandidateNotReviewableError("candidate revision is missing")
+        if not self._revisions.object_exists(project.id, proposal.candidate_revision):
+            raise CandidateNotReviewableError("candidate object is missing")
+        if self._revisions.resolve_proposal_ref(project.id, proposal.id) != proposal.candidate_revision:
+            raise CandidateNotReviewableError("candidate proposal ref is missing or stale")
+        validations = (proposal.result or {}).get("validations", {})
+        if not isinstance(validations, dict) or any(validations.get(name) != "pass" for name in (
+            "schema", "preconditions", "path_limits", "post_write_parse", "semantic_diff", "kicad_erc"
+        )):
+            raise CandidateNotReviewableError("mandatory validations are incomplete")
+        records = [item for item in self._evidence.list_for_project(project.id) if item.task_id == proposal.task_id]
+        by_kind = {item.kind: item for item in records}
+        if set(by_kind) != READY_EVIDENCE_KINDS or len(records) != len(READY_EVIDENCE_KINDS):
+            raise CandidateNotReviewableError("candidate evidence set is incomplete")
+        evidence_set_record = by_kind.get("proposal_evidence_set")
+        if (
+            evidence_set_record is None
+            or evidence_set_record.artifact_digest != proposal.evidence_set_digest
+            or evidence_set_record.verdict != "pass"
+        ):
+            raise CandidateNotReviewableError("candidate evidence set row is not bound")
+        if any(not self._artifacts.verify(item.artifact_digest) for item in records):
+            raise CandidateNotReviewableError("candidate evidence object is corrupted")
+        try:
+            evidence_set = EvidenceSet.model_validate_json(
+                self._artifacts.open(proposal.evidence_set_digest or "").read(), strict=True
+            )
+        except Exception as error:
+            raise CandidateNotReviewableError("candidate evidence set is invalid") from error
+        items = {item.kind: item for item in evidence_set.artifacts}
+        if (
+            evidence_set.project_id != project.id
+            or evidence_set.task_id != proposal.task_id
+            or evidence_set.proposal_id != proposal.id
+            or evidence_set.base_revision != batch.base_revision
+            or evidence_set.candidate_revision != proposal.candidate_revision
+            or set(items) != set(READY_EVIDENCE_MEDIA_TYPES)
+            or len(items) != len(READY_EVIDENCE_MEDIA_TYPES)
+        ):
+            raise CandidateNotReviewableError("candidate evidence set binding is invalid")
+        for kind, item in items.items():
+            record = by_kind.get(kind)
+            if (
+                record is None
+                or record.artifact_digest != item.artifact_digest
+                or not item.media_type
+                or item.verdict != "pass"
+            ):
+                raise CandidateNotReviewableError("candidate evidence rows do not match evidence set")
+            if not self._artifacts.verify(item.artifact_digest):
+                raise CandidateNotReviewableError("candidate evidence artifact is corrupted")
+        capability = items["adapter_capability_report"].artifact_digest
+        if proposal.semantic_diff_digest != items["schematic_semantic_diff"].artifact_digest:
+            raise CandidateNotReviewableError("candidate semantic diff digest mismatch")
+        if (proposal.result or {}).get("adapter_capability_digest") != capability:
+            raise CandidateNotReviewableError("candidate capability digest mismatch")
+        expected_review = proposal_review_digest(
+            proposal_id=proposal.id,
+            project_id=project.id,
+            base_revision=batch.base_revision,
+            candidate_revision=proposal.candidate_revision,
+            candidate_snapshot_digest=proposal.candidate_snapshot_digest,
+            requirement_set_digest=requirements.canonical_digest,
+            semantic_diff_digest=proposal.semantic_diff_digest or "",
+            evidence_set_digest=proposal.evidence_set_digest or "",
+            adapter_capability_digest=capability,
+        )
+        if expected_review != proposal.review_digest:
+            raise CandidateNotReviewableError("candidate review digest mismatch")
+        return project, batch, requirements, items
+
+    def accept(
+        self,
+        *,
+        proposal_id: str,
+        candidate_digest: str,
+        actor_type: str,
+        actor_id: str,
+        comment: str,
+        idempotency_key: str,
+    ) -> ChangeProposal:
+        proposal = self._proposal_store.get(proposal_id)
+        replay = self._replay_or_none(
+            project_id=proposal.project_id, proposal_id=proposal_id,
+            idempotency_key=idempotency_key, decision="approve",
+            candidate_digest=candidate_digest, actor_type=actor_type,
+            actor_id=actor_id, comment=comment,
+        )
+        if replay is not None:
+            if replay.status is ProposalStatus.STALE:
+                current = self._projects.get(replay.project_id)
+                batch = self._command_batches.get(replay.command_batch_id)
+                raise RevisionConflictError(batch.base_revision, current.current_revision)
+            return replay
+        project, batch, requirements, _items = self._validate_candidate(proposal, candidate_digest)
+        # A changed base is deliberately resolved by the decision transaction
+        # as a durable stale transition; reconciliation must not mask it with
+        # a missing-object error for the externally advanced revision.
+        if project.current_revision == batch.base_revision and hasattr(self._reconciler, "assert_writable"):
+            self._reconciler.assert_writable(project.id)
+        now = self._clock()
+        payload = {
+            "schema_version": "1.0", "gate": "DESIGN_CHANGE",
+            "proposal_id": proposal.id, "project_id": project.id,
+            "base_revision": batch.base_revision,
+            "candidate_revision": proposal.candidate_revision,
+            "review_digest": proposal.review_digest, "decision": "approve",
+            "actor": {"type": actor_type, "id": actor_id}, "comment": comment,
+            "created_at": now.isoformat().replace("+00:00", "Z"),
+        }
+        descriptor = self._artifacts.put_bytes(
+            canonical_json_bytes(payload), "application/vnd.pcbflow.design-change-decision+json"
+        )
+        result = self._proposal_store.decide_accept(
+            proposal_id=proposal.id, candidate_revision=proposal.candidate_revision or "",
+            base_revision=batch.base_revision,
+            expected_project_version=project.version,
+            candidate_snapshot_digest=proposal.candidate_snapshot_digest or "",
+            subject_digest=candidate_digest, idempotency_key=idempotency_key,
+            actor_type=actor_type, actor_id=actor_id, comment=comment,
+            approval_artifact=descriptor, now=now,
+        )
+        try:
+            self._revisions.promote_design_ref(project.id, proposal.candidate_revision or "", project.current_revision)
+        except Exception:
+            pass
+        return result
+
+    def reject(
+        self,
+        *,
+        proposal_id: str,
+        reason: str,
+        actor_type: str,
+        actor_id: str,
+        idempotency_key: str,
+    ) -> ChangeProposal:
+        proposal = self._proposal_store.get(proposal_id)
+        replay = self._replay_or_none(
+            project_id=proposal.project_id, proposal_id=proposal_id,
+            idempotency_key=idempotency_key, decision="reject",
+            candidate_digest=proposal.review_digest or "", actor_type=actor_type,
+            actor_id=actor_id, comment=reason,
+        )
+        if replay is not None:
+            return replay
+        project, batch, _requirements, _items = self._validate_candidate(proposal, proposal.review_digest or "")
+        if hasattr(self._reconciler, "assert_writable"):
+            self._reconciler.assert_writable(project.id)
+        now = self._clock()
+        payload = {
+            "schema_version": "1.0", "gate": "DESIGN_CHANGE",
+            "proposal_id": proposal.id, "project_id": project.id,
+            "base_revision": batch.base_revision,
+            "candidate_revision": proposal.candidate_revision,
+            "review_digest": proposal.review_digest, "decision": "reject",
+            "actor": {"type": actor_type, "id": actor_id}, "comment": reason,
+            "created_at": now.isoformat().replace("+00:00", "Z"),
+        }
+        descriptor = self._artifacts.put_bytes(
+            canonical_json_bytes(payload), "application/vnd.pcbflow.design-change-decision+json"
+        )
+        return self._proposal_store.decide_reject(
+            proposal_id=proposal.id, base_revision=batch.base_revision,
+            subject_digest=proposal.review_digest or "", idempotency_key=idempotency_key,
+            actor_type=actor_type, actor_id=actor_id, comment=reason,
+            rejection_artifact=descriptor, now=now,
+        )

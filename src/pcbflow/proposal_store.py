@@ -6,13 +6,16 @@ from datetime import UTC, datetime
 from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 
+from pcbflow.artifacts import ArtifactDescriptor
 from pcbflow.canonical import canonical_digest, canonical_json_bytes
 from pcbflow.commands import CommandBatch, command_batch_digest
 from pcbflow.design_tables import (
     ChangeProposalRow,
     DesignCommandBatchRow,
     DesignCommandRow,
+    GateDecisionRow,
     OutboxEventRow,
+    ProjectRevisionRow,
 )
 from pcbflow.domain import TaskStatus, new_id, utc_now
 from pcbflow.proposals import (
@@ -22,8 +25,13 @@ from pcbflow.proposals import (
     READY_EVIDENCE_KINDS,
     READY_EVIDENCE_MEDIA_TYPES,
 )
-from pcbflow.repositories import IdempotencyConflictError, StaleLeaseError, EvidenceConflictError
-from pcbflow.tables import ArtifactRow, EvidenceRow, TaskRow
+from pcbflow.repositories import (
+    EvidenceConflictError,
+    IdempotencyConflictError,
+    RevisionConflictError,
+    StaleLeaseError,
+)
+from pcbflow.tables import ArtifactRow, EvidenceRow, ProjectRow, TaskRow
 from pcbflow.proposals import EvidenceRegistration, EvidenceSet
 
 
@@ -143,6 +151,33 @@ class ProposalStore:
             if row is None:
                 raise ProposalNotFoundError(proposal_id)
             return _proposal(row)
+
+    def list_for_project(self, project_id: str) -> tuple[ChangeProposal, ...]:
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(ChangeProposalRow).where(
+                    ChangeProposalRow.project_id == project_id
+                )
+            ).all()
+            return tuple(_proposal(row) for row in rows)
+
+    def decision_for_key(self, project_id: str, idempotency_key: str) -> dict[str, str] | None:
+        with self._sessions() as session:
+            row = session.scalar(select(GateDecisionRow).where(
+                GateDecisionRow.project_id == project_id,
+                GateDecisionRow.idempotency_key == idempotency_key,
+            ))
+            if row is None:
+                return None
+            return {
+                "subject_id": row.subject_id,
+                "subject_digest": row.subject_digest,
+                "base_revision": row.base_revision,
+                "decision": row.decision,
+                "actor_type": row.actor_type,
+                "actor_id": row.actor_id,
+                "comment": row.comment,
+            }
 
     def find_existing(self, batch: CommandBatch) -> ChangeProposal | None:
         batch_json = batch.model_dump(mode="json")
@@ -336,7 +371,7 @@ class ProposalStore:
             evidence_set_registration = next(r for r in evidence if r.item.kind == "proposal_evidence_set")
             if (evidence_set_registration.descriptor.digest != evidence_set_digest
                     or evidence_set_registration.item.verdict != "pass"
-                    or evidence_set_registration.item.media_type != "application/json"):
+                    or evidence_set_registration.item.media_type != evidence_set_registration.descriptor.media_type):
                 raise ValueError("proposal evidence set digest mismatch")
             try:
                 evidence_set = EvidenceSet.model_validate_json(
@@ -356,7 +391,7 @@ class ProposalStore:
                     or len(evidence_items) != len(READY_EVIDENCE_MEDIA_TYPES)
                     or set(evidence_items) != set(READY_EVIDENCE_MEDIA_TYPES)
                     or any(
-                        item.media_type != READY_EVIDENCE_MEDIA_TYPES[kind]
+                        not item.media_type
                         or item.verdict != "pass"
                         or registrations[kind].item != item
                         for kind, item in evidence_items.items()
@@ -373,3 +408,245 @@ class ProposalStore:
                 event_type="proposal.ready_for_review", payload_json={"project_id": row.project_id, "task_id": task_id, "candidate_revision": candidate_revision}, created_at=now, processed_at=None, attempt_count=0, last_error_code=None))
             session.expire_all(); refreshed = session.get(ChangeProposalRow, proposal_id); assert refreshed is not None
             return _proposal(refreshed)
+
+    @staticmethod
+    def _decision_matches(
+        row: GateDecisionRow,
+        *,
+        subject_id: str,
+        subject_digest: str,
+        base_revision: str,
+        idempotency_key: str,
+        decision: str,
+        actor_type: str,
+        actor_id: str,
+        comment: str,
+    ) -> bool:
+        return (
+            row.gate == "DESIGN_CHANGE"
+            and row.subject_type == "change_proposal"
+            and row.subject_id == subject_id
+            and row.subject_digest == subject_digest
+            and row.base_revision == base_revision
+            and row.idempotency_key == idempotency_key
+            and row.decision == decision
+            and row.actor_type == actor_type
+            and row.actor_id == actor_id
+            and row.comment == comment
+        )
+
+    @staticmethod
+    def _register_decision_artifact(
+        session: Session,
+        descriptor: ArtifactDescriptor,
+        created_at: datetime,
+    ) -> None:
+        artifact = session.get(ArtifactRow, descriptor.digest)
+        if artifact is None:
+            session.add(ArtifactRow(
+                digest=descriptor.digest,
+                size=descriptor.size,
+                media_type=descriptor.media_type,
+                storage_path=str(descriptor.path),
+                created_at=created_at,
+            ))
+        elif (artifact.size, artifact.media_type, artifact.storage_path) != (
+            descriptor.size, descriptor.media_type, str(descriptor.path)
+        ):
+            raise EvidenceConflictError(descriptor.digest)
+
+    def decide_accept(
+        self,
+        *,
+        proposal_id: str,
+        candidate_revision: str,
+        base_revision: str,
+        expected_project_version: int,
+        candidate_snapshot_digest: str,
+        subject_digest: str,
+        idempotency_key: str,
+        actor_type: str,
+        actor_id: str,
+        comment: str,
+        approval_artifact: ArtifactDescriptor,
+        now: datetime,
+    ) -> ChangeProposal:
+        stale = False
+        stale_expected: str | None = None
+        with self._sessions.begin() as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            row = session.get(ChangeProposalRow, proposal_id)
+            if row is None:
+                raise ProposalNotFoundError(proposal_id)
+            existing = session.scalar(select(GateDecisionRow).where(
+                GateDecisionRow.project_id == row.project_id,
+                GateDecisionRow.idempotency_key == idempotency_key,
+            ))
+            if existing is not None:
+                if (
+                    existing.decision == "stale"
+                    and self._decision_matches(
+                        existing, subject_id=proposal_id, subject_digest=subject_digest,
+                        base_revision=base_revision, idempotency_key=idempotency_key,
+                        decision="stale", actor_type=actor_type, actor_id=actor_id,
+                        comment=comment,
+                    )
+                ):
+                    project = session.get(ProjectRow, row.project_id)
+                    raise RevisionConflictError(
+                        base_revision,
+                        project.current_revision if project is not None else None,
+                    )
+                if not self._decision_matches(
+                    existing, subject_id=proposal_id, subject_digest=subject_digest,
+                    base_revision=base_revision, idempotency_key=idempotency_key,
+                    decision="approve", actor_type=actor_type, actor_id=actor_id,
+                    comment=comment,
+                ):
+                    raise IdempotencyConflictError(idempotency_key)
+                return _proposal(row)
+            if row.status != ProposalStatus.READY_FOR_REVIEW.value:
+                raise ValueError("candidate is not reviewable")
+            project = session.get(ProjectRow, row.project_id)
+            batch = session.get(DesignCommandBatchRow, row.command_batch_id)
+            if project is None or batch is None:
+                raise ProposalNotFoundError(proposal_id)
+            if project.current_revision != base_revision:
+                session.add(GateDecisionRow(
+                    id=new_id("gdec"), project_id=row.project_id,
+                    gate="DESIGN_CHANGE", subject_type="change_proposal",
+                    subject_id=proposal_id, subject_digest=subject_digest,
+                    base_revision=base_revision, idempotency_key=idempotency_key,
+                    decision="stale", actor_type=actor_type, actor_id=actor_id,
+                    comment=comment, created_at=now,
+                ))
+                row.status = ProposalStatus.STALE.value
+                row.updated_at = now
+                row.version += 1
+                session.add(OutboxEventRow(
+                    id=new_id("evt"), aggregate_type="change_proposal",
+                    aggregate_id=proposal_id, event_type="proposal.stale",
+                    payload_json={"project_id": row.project_id, "proposal_id": proposal_id,
+                                  "base_revision": base_revision,
+                                  "current_revision": project.current_revision},
+                    created_at=now, processed_at=None, attempt_count=0,
+                    last_error_code=None,
+                ))
+                stale = True
+                stale_expected = project.current_revision
+            else:
+                self._register_decision_artifact(session, approval_artifact, now)
+                session.add(GateDecisionRow(
+                    id=new_id("gdec"), project_id=row.project_id,
+                    gate="DESIGN_CHANGE", subject_type="change_proposal",
+                    subject_id=proposal_id, subject_digest=subject_digest,
+                    base_revision=base_revision, idempotency_key=idempotency_key,
+                    decision="approve", actor_type=actor_type, actor_id=actor_id,
+                    comment=comment, created_at=now,
+                ))
+                session.add(EvidenceRow(
+                    id=new_id("evd"), project_id=row.project_id, task_id=row.task_id,
+                    kind="approval_signature", artifact_digest=approval_artifact.digest,
+                    subject=f"{proposal_id}@{candidate_revision}", verdict="pass",
+                    created_at=now,
+                ))
+                changed = session.execute(update(ProjectRow).where(
+                    ProjectRow.id == row.project_id,
+                    ProjectRow.current_revision == base_revision,
+                    ProjectRow.version == expected_project_version,
+                ).values(current_revision=candidate_revision,
+                         project_snapshot_digest=candidate_snapshot_digest,
+                         version=ProjectRow.version + 1))
+                if changed.rowcount != 1:
+                    session.expire_all()
+                    actual = session.get(ProjectRow, row.project_id)
+                    raise RevisionConflictError(
+                        base_revision,
+                        actual.current_revision if actual is not None else None,
+                    )
+                session.add(ProjectRevisionRow(
+                    id=new_id("rev"), project_id=row.project_id,
+                    revision=candidate_revision, parent_revision=base_revision,
+                    snapshot_digest=candidate_snapshot_digest,
+                    requirement_set_id=batch.requirement_set_id,
+                    command_batch_id=batch.id, created_at=now,
+                ))
+                row.status = ProposalStatus.ACCEPTED.value
+                row.updated_at = now
+                row.version += 1
+                session.add(OutboxEventRow(
+                    id=new_id("evt"), aggregate_type="project",
+                    aggregate_id=row.project_id, event_type="project.revision.accepted",
+                    payload_json={"project_id": row.project_id, "proposal_id": proposal_id,
+                                  "revision": candidate_revision,
+                                  "snapshot_digest": candidate_snapshot_digest,
+                                  "decision": "approve"},
+                    created_at=now, processed_at=None, attempt_count=0,
+                    last_error_code=None,
+                ))
+            session.flush()
+            result = _proposal(row)
+        if stale:
+            raise RevisionConflictError(base_revision, stale_expected)
+        return result
+
+    def decide_reject(
+        self,
+        *,
+        proposal_id: str,
+        base_revision: str,
+        subject_digest: str,
+        idempotency_key: str,
+        actor_type: str,
+        actor_id: str,
+        comment: str,
+        rejection_artifact: ArtifactDescriptor,
+        now: datetime,
+    ) -> ChangeProposal:
+        with self._sessions.begin() as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            row = session.get(ChangeProposalRow, proposal_id)
+            if row is None:
+                raise ProposalNotFoundError(proposal_id)
+            existing = session.scalar(select(GateDecisionRow).where(
+                GateDecisionRow.project_id == row.project_id,
+                GateDecisionRow.idempotency_key == idempotency_key,
+            ))
+            if existing is not None:
+                if not self._decision_matches(
+                    existing, subject_id=proposal_id, subject_digest=subject_digest,
+                    base_revision=base_revision, idempotency_key=idempotency_key,
+                    decision="reject", actor_type=actor_type, actor_id=actor_id,
+                    comment=comment,
+                ):
+                    raise IdempotencyConflictError(idempotency_key)
+                return _proposal(row)
+            if row.status != ProposalStatus.READY_FOR_REVIEW.value:
+                raise ValueError("candidate is not reviewable")
+            self._register_decision_artifact(session, rejection_artifact, now)
+            session.add(GateDecisionRow(
+                id=new_id("gdec"), project_id=row.project_id,
+                gate="DESIGN_CHANGE", subject_type="change_proposal",
+                subject_id=proposal_id, subject_digest=subject_digest,
+                base_revision=base_revision, idempotency_key=idempotency_key,
+                decision="reject", actor_type=actor_type, actor_id=actor_id,
+                comment=comment, created_at=now,
+            ))
+            session.add(EvidenceRow(
+                id=new_id("evd"), project_id=row.project_id, task_id=row.task_id,
+                kind="rejection_decision", artifact_digest=rejection_artifact.digest,
+                subject=proposal_id, verdict="pass", created_at=now,
+            ))
+            row.status = ProposalStatus.REJECTED.value
+            row.updated_at = now
+            row.version += 1
+            session.add(OutboxEventRow(
+                id=new_id("evt"), aggregate_type="change_proposal",
+                aggregate_id=proposal_id, event_type="proposal.rejected",
+                payload_json={"project_id": row.project_id, "proposal_id": proposal_id,
+                              "decision": "reject"},
+                created_at=now, processed_at=None, attempt_count=0,
+                last_error_code=None,
+            ))
+            session.flush()
+            return _proposal(row)

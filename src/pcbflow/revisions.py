@@ -17,9 +17,16 @@ from threading import Lock
 from typing import BinaryIO
 
 import yaml
+from sqlalchemy import select, text
 
 from pcbflow.canonical import canonical_digest
-from pcbflow.domain import Project, ProjectMode
+from pcbflow.design_tables import (
+    ChangeProposalRow,
+    GateDecisionRow,
+    OutboxEventRow,
+    RequirementSetRow,
+)
+from pcbflow.domain import Project, ProjectMode, new_id, utc_now
 from pcbflow.process import ProcessPort, ProcessResult
 from pcbflow.repositories import IdempotencyConflictError, ProjectRepository
 from pcbflow.revision_store import ProjectRevisionStore
@@ -315,6 +322,14 @@ class GitCli:
             return None
         object_id = result.stdout.strip()
         return f"git:{object_id}" if _OBJECT_ID.fullmatch(object_id) else None
+
+    def object_exists(self, repo: Path, revision: str) -> bool:
+        object_id = _strip_revision(revision)
+        result = self._invoke(
+            ["git", f"--git-dir={repo.resolve(strict=True)}", "cat-file", "-e", f"{object_id}^{{commit}}"],
+            repo.resolve(strict=True).parent,
+        )
+        return result.returncode == 0
 
     def update_ref(
         self,
@@ -689,6 +704,17 @@ class RevisionService:
     def resolve_design_ref(self, project_id: str) -> str | None:
         return self._git.resolve_ref(self._repo(project_id), "refs/heads/design")
 
+    def object_exists(self, project_id: str, revision: str) -> bool:
+        try:
+            return self._git.object_exists(self._repo(project_id), revision)
+        except (ValueError, GitOperationError):
+            return False
+
+    def snapshot_digest_for_revision(self, project_id: str, revision: str) -> str:
+        with self.materialize(project_id, revision, "reconcile-proof") as workspace:
+            excludes = self._load_snapshot_excludes(workspace)
+            return self.snapshot_digest(workspace, excludes)
+
     def promote_design_ref(
         self,
         project_id: str,
@@ -714,6 +740,11 @@ class RevisionService:
             self._repo(project_id), "refs/pcbflow/proposals/"
         )
 
+    def list_requirement_refs(self, project_id: str) -> dict[str, str]:
+        return self._git.list_refs(
+            self._repo(project_id), "refs/pcbflow/requirements/"
+        )
+
     def is_ancestor(
         self, project_id: str, ancestor: str, descendant: str
     ) -> bool:
@@ -735,12 +766,222 @@ class RevisionReconciler:
     def __init__(
         self,
         projects: ProjectRepository,
-        revision_store: ProjectRevisionStore,
-        revisions: RevisionService,
+        revision_store: ProjectRevisionStore | None = None,
+        revisions: RevisionService | None = None,
+        *,
+        requirements=None,
+        proposals=None,
+        sessions=None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._projects = projects
         self._revision_store = revision_store
         self._revisions = revisions
+        self._requirements = requirements
+        self._proposals = proposals
+        self._sessions = sessions
+        self._clock = clock or utc_now
+
+    @staticmethod
+    def _terminal(project_id: str, detail: str) -> RuntimeError:
+        from pcbflow.proposals import RevisionReconciliationRequiredError
+
+        return RevisionReconciliationRequiredError(f"{project_id}: {detail}")
+
+    def _record_unknown_ref(
+        self, project_id: str, ref_name: str, revision: str
+    ) -> None:
+        if self._sessions is None:
+            return
+        payload = {
+            "project_id": project_id,
+            "ref_name": ref_name,
+            "revision": revision,
+        }
+        with self._sessions.begin() as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            existing = session.scalars(
+                select(OutboxEventRow).where(
+                    OutboxEventRow.event_type == "revision.unknown_ref"
+                )
+            ).all()
+            if any(event.payload_json == payload for event in existing):
+                return
+            session.add(
+                OutboxEventRow(
+                    id=new_id("evt"),
+                    aggregate_type="project",
+                    aggregate_id=project_id,
+                    event_type="revision.unknown_ref",
+                    payload_json=payload,
+                    created_at=self._clock(),
+                    processed_at=None,
+                    attempt_count=0,
+                    last_error_code=None,
+                )
+            )
+
+    def _assert_projection_facts(self, project_id: str, revision: str) -> None:
+        if self._revision_store is None:
+            return
+        try:
+            stored = self._revision_store.get(project_id, revision)
+        except Exception as error:
+            raise self._terminal(project_id, "database revision is missing") from error
+        project = self._projects.get(project_id)
+        if (
+            project.project_snapshot_digest is not None
+            and stored.snapshot_digest != project.project_snapshot_digest
+        ):
+            raise self._terminal(project_id, "database snapshot digest is inconsistent")
+        if self._sessions is None or (
+            stored.requirement_set_id is None and stored.command_batch_id is None
+        ):
+            return
+        with self._sessions() as session:
+            if stored.requirement_set_id is not None:
+                requirement = session.get(RequirementSetRow, stored.requirement_set_id)
+                decision = session.scalar(
+                    select(GateDecisionRow).where(
+                        GateDecisionRow.project_id == project_id,
+                        GateDecisionRow.gate == "G1",
+                        GateDecisionRow.subject_type == "requirement_set",
+                        GateDecisionRow.subject_id == stored.requirement_set_id,
+                        GateDecisionRow.decision == "approve",
+                    )
+                )
+                if (
+                    requirement is None
+                    or requirement.status != "frozen"
+                    or requirement.frozen_revision != revision
+                    or decision is None
+                ):
+                    raise self._terminal(project_id, "G1 acceptance facts are inconsistent")
+            if stored.command_batch_id is not None:
+                proposal = session.scalar(
+                    select(ChangeProposalRow).where(
+                        ChangeProposalRow.project_id == project_id,
+                        ChangeProposalRow.command_batch_id == stored.command_batch_id,
+                    )
+                )
+                decision = None
+                if proposal is not None:
+                    decision = session.scalar(
+                        select(GateDecisionRow).where(
+                            GateDecisionRow.project_id == project_id,
+                            GateDecisionRow.gate == "DESIGN_CHANGE",
+                            GateDecisionRow.subject_type == "change_proposal",
+                            GateDecisionRow.subject_id == proposal.id,
+                            GateDecisionRow.decision == "approve",
+                        )
+                    )
+                if (
+                    proposal is None
+                    or proposal.status != "accepted"
+                    or proposal.candidate_revision != revision
+                    or decision is None
+                ):
+                    raise self._terminal(project_id, "proposal acceptance facts are inconsistent")
+
+    def _scan_candidate_refs(self, project_id: str) -> None:
+        if self._sessions is None:
+            return
+        with self._sessions() as session:
+            requirements = {
+                row.id: row for row in session.scalars(
+                    select(RequirementSetRow).where(
+                        RequirementSetRow.project_id == project_id
+                    )
+                )
+            }
+            proposals = {
+                row.id: row for row in session.scalars(
+                    select(ChangeProposalRow).where(
+                        ChangeProposalRow.project_id == project_id
+                    )
+                )
+            }
+        list_requirement_refs = getattr(self._revisions, "list_requirement_refs", None)
+        list_proposal_refs = getattr(self._revisions, "list_proposal_refs", None)
+        requirement_refs = (
+            list_requirement_refs(project_id) if list_requirement_refs is not None else {}
+        )
+        proposal_refs = (
+            list_proposal_refs(project_id) if list_proposal_refs is not None else {}
+        )
+        for requirement in requirements.values():
+            if requirement.status != "pending_approval":
+                continue
+            ref_name = f"refs/pcbflow/requirements/{requirement.id}"
+            actual_ref = requirement_refs.get(ref_name)
+            if list_requirement_refs is None:
+                actual_ref = getattr(self._revisions, "resolve_requirement_ref", lambda *_: None)(
+                    project_id, requirement.id
+                )
+            if (
+                requirement.candidate_revision is None
+                or actual_ref != requirement.candidate_revision
+                or not self._revisions.object_exists(
+                    project_id, requirement.candidate_revision
+                )
+                or not self._snapshot_matches(
+                    project_id,
+                    requirement.candidate_revision,
+                    requirement.candidate_snapshot_digest,
+                )
+            ):
+                raise self._terminal(project_id, "pending requirement candidate is inconsistent")
+        for ref_name, revision in requirement_refs.items():
+            requirement = requirements.get(
+                ref_name.removeprefix("refs/pcbflow/requirements/")
+            )
+            if requirement is None:
+                self._record_unknown_ref(project_id, ref_name, revision)
+            elif requirement.status == "draft":
+                # Submit publishes this ref before recording the pending candidate.
+                continue
+
+        for proposal in proposals.values():
+            if proposal.status != "ready_for_review":
+                continue
+            ref_name = f"refs/pcbflow/proposals/{proposal.id}"
+            actual_ref = proposal_refs.get(ref_name)
+            if list_proposal_refs is None:
+                actual_ref = self._revisions.resolve_proposal_ref(project_id, proposal.id)
+            if (
+                proposal.candidate_revision is None
+                or actual_ref != proposal.candidate_revision
+                or not self._revisions.object_exists(project_id, proposal.candidate_revision)
+                or not self._snapshot_matches(
+                    project_id,
+                    proposal.candidate_revision,
+                    proposal.candidate_snapshot_digest,
+                )
+            ):
+                raise self._terminal(project_id, "ready proposal candidate is inconsistent")
+        for ref_name, revision in proposal_refs.items():
+            proposal = proposals.get(ref_name.removeprefix("refs/pcbflow/proposals/"))
+            if proposal is None:
+                self._record_unknown_ref(project_id, ref_name, revision)
+            elif proposal.status in {"queued", "executing"}:
+                # Executor replay owns these pre-commit residues.
+                continue
+
+    def _snapshot_matches(
+        self,
+        project_id: str,
+        revision: str,
+        expected_digest: str | None,
+    ) -> bool:
+        if expected_digest is None:
+            return False
+        checker = getattr(self._revisions, "snapshot_digest_for_revision", None)
+        if checker is None:
+            return True
+        try:
+            return checker(project_id, revision) == expected_digest
+        except Exception:
+            return False
 
     def run_once(self) -> int:
         repaired = 0
@@ -749,14 +990,24 @@ class RevisionReconciler:
                 continue
             if project.current_revision is None:
                 raise ProjectNotManagedError(project.id)
-            self._revision_store.get(project.id, project.current_revision)
+            object_exists = getattr(self._revisions, "object_exists", None)
+            if object_exists is not None and not object_exists(project.id, project.current_revision):
+                raise self._terminal(project.id, "current revision object is missing")
+            self._scan_candidate_refs(project.id)
             actual = self._revisions.resolve_design_ref(project.id)
             if actual == project.current_revision:
                 continue
+            self._assert_projection_facts(project.id, project.current_revision)
             self._revisions.promote_design_ref(
                 project.id,
                 project.current_revision,
-                expected_revision=actual,
+                actual,
             )
             repaired += 1
         return repaired
+
+    def assert_writable(self, project_id: str) -> None:
+        self.run_once()
+        project = self._projects.get(project_id)
+        if project.mode is not ProjectMode.MANAGED:
+            raise ProjectNotManagedError(project_id)

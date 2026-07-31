@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
+
+from pcbflow.design_tables import OutboxEventRow
 
 
 @pytest.fixture
@@ -39,3 +42,32 @@ def test_reconciler_repairs_design_ref_from_database_revision(
     assert container.revisions.resolve_design_ref(project.id) == (
         project.current_revision
     )
+
+
+def test_reconciler_audits_an_unknown_proposal_ref_only_once(
+    container, approved_requirement_set
+) -> None:
+    project = container.projects.get(approved_requirement_set.project_id)
+    ref_name = "refs/pcbflow/proposals/unknown-proposal"
+    container.revisions.git.update_ref(
+        container.revisions.repo_path(project.id),
+        ref_name,
+        project.current_revision,
+        expected_revision=None,
+    )
+
+    assert container.reconciler.run_once() == 0
+    assert container.reconciler.run_once() == 0
+
+    with container.sessions() as session:
+        events = session.scalars(
+            select(OutboxEventRow).where(
+                OutboxEventRow.event_type == "revision.unknown_ref"
+            )
+        ).all()
+    assert len(events) == 1
+    assert events[0].payload_json == {
+        "project_id": project.id,
+        "ref_name": ref_name,
+        "revision": project.current_revision,
+    }
