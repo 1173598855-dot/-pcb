@@ -416,7 +416,23 @@ class ProposalExecutor:
                 if not all(self._artifacts.verify(item.item.artifact_digest) for item in evidence):
                     raise TerminalTaskError("CANDIDATE_VALIDATION_FAILED", "candidate evidence integrity check failed")
                 review = proposal_review_digest(proposal_id=proposal_id, project_id=project.id, base_revision=batch.base_revision, candidate_revision=candidate.revision, candidate_snapshot_digest=candidate.snapshot_digest, requirement_set_digest=requirements.canonical_digest, semantic_diff_digest=semantic_descriptor.digest, evidence_set_digest=evidence_set_digest, adapter_capability_digest=capability_descriptor.digest)
-                result = {"proposal_id": proposal_id, "candidate_revision": candidate.revision, "review_digest": review, "semantic_diff_digest": semantic_descriptor.digest, "evidence_set_digest": evidence_set_digest, "evidence_ids": []}
+                result = {
+                    "proposal_id": proposal_id,
+                    "candidate_revision": candidate.revision,
+                    "review_digest": review,
+                    "semantic_diff_digest": semantic_descriptor.digest,
+                    "evidence_set_digest": evidence_set_digest,
+                    "evidence_ids": [],
+                    "adapter_capability_digest": capability_descriptor.digest,
+                    "validations": {
+                        "schema": "pass",
+                        "preconditions": "pass",
+                        "path_limits": "pass",
+                        "post_write_parse": "pass",
+                        "semantic_diff": "pass",
+                        "kicad_erc": "pass",
+                    },
+                }
                 self._tasks.assert_active(lease.task_id, lease.lease_token, self._clock())
                 self._revisions.publish_candidate_ref(project.id, f"refs/pcbflow/proposals/{proposal_id}", candidate.revision)
                 self._tasks.assert_active(lease.task_id, lease.lease_token, self._clock())
