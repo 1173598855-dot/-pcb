@@ -30,6 +30,10 @@ class ModuleRevisionNotFoundError(LookupError):
     pass
 
 
+class FootprintRevisionNotFoundError(LookupError):
+    pass
+
+
 class _StrictManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -106,8 +110,18 @@ class ModuleRevision:
     template_bytes: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class FootprintRevision:
+    revision_id: str
+    library_id: str
+    digest: str
+    module_revision_id: str
+
+
 class ModuleCatalogPort(Protocol):
     def get(self, module_revision_id: str) -> ModuleRevision: ...
+
+    def get_footprint(self, revision_id: str) -> FootprintRevision: ...
 
 
 def derive_module_uuid(
@@ -141,6 +155,27 @@ class FileModuleCatalog:
         except KeyError as error:
             raise ModuleRevisionNotFoundError(module_revision_id) from error
         return self._load_revision(manifest_path, module_revision_id)
+
+    def get_footprint(self, revision_id: str) -> FootprintRevision:
+        matches = [
+            FootprintRevision(
+                revision_id=revision_id,
+                library_id=entry.library_id,
+                digest=entry.digest,
+                module_revision_id=module.manifest.module_revision_id,
+            )
+            for module in self._verified_modules()
+            if (entry := module.manifest.footprints.get(revision_id)) is not None
+        ]
+        if len(matches) != 1:
+            raise FootprintRevisionNotFoundError(revision_id)
+        return matches[0]
+
+    def _verified_modules(self) -> tuple[ModuleRevision, ...]:
+        return tuple(
+            self._load_revision(path, revision_id)
+            for revision_id, path in sorted(self._manifest_index().items())
+        )
 
     def _manifest_index(self) -> dict[str, Path]:
         if self._index is not None:

@@ -5,20 +5,74 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid5
 
-from pcbflow.commands import DesignCommand, InstantiateModuleOperation, SchematicObjectRef
-from pcbflow.schematic.cst import CstAtom, CstDocument, CstList, apply_edits, make_atom, make_list, make_string, parse_cst, replace_node
+from pcbflow.commands import (
+    AddLabelOperation,
+    AssignFootprintOperation,
+    DesignCommand,
+    InstantiateModuleOperation,
+    SetPropertyOperation,
+    SchematicObjectRef,
+)
+from pcbflow.schematic.cst import (
+    CstAtom,
+    CstDocument,
+    CstEdit,
+    CstList,
+    apply_edits,
+    insert_before_close,
+    make_atom,
+    make_list,
+    make_string,
+    parse_cst,
+    replace_node,
+)
 from pcbflow.schematic.diff import ChangeKind, ChangeSelector, CommandAttribution, build_semantic_diff
-from pcbflow.schematic.modules import ModuleCatalogPort, ModuleRevision, ModuleRevisionNotFoundError, derive_module_uuid
-from pcbflow.schematic.semantic import KicadSemanticError, ParsedSchematic, Point, SchematicDocument, inspect_schematic, object_ref_key, parse_schematic
+from pcbflow.schematic.modules import (
+    ModuleCatalogPort,
+    ModuleRevision,
+    ModuleRevisionNotFoundError,
+    derive_module_uuid,
+)
+from pcbflow.schematic.semantic import (
+    KicadSemanticError,
+    ParsedSchematic,
+    Point,
+    SchematicDocument,
+    inspect_schematic,
+    object_ref_key,
+    parse_schematic,
+)
 
 
-class DesignCommandUnsupportedError(ValueError):
+class UnsupportedDesignCommandError(ValueError):
     code = "DESIGN_COMMAND_UNSUPPORTED"
 
     def __init__(self, operation_type: str) -> None:
         super().__init__(f"{self.code}: {operation_type}")
+
+
+DesignCommandUnsupportedError = UnsupportedDesignCommandError
+
+
+class PropertyWriteNotAllowedError(ValueError):
+    code = "PROPERTY_WRITE_NOT_ALLOWED"
+
+    def __init__(self, property_name: str) -> None:
+        super().__init__(f"{self.code}: {property_name}")
+
+
+class LabelTargetError(ValueError):
+    code = "LABEL_TARGET_ERROR"
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"{self.code}: {detail}")
+
+
+PROPERTY_ALLOWLIST = frozenset({"Reference", "Value", "Description"})
+USER_PROPERTY_PREFIX = "User."
+LABEL_TARGET_KINDS = frozenset({"pin", "hierarchical_port", "wire_endpoint", "net"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,28 +124,67 @@ class CstSchematicAdapter:
             for command in commands
         ):
             raise ModuleRevisionNotFoundError("MODULE_CATALOG_NOT_CONFIGURED")
-        for command in commands:
-            if not isinstance(command.operation, InstantiateModuleOperation):
-                raise DesignCommandUnsupportedError(command.operation.type)
-        if len(commands) != 1:
-            raise ValueError("Task 13 supports exactly one instantiate command per apply")
-        command = commands[0]
-        assert self._module_catalog is not None
+        if self._module_catalog is None and any(
+            isinstance(command.operation, (SetPropertyOperation, AddLabelOperation))
+            for command in commands
+        ):
+            raise UnsupportedDesignCommandError(commands[0].operation.type)
         project_root = _checked_project(project)
+        if all(isinstance(command.operation, InstantiateModuleOperation) for command in commands):
+            if len(commands) != 1:
+                raise ValueError("Task 13 supports exactly one instantiate command per apply")
+            command = commands[0]
+            assert self._module_catalog is not None
+            before = parse_schematic(project_root)
+            revision = self._module_catalog.get(command.operation.payload.module_revision_id)
+            result, after, modified = self._instantiate(project_root, before, command, revision)
+            return ApplyResult(
+                modified_files=modified,
+                command_results=(result,),
+                after=after,
+                capability_report=AdapterCapabilityReport(
+                    adapter_contract=self._ADAPTER_CONTRACT,
+                    kicad_major=9,
+                    supported_operations=("schematic.instantiate_module",),
+                    module_digests=(revision.manifest_digest,),
+                ),
+            )
+        supported = (
+            SetPropertyOperation,
+            AssignFootprintOperation,
+            AddLabelOperation,
+        )
+        for command in commands:
+            if not isinstance(command.operation, supported):
+                raise UnsupportedDesignCommandError(command.operation.type)
+        if self._module_catalog is None and any(
+            isinstance(command.operation, AssignFootprintOperation)
+            for command in commands
+        ):
+            raise ModuleRevisionNotFoundError("MODULE_CATALOG_NOT_CONFIGURED")
         before = parse_schematic(project_root)
-        revision = self._module_catalog.get(command.operation.payload.module_revision_id)
-        result, after, modified = self._instantiate(project_root, before, command, revision)
+        results, after, modified, module_digests = self._apply_controlled_operations(
+            project_root, before, commands
+        )
         return ApplyResult(
             modified_files=modified,
-            command_results=(result,),
+            command_results=results,
             after=after,
             capability_report=AdapterCapabilityReport(
                 adapter_contract=self._ADAPTER_CONTRACT,
                 kicad_major=9,
-                supported_operations=("schematic.instantiate_module",),
-                module_digests=(revision.manifest_digest,),
+                supported_operations=tuple(sorted({command.operation.type for command in commands})),
+                module_digests=module_digests,
             ),
         )
+
+    def _apply_controlled_operations(
+        self,
+        project: Path,
+        before: ParsedSchematic,
+        commands: tuple[DesignCommand, ...],
+    ) -> tuple[tuple[CommandResult, ...], SchematicDocument, tuple[str, ...], tuple[str, ...]]:
+        return _apply_controlled_operations(project, before, commands, self._module_catalog)
 
     def _instantiate(
         self,
@@ -188,6 +281,358 @@ class CstSchematicAdapter:
             after,
             modified,
         )
+
+
+_LABEL_UUID_NAMESPACE = UUID("d1e1f7db-0f24-59d4-b3fd-0c7f13f0d9a1")
+
+
+def _apply_controlled_operations(
+    project: Path,
+    before: ParsedSchematic,
+    commands: tuple[DesignCommand, ...],
+    module_catalog: ModuleCatalogPort | None,
+) -> tuple[tuple[CommandResult, ...], SchematicDocument, tuple[str, ...], tuple[str, ...]]:
+    edits_by_file: dict[Path, list[CstEdit]] = {}
+    inserted_by_file: dict[Path, list[CstList]] = {}
+    original_bytes: dict[Path, bytes] = {}
+    direct: list[ChangeSelector] = []
+    specs: list[tuple[DesignCommand, ChangeSelector, str | None, str | None]] = []
+    module_digests: list[str] = []
+    reference_values = {
+        object_ref_key(symbol.ref): symbol.reference for symbol in before.document.symbols
+    }
+
+    def add_edit(path: Path, edit: CstEdit) -> None:
+        edits = edits_by_file.setdefault(path, [])
+        for previous in edits:
+            if edit.start < previous.end and previous.start < edit.end:
+                raise ValueError("CST edits overlap")
+        edits.append(edit)
+        original_bytes.setdefault(path, path.read_bytes())
+
+    for command in commands:
+        operation = command.operation
+        if isinstance(operation, SetPropertyOperation):
+            payload = operation.payload
+            symbol = _resolve_symbol(before.document, payload.subject_ref)
+            location = before.location(symbol.ref)
+            property_nodes = {
+                node.atom_text(1): node for node in location.node.find_children("property")
+            }
+            name = payload.property_name
+            if name == "Footprint" or name in {"uuid", "UUID"} or name.startswith("ki_"):
+                raise PropertyWriteNotAllowedError(name)
+            if name not in PROPERTY_ALLOWLIST and not name.startswith(USER_PROPERTY_PREFIX):
+                raise PropertyWriteNotAllowedError(name)
+            current = next(
+                (item.value for item in symbol.properties if item.name == name), None
+            )
+            if payload.expected_old_value is not None and current != payload.expected_old_value:
+                raise ValueError(f"property value mismatch: {name}")
+            if name == "Reference":
+                for key, value in reference_values.items():
+                    if key != object_ref_key(symbol.ref) and value == payload.value:
+                        raise ValueError(f"reference already exists: {payload.value}")
+                reference_values[object_ref_key(symbol.ref)] = payload.value
+            existing = property_nodes.get(name)
+            if existing is None:
+                add_edit(
+                    location.file_path,
+                    insert_before_close(
+                        location.node,
+                        (make_list(make_atom("property"), make_string(name), make_string(payload.value)),),
+                        indent=4,
+                    ),
+                )
+            else:
+                replacement_items = list(existing.items)
+                if len(replacement_items) < 3:
+                    raise KicadSemanticError("malformed symbol property")
+                replacement_items[2] = make_string(payload.value)
+                add_edit(location.file_path, replace_node(existing, make_list(*replacement_items)))
+            selector = ChangeSelector(ChangeKind.SYMBOL_PROPERTY_CHANGED, symbol.ref, name)
+            direct.append(selector)
+            specs.append((command, selector, None, None))
+            continue
+
+        if isinstance(operation, AssignFootprintOperation):
+            if module_catalog is None:
+                raise ModuleRevisionNotFoundError("MODULE_CATALOG_NOT_CONFIGURED")
+            payload = operation.payload
+            symbol = _resolve_symbol(before.document, payload.subject_ref)
+            footprint = module_catalog.get_footprint(payload.footprint_revision_id)
+            location = before.location(symbol.ref)
+            property_nodes = {
+                node.atom_text(1): node for node in location.node.find_children("property")
+            }
+            existing = property_nodes.get("Footprint")
+            if existing is None:
+                add_edit(
+                    location.file_path,
+                    insert_before_close(
+                        location.node,
+                        (make_list(make_atom("property"), make_string("Footprint"), make_string(footprint.library_id)),),
+                        indent=4,
+                    ),
+                )
+            else:
+                replacement_items = list(existing.items)
+                if len(replacement_items) < 3:
+                    raise KicadSemanticError("malformed symbol property")
+                replacement_items[2] = make_string(footprint.library_id)
+                add_edit(location.file_path, replace_node(existing, make_list(*replacement_items)))
+            selector = ChangeSelector(ChangeKind.FOOTPRINT_CHANGED, symbol.ref, "Footprint")
+            direct.append(selector)
+            specs.append((command, selector, footprint.digest, None))
+            module_digests.append(footprint.digest)
+            continue
+
+        if isinstance(operation, AddLabelOperation):
+            payload = operation.payload
+            if payload.target_ref.kind not in LABEL_TARGET_KINDS:
+                raise LabelTargetError(payload.target_ref.kind)
+            path, position, target_net = _label_target(before, payload.target_ref)
+            _check_label_binding(before.document, payload.name, payload.scope, target_net)
+            label_uuid = _label_uuid(command, payload.target_ref, payload.name, payload.scope)
+            head = {
+                "local": "label",
+                "global": "global_label",
+                "hierarchical": "hierarchical_label",
+            }[payload.scope]
+            nodes = [make_atom(head), make_string(payload.name)]
+            if payload.scope != "local":
+                nodes.append(make_list(make_atom("shape"), make_atom("input")))
+            nodes.extend(
+                (
+                    make_list(
+                        make_atom("at"),
+                        make_atom(_number_text(position.x)),
+                        make_atom(_number_text(position.y)),
+                        make_atom("0"),
+                    ),
+                    make_list(make_atom("uuid"), make_atom(label_uuid)),
+                )
+            )
+            inserted_by_file.setdefault(path, []).append(make_list(*nodes))
+            original_bytes.setdefault(path, path.read_bytes())
+            selector = ChangeSelector(
+                ChangeKind.LABEL_ADDED,
+                SchematicObjectRef(
+                    kind="label", sheet_uuid=payload.target_ref.sheet_uuid,
+                    object_uuid=label_uuid, pin_number=None,
+                ),
+                None,
+            )
+            direct.append(selector)
+            specs.append((command, selector, None, target_net))
+            continue
+
+        raise UnsupportedDesignCommandError(operation.type)
+
+    for path, nodes in inserted_by_file.items():
+        document = _location_for_path(before, path).document
+        add_edit(path, insert_before_close(document.root, tuple(nodes), indent=2))
+    changed_files: dict[Path, bytes] = {}
+    try:
+        for path, edits in edits_by_file.items():
+            document = parse_cst(original_bytes[path])
+            changed_files[path] = apply_edits(document, tuple(edits))
+            _atomic_replace(path, changed_files[path])
+        after = parse_schematic(project).document
+        before_nets = {object_ref_key(item.ref): item for item in before.document.nets}
+        after_nets = {object_ref_key(item.ref): item for item in after.nets}
+        changed_net_keys = {
+            key
+            for key in set(before_nets) | set(after_nets)
+            if before_nets.get(key) != after_nets.get(key)
+        }
+        effects_by_command: dict[str, list[ChangeSelector]] = {
+            command.command_id: [selector] for command, selector, _, _ in specs
+        }
+        for net_key in sorted(changed_net_keys):
+            candidates = [
+                command.command_id
+                for command, selector, _, target_net in specs
+                if target_net == net_key
+                or (
+                    selector.kind is ChangeKind.LABEL_ADDED
+                    and any(
+                        object_ref_key(selector.subject_ref) in net.members
+                        for net in (after_nets.get(net_key), before_nets.get(net_key))
+                        if net is not None
+                    )
+                )
+            ]
+            if len(candidates) == 1:
+                net_ref = (after_nets.get(net_key) or before_nets[net_key]).ref
+                effects_by_command[candidates[0]].append(
+                    ChangeSelector(ChangeKind.NET_CONNECTIVITY_CHANGED, net_ref, None)
+                )
+        attributions = tuple(
+            CommandAttribution(
+                command_id=command.command_id,
+                requirement_ids=command.provenance.requirement_ids,
+                risk=command.risk,
+                selectors=tuple(effects_by_command[command.command_id]),
+            )
+            for command, _, _, _ in specs
+        )
+        build_semantic_diff(before.document, after, attributions)
+    except Exception:
+        for path, data in original_bytes.items():
+            try:
+                _atomic_replace(path, data)
+            except OSError:
+                pass
+        raise
+    command_results = tuple(
+        CommandResult(
+            command_id=command.command_id,
+            operation_type=command.operation.type,
+            effects=tuple(effects_by_command[command.command_id]),
+            created_files=(),
+            provenance_digests=tuple(
+                digest for command_, _, digest, _ in specs if command_ is command and digest is not None
+            ),
+        )
+        for command, _, _, _ in specs
+    )
+    modified = tuple(sorted(path.relative_to(project).as_posix() for path in original_bytes))
+    return command_results, after, modified, tuple(sorted(set(module_digests)))
+
+
+def _resolve_symbol(document: SchematicDocument, reference: SchematicObjectRef):
+    if reference.kind != "symbol":
+        raise KicadSemanticError("operation target must be a symbol")
+    matches = [symbol for symbol in document.symbols if symbol.ref == reference]
+    if len(matches) != 1:
+        raise KicadSemanticError("symbol target was not found")
+    return matches[0]
+
+
+def _location_for_path(parsed: ParsedSchematic, path: Path):
+    for location in parsed.locations.values():
+        if location.file_path == path:
+            return location
+    raise KicadSemanticError(f"schematic file location was not found: {path}")
+
+
+def _label_target(
+    parsed: ParsedSchematic, reference: SchematicObjectRef
+) -> tuple[Path, Point, str | None]:
+    key = object_ref_key(reference)
+    if reference.kind == "pin":
+        for symbol in parsed.document.symbols:
+            for pin in symbol.pins:
+                if pin.ref == reference or (
+                    pin.symbol_ref.sheet_uuid == reference.sheet_uuid
+                    and pin.symbol_ref.object_uuid == reference.object_uuid
+                    and pin.number == reference.pin_number
+                ):
+                    return parsed.location(pin.ref).file_path, pin.position, _net_for_ref(
+                        parsed.document, object_ref_key(pin.ref)
+                    )
+    elif reference.kind == "hierarchical_port":
+        for sheet in parsed.document.sheets:
+            for port in sheet.ports:
+                if port.ref == reference:
+                    return parsed.location(port.ref).file_path, port.position, _net_for_ref(parsed.document, key)
+    elif reference.kind == "net":
+        for net in parsed.document.nets:
+            if net.ref == reference:
+                location = parsed.location(net.ref)
+                return location.file_path, _node_position(location.node), key
+    elif reference.kind == "wire_endpoint":
+        for location in _unique_locations(parsed):
+            for wire in location.document.root.find_children("wire"):
+                if _optional_uuid(wire) != reference.object_uuid:
+                    continue
+                points = _wire_points(wire)
+                if len(points) < 2:
+                    break
+                endpoint = reference.pin_number or "1"
+                if endpoint in {"1", "start"}:
+                    point = points[0]
+                elif endpoint in {"2", "end"}:
+                    point = points[-1]
+                else:
+                    raise LabelTargetError("wire endpoint must be start/end or 1/2")
+                return location.file_path, point, _net_for_ref(parsed.document, f"wire:{reference.sheet_uuid}:{reference.object_uuid}")
+    raise LabelTargetError("target does not resolve to an existing semantic position")
+
+
+def _unique_locations(parsed: ParsedSchematic):
+    seen: set[tuple[Path, int, int]] = set()
+    for location in parsed.locations.values():
+        identity = (location.file_path, location.document.root.start, location.document.root.end)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        yield location
+
+
+def _node_position(node: CstList) -> Point:
+    at = node.find_children("at")
+    if at:
+        return Point(float(at[0].atom_text(1)), float(at[0].atom_text(2)))
+    points = _wire_points(node)
+    if points:
+        return points[0]
+    raise LabelTargetError("target has no semantic position")
+
+
+def _wire_points(node: CstList) -> tuple[Point, ...]:
+    points_nodes = node.find_children("pts")
+    if not points_nodes:
+        return ()
+    return tuple(
+        Point(float(xy.atom_text(1)), float(xy.atom_text(2)))
+        for xy in points_nodes[0].find_children("xy")
+    )
+
+
+def _optional_uuid(node: CstList) -> str | None:
+    uuid_nodes = node.find_children("uuid")
+    if not uuid_nodes or len(uuid_nodes[0].items) < 2:
+        return None
+    return uuid_nodes[0].atom_text(1)
+
+
+def _net_for_ref(document: SchematicDocument, key: str) -> str | None:
+    for net in document.nets:
+        if key in net.members:
+            return object_ref_key(net.ref)
+    return None
+
+
+def _check_label_binding(
+    document: SchematicDocument, name: str, scope: str, target_net: str | None
+) -> None:
+    for label in document.labels:
+        if label.name != name or label.scope != scope:
+            continue
+        existing_net = _net_for_ref(document, object_ref_key(label.ref))
+        if existing_net != target_net and (existing_net is not None or target_net is not None):
+            raise LabelTargetError("label name/scope is already bound to another net")
+
+
+def _label_uuid(
+    command: DesignCommand,
+    target: SchematicObjectRef,
+    name: str,
+    scope: str,
+) -> str:
+    value = "\x1f".join(
+        (
+            command.project_id,
+            command.batch_id,
+            command.command_id,
+            object_ref_key(target),
+            name,
+            scope,
+        )
+    )
+    return str(uuid5(_LABEL_UUID_NAMESPACE, value))
 
 
 def _checked_project(project: Path) -> Path:
