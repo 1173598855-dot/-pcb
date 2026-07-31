@@ -305,3 +305,55 @@ def test_add_label_resolves_explicit_net_from_existing_member_endpoint(
     result = _adapter().apply(project, (command,))
 
     assert any(label.name == "KNOWN_NET_LABEL" for label in result.after.labels)
+
+
+def test_add_label_resolves_child_explicit_net_wire_endpoint(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "sheets").mkdir()
+    (project / "root.kicad_sch").write_text(
+        """(kicad_sch
+  (version 20250114)
+  (uuid 00000000-0000-0000-0000-000000000010)
+  (sheet
+    (at 25 25)
+    (size 50 25)
+    (uuid 00000000-0000-0000-0000-000000000011)
+    (property "Sheetname" "Child")
+    (property "Sheetfile" "sheets/child.kicad_sch")))
+""",
+        encoding="utf-8",
+    )
+    child = project / "sheets" / "child.kicad_sch"
+    shutil.copyfile(_fixtures() / "kicad" / "controlled-design" / "board.kicad_sch", child)
+    document = parse_cst(child.read_bytes())
+    wire_uuid = "00000000-0000-0000-0000-000000000103"
+    net_uuid = "00000000-0000-0000-0000-000000000104"
+    wire = _wire(wire_uuid, ("123.19", "88.9"), ("120", "88.9"))
+    explicit_net = make_list(
+        make_atom("net"),
+        make_string("CHILD_KNOWN_NET"),
+        make_list(make_atom("members"), make_atom(f"wire:00000000-0000-0000-0000-000000000011:{wire_uuid}")),
+        make_list(make_atom("uuid"), make_atom(net_uuid)),
+    )
+    child.write_bytes(apply_edits(document, (insert_before_close(document.root, (wire, explicit_net), indent=2),)))
+    command = _command(
+        {
+            "type": "schematic.add_label",
+            "payload": {
+                "target_ref": {
+                    "kind": "net",
+                    "sheet_uuid": "00000000-0000-0000-0000-000000000011",
+                    "object_uuid": net_uuid,
+                    "pin_number": None,
+                },
+                "name": "CHILD_NET_LABEL",
+                "scope": "local",
+            },
+        },
+        "cmd_child_net_label",
+    )
+
+    result = _adapter().apply(project, (command,))
+
+    assert any(label.name == "CHILD_NET_LABEL" for label in result.after.labels)

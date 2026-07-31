@@ -624,15 +624,32 @@ def _net_position(parsed: ParsedSchematic, net, location) -> Point:
                         return next(label.position for label in parsed.document.labels if label.ref == reference)
         if member.startswith("wire:"):
             _, sheet_uuid, wire_uuid = member.split(":", 2)
+            expected_file = _sheet_file(parsed, sheet_uuid)
+            matches: list[Point] = []
             for candidate in _unique_locations(parsed):
-                if candidate.node.head != "kicad_sch":
+                if expected_file is not None and candidate.file_path.resolve() != expected_file:
                     continue
                 for wire in candidate.document.root.find_children("wire"):
                     if _optional_uuid(wire) == wire_uuid:
                         points = _wire_points(wire)
                         if points:
-                            return points[0]
+                            matches.append(points[0])
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise LabelTargetError("known net wire endpoint is ambiguous")
     raise LabelTargetError("known net has no concrete semantic endpoint")
+
+
+def _sheet_file(parsed: ParsedSchematic, sheet_uuid: str) -> Path | None:
+    for sheet in parsed.document.sheets:
+        if sheet.ref.object_uuid != sheet_uuid:
+            continue
+        parent_location = parsed.location(sheet.ref)
+        if sheet.parent_sheet_uuid is None:
+            return parent_location.file_path.resolve()
+        return (parent_location.file_path.parent / sheet.file_name).resolve()
+    return None
 
 
 def _wire_points(node: CstList) -> tuple[Point, ...]:
