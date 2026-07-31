@@ -732,6 +732,11 @@ class EvidenceRepository:
             ).all()
             return [_evidence(row) for row in rows]
 
+    def artifact_media_type(self, digest: str) -> str | None:
+        with self._sessions() as session:
+            row = session.get(ArtifactRow, digest)
+            return row.media_type if row is not None else None
+
 
 class FindingRepository:
     def __init__(self, sessions: sessionmaker[Session]) -> None:
