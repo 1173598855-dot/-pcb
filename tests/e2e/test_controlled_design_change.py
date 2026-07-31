@@ -3,18 +3,32 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import pytest
 import yaml
+from fastapi.encoders import jsonable_encoder
+from sqlalchemy import func, select
 
 from pcbflow.api import create_app
 from pcbflow.config import Settings
-from pcbflow.container import build_container
+from pcbflow.container import Container, build_container
+from pcbflow.design_tables import GateDecisionRow, ProjectRevisionRow
 from pcbflow.kicad import KicadCapability, RawValidationReport
+from pcbflow.proposals import (
+    ChangeProposal,
+    FaultInjector,
+    FaultPoint,
+    NoFaults,
+    _fault_active,
+)
 
 
 PASSING_ERC = b'{"version":"1.0","source":"board.kicad_sch","violations":[]}'
+NOW = datetime(2026, 7, 29, 14, 0, tzinfo=UTC)
 
 
 class FakeKicad9:
@@ -339,3 +353,355 @@ def test_rest_proposal_worker_diff_and_accept(
         asyncio.run(exercise())
     finally:
         container.dispose()
+
+
+def _snapshot(root: Path) -> dict[Path, bytes]:
+    return {
+        path.relative_to(root): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+class CrashOnce:
+    def __init__(self, point: FaultPoint) -> None:
+        self.point = point
+        self.triggered = False
+
+    def hit(self, point: FaultPoint) -> None:
+        if point is self.point and not self.triggered:
+            self.triggered = True
+            raise RuntimeError(f"injected crash at {point.value}")
+
+
+class InterruptOnce:
+    def __init__(self, point: FaultPoint) -> None:
+        self.point = point
+
+    def hit(self, point: FaultPoint) -> None:
+        if point is self.point:
+            raise KeyboardInterrupt(f"injected interrupt at {point.value}")
+
+
+@dataclass(slots=True)
+class MutableClock:
+    value: datetime
+
+    def __call__(self) -> datetime:
+        return self.value
+
+
+@dataclass(slots=True)
+class ProposalScenario:
+    container: Container
+    settings: Settings
+    clock: MutableClock
+    source: Path
+    source_before: dict[Path, bytes]
+    project_id: str
+    proposal: ChangeProposal
+    batch_bytes: bytes
+
+
+def _proposal_scenario(tmp_path: Path, faults: FaultInjector) -> ProposalScenario:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    settings = Settings.from_env(
+        {
+            "PCBFLOW_DATA_DIR": str(tmp_path / "fault-data"),
+            "PCBFLOW_MODULE_CATALOG_DIR": str(fixtures / "modules"),
+        }
+    )
+    source = tmp_path / "fault-source"
+    shutil.copytree(fixtures / "kicad" / "controlled-design", source)
+    source_before = _snapshot(source)
+    clock = MutableClock(NOW)
+    container = build_container(
+        settings,
+        kicad_override=FakeKicad9(),
+        clock=clock,
+        faults=faults,
+    )
+    project = container.projects.create("Controller", source, "fault-project")
+    managed = container.revisions.adopt(project.id, "fault-adopt")
+    payload = (fixtures / "requirements" / "reference-controller.yaml").read_bytes()
+    draft = container.requirements.import_draft(
+        managed.id, payload, "fault-requirements"
+    )
+    pending = container.requirements.submit(draft.id, "fault-submit")
+    frozen = container.approvals.decide_g1(
+        requirement_set_id=pending.id,
+        subject_digest=pending.subject_digest(),
+        decision="approve",
+        actor_type="human",
+        actor_id="local-user",
+        comment="approved",
+        idempotency_key="fault-g1",
+    )
+    current = container.projects.get(managed.id)
+    batch_bytes = json.dumps(
+        _command_batch(jsonable_encoder(current), jsonable_encoder(frozen)),
+        separators=(",", ":"),
+    ).encode()
+    proposal = container.proposals.create(batch_bytes, "api-proposal")
+    return ProposalScenario(
+        container=container,
+        settings=settings,
+        clock=clock,
+        source=source,
+        source_before=source_before,
+        project_id=managed.id,
+        proposal=proposal,
+        batch_bytes=batch_bytes,
+    )
+
+
+def test_restart_after_accept_keeps_database_git_evidence_and_validation_consistent(
+    tmp_path: Path,
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    settings = Settings.from_env(
+        {
+            "PCBFLOW_DATA_DIR": str(tmp_path / "restart-data"),
+            "PCBFLOW_MODULE_CATALOG_DIR": str(fixtures / "modules"),
+        }
+    )
+    source = tmp_path / "restart-source"
+    shutil.copytree(fixtures / "kicad" / "controlled-design", source)
+    source_before = _snapshot(source)
+    first = build_container(settings, kicad_override=FakeKicad9())
+    try:
+        project = first.projects.create("Controller", source, "restart-project")
+        managed = first.revisions.adopt(project.id, "restart-adopt")
+        payload = (fixtures / "requirements" / "reference-controller.yaml").read_bytes()
+        draft = first.requirements.import_draft(managed.id, payload, "restart-requirements")
+        pending = first.requirements.submit(draft.id, "restart-submit")
+        frozen = first.approvals.decide_g1(
+            requirement_set_id=pending.id,
+            subject_digest=pending.subject_digest(),
+            decision="approve",
+            actor_type="human",
+            actor_id="local-user",
+            comment="approved",
+            idempotency_key="restart-g1",
+        )
+        current = first.projects.get(managed.id)
+        batch = _command_batch(jsonable_encoder(current), jsonable_encoder(frozen))
+        proposal = first.proposals.create(json.dumps(batch).encode(), "api-proposal")
+        assert first.worker.run_once()
+        ready = first.proposal_store.get(proposal.id)
+        first.proposal_decisions.accept(
+            proposal_id=ready.id,
+            candidate_digest=ready.review_digest,
+            actor_type="human",
+            actor_id="local-user",
+            comment="accepted",
+            idempotency_key="restart-accept",
+        )
+        accepted_revision = first.projects.get(managed.id).current_revision
+    finally:
+        first.dispose()
+
+    second = build_container(settings, kicad_override=FakeKicad9())
+    try:
+        assert second.reconciler.run_once() == 0
+        project = second.projects.get(managed.id)
+        assert project.current_revision == accepted_revision
+        assert second.revisions.resolve_design_ref(project.id) == accepted_revision
+        assert second.proposal_store.get(proposal.id).status.value == "accepted"
+        assert all(
+            second.artifacts.verify(item.artifact_digest)
+            for item in second.evidence.list_for_project(project.id)
+        )
+        validation = second.validation.enqueue(project.id, "restart-read-only-validation")
+        assert second.worker.run_once()
+        assert second.tasks.get(validation.id).status.value == "succeeded"
+        assert _snapshot(source) == source_before
+    finally:
+        second.dispose()
+
+
+def test_reconciliation_accepts_frozen_requirement_ancestor_of_batch_base(
+    tmp_path: Path,
+) -> None:
+    scenario = _proposal_scenario(tmp_path, faults=NoFaults())
+    container = scenario.container
+    try:
+        assert container.worker.run_once()
+        first_ready = container.proposal_store.get(scenario.proposal.id)
+        container.proposal_decisions.accept(
+            proposal_id=first_ready.id,
+            candidate_digest=first_ready.review_digest,
+            actor_type="human",
+            actor_id="local-user",
+            comment="first accepted change",
+            idempotency_key="first-sequential-accept",
+        )
+        first_revision = container.projects.get(scenario.project_id).current_revision
+        assert first_revision is not None
+
+        second_batch = json.loads(scenario.batch_bytes)
+        second_batch["batch_id"] = "bat_second_sequential_change"
+        second_batch["base_revision"] = first_revision
+        second_batch["idempotency_key"] = "second-sequential-change"
+        command = second_batch["commands"][0]
+        command["command_id"] = "cmd_second_sequential_change"
+        command["batch_id"] = second_batch["batch_id"]
+        command["base_revision"] = first_revision
+        command["idempotency_key"] = "second-sequential-change:1"
+        command["preconditions"] = []
+        command["operation"] = {
+            "type": "schematic.set_property",
+            "payload": {
+                "subject_ref": {
+                    "kind": "symbol",
+                    "sheet_uuid": "00000000-0000-0000-0000-000000000001",
+                    "object_uuid": "00000000-0000-0000-0000-000000000002",
+                    "pin_number": None,
+                },
+                "property_name": "Value",
+                "value": "LED-SECOND",
+                "expected_old_value": "\u72b6\u6001LED",
+            },
+        }
+        second = container.proposals.create(
+            json.dumps(second_batch, separators=(",", ":")).encode(),
+            "second-sequential-change",
+        )
+        assert container.worker.run_once()
+        second_ready = container.proposal_store.get(second.id)
+        container.proposal_decisions.accept(
+            proposal_id=second_ready.id,
+            candidate_digest=second_ready.review_digest,
+            actor_type="human",
+            actor_id="local-user",
+            comment="second accepted change",
+            idempotency_key="second-sequential-accept",
+        )
+        second_revision = container.projects.get(scenario.project_id).current_revision
+        assert second_revision is not None and second_revision != first_revision
+
+        container.revisions.git.update_ref(
+            container.revisions.repo_path(scenario.project_id),
+            "refs/heads/design",
+            first_revision,
+            expected_revision=second_revision,
+        )
+
+        assert container.reconciler.run_once() == 1
+        assert container.revisions.resolve_design_ref(scenario.project_id) == (
+            second_revision
+        )
+    finally:
+        container.dispose()
+
+
+@pytest.mark.parametrize(
+    "point",
+    [
+        FaultPoint.BEFORE_CANDIDATE_COMMIT,
+        FaultPoint.AFTER_PROPOSAL_REF_BEFORE_DATABASE,
+        FaultPoint.DURING_DIFF_ARTIFACT_SAVE,
+        FaultPoint.AFTER_EXECUTION_BEFORE_FINAL_FENCE,
+    ],
+)
+def test_crashed_proposal_execution_retries_without_duplicate_candidate(
+    tmp_path: Path, point: FaultPoint
+) -> None:
+    scenario = _proposal_scenario(tmp_path, faults=CrashOnce(point))
+    try:
+        lease = scenario.container.tasks.claim_next("crashing-worker", NOW, 1)
+        assert lease is not None
+        scenario.container.tasks.start(lease.task_id, lease.lease_token, NOW)
+        with pytest.raises(RuntimeError, match="injected crash"):
+            scenario.container.proposal_executor(lease)
+
+        after_expiry = lease.lease_expires_at + timedelta(seconds=1)
+        scenario.clock.value = after_expiry
+        assert scenario.container.worker.run_once()
+        ready = scenario.container.proposal_store.get(scenario.proposal.id)
+        assert ready.status.value == "ready_for_review"
+        assert scenario.container.revisions.resolve_proposal_ref(
+            ready.project_id, ready.id
+        ) == ready.candidate_revision
+        repeated = scenario.container.proposals.create(
+            scenario.batch_bytes, "api-proposal"
+        )
+        assert repeated.id == ready.id
+        assert _snapshot(scenario.source) == scenario.source_before
+    finally:
+        scenario.container.dispose()
+
+
+def test_fault_context_is_restored_after_base_exception(tmp_path: Path) -> None:
+    scenario = _proposal_scenario(
+        tmp_path,
+        faults=InterruptOnce(FaultPoint.DURING_DIFF_ARTIFACT_SAVE),
+    )
+    try:
+        lease = scenario.container.tasks.claim_next("interrupt-worker", NOW, 1)
+        assert lease is not None
+        scenario.container.tasks.start(lease.task_id, lease.lease_token, NOW)
+
+        with pytest.raises(KeyboardInterrupt, match="injected interrupt"):
+            scenario.container.proposal_executor(lease)
+
+        assert _fault_active.get() is False
+    finally:
+        scenario.container.dispose()
+
+
+def test_acceptance_crash_is_repaired_without_duplicate_database_rows(
+    tmp_path: Path,
+) -> None:
+    scenario = _proposal_scenario(
+        tmp_path,
+        faults=CrashOnce(FaultPoint.AFTER_ACCEPT_DATABASE_BEFORE_DESIGN_REF),
+    )
+    first = scenario.container
+    try:
+        base_revision = first.projects.get(scenario.project_id).current_revision
+        assert first.worker.run_once()
+        ready = first.proposal_store.get(scenario.proposal.id)
+        with pytest.raises(RuntimeError, match="injected crash"):
+            first.proposal_decisions.accept(
+                proposal_id=ready.id,
+                candidate_digest=ready.review_digest,
+                actor_type="human",
+                actor_id="local-user",
+                comment="accepted before crash",
+                idempotency_key="fault-accept",
+            )
+        accepted_revision = first.projects.get(scenario.project_id).current_revision
+        assert accepted_revision == ready.candidate_revision
+        assert first.revisions.resolve_design_ref(scenario.project_id) == base_revision
+        with first.sessions() as session:
+            decision_count = session.scalar(
+                select(func.count()).select_from(GateDecisionRow)
+            )
+            revision_count = session.scalar(
+                select(func.count()).select_from(ProjectRevisionRow)
+            )
+    finally:
+        first.dispose()
+
+    second = build_container(
+        scenario.settings,
+        kicad_override=FakeKicad9(),
+        clock=scenario.clock,
+        faults=NoFaults(),
+    )
+    try:
+        assert second.reconciler.run_once() == 0
+        assert second.revisions.resolve_design_ref(scenario.project_id) == (
+            accepted_revision
+        )
+        with second.sessions() as session:
+            assert session.scalar(
+                select(func.count()).select_from(GateDecisionRow)
+            ) == decision_count
+            assert session.scalar(
+                select(func.count()).select_from(ProjectRevisionRow)
+            ) == revision_count
+        assert _snapshot(scenario.source) == scenario.source_before
+    finally:
+        second.dispose()

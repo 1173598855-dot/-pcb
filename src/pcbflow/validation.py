@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import os
-import shutil
-import stat
 import time
+import os
+import stat
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from pcbflow.artifacts import ContentAddressedStore
-from pcbflow.domain import Task, TaskLease
+from pcbflow.domain import ProjectMode, Task, TaskLease
 from pcbflow.observability import MetricName, Metrics, ensure_trace_id
 from pcbflow.kicad import (
     KicadPort,
@@ -24,6 +24,13 @@ from pcbflow.repositories import (
     TaskRepository,
 )
 from pcbflow.tasks import RetryableTaskError, TerminalTaskError
+from pcbflow.workspaces import (
+    WorkspaceCopier,
+    WorkspaceEntryError,
+    WorkspaceLimitError,
+    WorkspaceLinkError,
+)
+from pcbflow.revisions import RevisionService
 
 VALIDATION_TASK_KIND = "kicad.read_only_validation"
 
@@ -103,6 +110,8 @@ class ValidationTaskHandler:
         max_bytes: int,
         metrics: Metrics | None = None,
         monotonic=time.monotonic,
+        revisions: RevisionService | None = None,
+        copier: WorkspaceCopier | None = None,
     ) -> None:
         self._projects = projects
         self._evidence = evidence
@@ -113,19 +122,20 @@ class ValidationTaskHandler:
         self._max_bytes = max_bytes
         self._metrics = metrics
         self._monotonic = monotonic
+        self._revisions = revisions
+        self._copier = copier or WorkspaceCopier(
+            max_files=max_files, max_bytes=max_bytes
+        )
 
     def __call__(self, lease: TaskLease) -> dict[str, object]:
         project_id = str(lease.payload["project_id"])
         project = self._projects.get(project_id)
         workspace_root = self._store.root.parent / "workspaces"
         workspace_root.mkdir(parents=True, exist_ok=True)
-        with TemporaryDirectory(
-            prefix="pcbflow-validation-", dir=workspace_root
-        ) as temporary:
-            temporary_path = Path(temporary)
-            workspace = temporary_path / "project"
-            output = temporary_path / "output"
-            self._copy_project(project.source_path, workspace)
+        with self._validation_workspace(project, lease.task_id, workspace_root) as (
+            workspace,
+            output,
+        ):
             try:
                 started = self._monotonic()
                 reports = self._kicad.validate(workspace, output)
@@ -165,31 +175,49 @@ class ValidationTaskHandler:
                 finding_count += len(parsed.findings)
         return {"evidence_ids": evidence_ids, "finding_count": finding_count}
 
-    def _copy_project(self, source: Path, destination: Path) -> None:
-        file_count = 0
-        total_bytes = 0
-        for root, directories, files in os.walk(source, followlinks=False):
-            root_path = Path(root)
-            for name in [*directories, *files]:
-                path = root_path / name
-                metadata = path.lstat()
-                attributes = getattr(metadata, "st_file_attributes", 0)
-                if path.is_symlink() or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
-                    raise ProjectLinkError(
-                        "PROJECT_LINK_NOT_ALLOWED", f"project contains link: {path}"
-                    )
-            for name in files:
-                path = root_path / name
-                file_count += 1
-                total_bytes += path.stat().st_size
-                if file_count > self._max_files:
-                    raise ProjectCopyLimitError(
-                        "PROJECT_FILE_LIMIT_EXCEEDED",
-                        f"project contains more than {self._max_files} files",
-                    )
-                if total_bytes > self._max_bytes:
-                    raise ProjectCopyLimitError(
-                        "PROJECT_SIZE_LIMIT_EXCEEDED",
-                        f"project exceeds {self._max_bytes} bytes",
-                    )
-        shutil.copytree(source, destination, symlinks=False)
+    @contextmanager
+    def _validation_workspace(
+        self, project, task_id: str, workspace_root: Path
+    ):
+        """Select exactly one immutable input for a validation attempt."""
+        if project.mode is ProjectMode.MANAGED:
+            if self._revisions is None or project.current_revision is None:
+                raise TerminalTaskError(
+                    "REVISION_RECONCILIATION_REQUIRED", project.id
+                )
+            with TemporaryDirectory(
+                prefix="pcbflow-validation-output-", dir=workspace_root
+            ) as output_temp:
+                output = Path(output_temp) / "output"
+                with self._revisions.materialize(
+                    project.id,
+                    project.current_revision,
+                    f"validation-{task_id}",
+                ) as workspace:
+                    yield workspace, output
+            return
+
+        try:
+            with TemporaryDirectory(
+                prefix="pcbflow-validation-", dir=workspace_root
+            ) as temporary:
+                temporary_path = Path(temporary)
+                workspace = temporary_path / "project"
+                output = temporary_path / "output"
+                self._copier.copy(project.source_path, workspace)
+                yield workspace, output
+        except WorkspaceLinkError as error:
+            raise ProjectLinkError(
+                "PROJECT_LINK_NOT_ALLOWED", str(error)
+            ) from error
+        except WorkspaceLimitError as error:
+            code = (
+                "PROJECT_FILE_LIMIT_EXCEEDED"
+                if str(error) == "file_count"
+                else "PROJECT_SIZE_LIMIT_EXCEEDED"
+            )
+            raise ProjectCopyLimitError(code, str(error)) from error
+        except WorkspaceEntryError as error:
+            raise ProjectLinkError(
+                "PROJECT_PATH_OUTSIDE_WORKTREE", str(error)
+            ) from error

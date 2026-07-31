@@ -8,11 +8,12 @@ import stat
 import tempfile
 import hashlib
 import time
+from contextvars import ContextVar
 from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 from pathlib import Path
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict
@@ -51,6 +52,28 @@ class CandidateNotReviewableError(RuntimeError):
 
 class RevisionReconciliationRequiredError(RuntimeError):
     pass
+
+
+class FaultPoint(StrEnum):
+    BEFORE_CANDIDATE_COMMIT = "before_candidate_commit"
+    AFTER_PROPOSAL_REF_BEFORE_DATABASE = "after_proposal_ref_before_database"
+    DURING_DIFF_ARTIFACT_SAVE = "during_diff_artifact_save"
+    AFTER_EXECUTION_BEFORE_FINAL_FENCE = "after_execution_before_final_fence"
+    AFTER_ACCEPT_DATABASE_BEFORE_DESIGN_REF = (
+        "after_accept_database_before_design_ref"
+    )
+
+
+class FaultInjector(Protocol):
+    def hit(self, point: FaultPoint) -> None: ...
+
+
+class NoFaults:
+    def hit(self, point: FaultPoint) -> None:
+        return None
+
+
+_fault_active: ContextVar[bool] = ContextVar("pcbflow_fault_active", default=False)
 
 if TYPE_CHECKING:
     from pcbflow.proposal_store import ProposalStore
@@ -225,13 +248,24 @@ class ProposalExecutor:
                  revisions: RevisionService, adapter: CstSchematicAdapter, kicad: KicadPort,
                  artifacts, evidence, clock, max_files: int = 10000,
                  max_bytes: int = 512 * 1024 * 1024, metrics: Metrics | None = None,
-                 monotonic=time.monotonic) -> None:
+                 monotonic=time.monotonic,
+                 faults: FaultInjector | None = None) -> None:
         self._proposal_store = proposal_store; self._command_batches = command_batches; self._projects = projects
         self._requirements = requirements; self._tasks = tasks; self._revisions = revisions; self._adapter = adapter
         self._kicad = kicad; self._artifacts = artifacts; self._evidence = evidence; self._clock = clock
         self._max_files = max_files; self._max_bytes = max_bytes
         self._metrics = metrics
         self._monotonic = monotonic
+        self._faults = faults if faults is not None else NoFaults()
+
+    def _hit_fault(self, point: FaultPoint) -> None:
+        _fault_active.set(True)
+        try:
+            self._faults.hit(point)
+        except BaseException:
+            raise
+        else:
+            _fault_active.set(False)
 
     def begin(self, lease: TaskLease, *, now: datetime | None = None) -> ChangeProposal:
         now = self._clock() if now is None else now
@@ -258,7 +292,11 @@ class ProposalExecutor:
             trace_id=lease.payload.get("trace_id"),
         ):
             try:
-                result = self._execute(lease)
+                fault_token = _fault_active.set(False)
+                try:
+                    result = self._execute(lease)
+                finally:
+                    _fault_active.reset(fault_token)
             except TerminalTaskError as error:
                 if self._metrics is not None:
                     self._metrics.increment(
@@ -457,12 +495,14 @@ class ProposalExecutor:
                     evidence[-1] = EvidenceRegistration(erc_descriptor, EvidenceItem(kind="kicad_erc", artifact_digest=erc_descriptor.digest, media_type="application/json", verdict="fail"))
                 after_descriptor = add("project_snapshot_after", self._manifest(workspace, self._revisions), "application/json")
                 diff_bytes = self._revisions.git.diff_worktree(workspace)
+                self._hit_fault(FaultPoint.DURING_DIFF_ARTIFACT_SAVE)
                 diff_descriptor = add("git_text_diff", diff_bytes, "application/octet-stream")
                 if parsed.findings:
                     raise TerminalTaskError("CANDIDATE_VALIDATION_FAILED", "KiCad ERC reported findings")
                 self._tasks.assert_active(lease.task_id, lease.lease_token, self._clock())
                 actor_name = f"PCBFlow {batch.actor.type}:{batch.actor.id}".replace("\r", "_").replace("\n", "_")
                 actor_email = f"pcbflow+{hashlib.sha256(f'{batch.actor.type}:{batch.actor.id}'.encode()).hexdigest()[:24]}@local.invalid"
+                self._hit_fault(FaultPoint.BEFORE_CANDIDATE_COMMIT)
                 candidate = self._revisions.commit_candidate(project, workspace, batch.base_revision, f"refs/pcbflow/proposals/{proposal_id}", f"pcbflow: proposal {proposal_id}", self._command_batches.created_at(batch.batch_id), publish_ref=False, author_name=actor_name, author_email=actor_email)
                 candidate_revision = candidate.revision
                 artifacts = tuple(item.item for item in evidence)
@@ -489,20 +529,30 @@ class ProposalExecutor:
                         "kicad_erc": "pass",
                     },
                 }
+                self._hit_fault(FaultPoint.AFTER_EXECUTION_BEFORE_FINAL_FENCE)
                 self._tasks.assert_active(lease.task_id, lease.lease_token, self._clock())
                 self._revisions.publish_candidate_ref(project.id, f"refs/pcbflow/proposals/{proposal_id}", candidate.revision)
+                self._hit_fault(FaultPoint.AFTER_PROPOSAL_REF_BEFORE_DATABASE)
                 self._tasks.assert_active(lease.task_id, lease.lease_token, self._clock())
                 self._proposal_store.mark_ready(proposal_id, lease.task_id, lease.lease_token, self._clock(), candidate.revision, candidate.snapshot_digest, review, semantic_descriptor.digest, evidence_set_digest, result, tuple(evidence))
                 return result
         except TerminalTaskError as error:
+            if _fault_active.get():
+                _fault_active.set(False)
+                raise
             evidence_set_digest = add_failed_evidence_set().digest
             digest_map = {item.item.kind: item.item.artifact_digest for item in evidence}
             semantic_digest = digest_map.get("schematic_semantic_diff")
             self._proposal_store.mark_validation_failed(proposal_id, lease.task_id, lease.lease_token, self._clock(), error.code, semantic_digest, evidence_set_digest, {"error_code": error.code, "artifact_digests": digest_map}, tuple(evidence))
             raise
         except StaleLeaseError:
+            if _fault_active.get():
+                _fault_active.set(False)
             raise
         except Exception as error:
+            if _fault_active.get():
+                _fault_active.set(False)
+                raise
             failed = TerminalTaskError("CANDIDATE_VALIDATION_FAILED", str(error))
             evidence_set_digest = add_failed_evidence_set().digest
             digest_map = {item.item.kind: item.item.artifact_digest for item in evidence}
@@ -533,6 +583,7 @@ class ProposalDecisionService:
         reconciler,
         clock,
         metrics: Metrics | None = None,
+        faults: FaultInjector | None = None,
     ) -> None:
         self._proposal_store = proposal_store
         self._command_batches = command_batches
@@ -544,6 +595,7 @@ class ProposalDecisionService:
         self._reconciler = reconciler
         self._clock = clock
         self._metrics = metrics
+        self._faults = faults if faults is not None else NoFaults()
 
     def _replay_or_none(
         self,
@@ -789,6 +841,7 @@ class ProposalDecisionService:
             actor_type=actor_type, actor_id=actor_id, comment=comment,
             approval_artifact=descriptor, now=now,
         )
+        self._faults.hit(FaultPoint.AFTER_ACCEPT_DATABASE_BEFORE_DESIGN_REF)
         try:
             self._revisions.promote_design_ref(project.id, proposal.candidate_revision or "", project.current_revision)
         except Exception:

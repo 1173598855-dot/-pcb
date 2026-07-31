@@ -1130,3 +1130,163 @@ git status --short
 8. 从一个失败测试开始修改。
 
 如果无法明确说明“这个改动作用于哪个 revision、由什么证据验证、失败时如何恢复”，说明设计边界还不完整，不应直接开始写入型实现。
+## 34. Phase 2A controlled design change kernel
+
+This section is the implementation-facing companion to the Phase 2A design
+specification and plan. It describes the behavior that the current source,
+CLI, REST API, and tests provide.
+
+### 34.1 Architecture and authority boundaries
+
+SQLite is authoritative for workflow state: project mode, `current_revision`,
+requirements, commands, leases, proposals, decisions, evidence rows, and
+outbox events. Managed Git is authoritative for accepted design contents and
+refs. The content-addressed Artifact Store is authoritative for immutable raw
+reports, manifests, diffs, logs, and decision evidence. Git refs are repaired
+projections of SQLite state by `RevisionReconciler`; a ref must not be selected
+as validation input when the database revision is available. The registered
+external `source_path` is import provenance and is never written.
+
+### 34.2 Windows/Linux setup and environment
+
+Use Python 3.12 or 3.13, Git, and optionally KiCad 9.x. Create a virtual
+environment and install the editable package with `.[dev]`. `PCBFLOW_DATA_DIR`
+defaults to `.pcbflow-data`; `PCBFLOW_DATABASE_URL` and
+`PCBFLOW_ARTIFACT_DIR` override its database and artifact locations.
+`PCBFLOW_KICAD_CLI` selects `kicad-cli`; `PCBFLOW_MODULE_CATALOG_DIR` selects
+verified module files. Runtime limits are controlled by
+`PCBFLOW_TASK_LEASE_SECONDS`, `PCBFLOW_PROCESS_TIMEOUT_SECONDS`,
+`PCBFLOW_MAX_PROCESS_OUTPUT_BYTES`, `PCBFLOW_MAX_PROJECT_FILES`, and
+`PCBFLOW_MAX_PROJECT_BYTES`. `PCBFLOW_REMOTE_MODE` is an explicit deployment
+mode flag. Windows paths may be absolute; Linux uses the same variables with
+POSIX paths.
+
+### 34.3 Migration workflow and schema ownership
+
+Alembic owns schema changes. Run `python -m alembic -c alembic.ini upgrade head`
+against a disposable database before testing a migration, then run the full
+suite against both a fresh and an upgraded database. SQLAlchemy table modules
+describe the current schema; application services, not ad-hoc CLI code, own
+transactions and invariants.
+
+### 34.4 Adoption, reconciliation, and source immutability
+
+`project add` registers a path. `project adopt` copies it through the shared
+link/path/size policy into a bare managed Git repository, records the first
+revision and snapshot digest, and sets the design ref. Startup and explicit
+reconciliation verify the database revision object, snapshot digest, G1 facts,
+accepted proposal facts, and candidate refs. If a projection is recoverable,
+the reconciler repairs the ref from SQLite; missing or contradictory facts stop
+writes with a stable reconciliation error. Validation of a managed project
+materializes `current_revision`; registered validation uses a safe temporary
+copy. Neither path mutates the external source.
+
+### 34.5 RequirementSet, canonicalization, G1, and digest signing
+
+Requirement YAML is parsed into a strict `RequirementSetPayload`. Canonical
+JSON uses UTF-8, sorted keys, compact separators, and rejects non-finite
+numbers. `canonical_digest` prefixes SHA-256 with `sha256:`. Submission renders
+the candidate requirement files in an isolated worktree. G1 binds the complete
+subject digest, base revision, candidate revision, actor, comment, and an
+approval Artifact; an approved set is frozen and becomes the active set. A
+changed digest or base is a conflict, not a silent replay.
+
+### 34.6 DesignCommand schema, preconditions, idempotency, and operations
+
+Design command batches are strict Pydantic models with `extra="forbid"`.
+Every batch and command carries a schema version, project, base revision,
+requirement set, actor, intent, risk, provenance, and idempotency key.
+Preconditions are evaluated against the materialized semantic document and
+capability report before any write. The supported operation examples are:
+
+```json
+{"type":"schematic.instantiate_module","payload":{"module_revision_id":"modrev_status_led_v1","instance_name":"STATUS_LED","target_sheet_ref":{}}}
+{"type":"schematic.set_property","payload":{"subject_ref":{},"property_name":"Value","value":"GREEN","expected_old_value":"RED"}}
+{"type":"schematic.assign_footprint","payload":{"subject_ref":{},"footprint":"Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"}}
+{"type":"schematic.add_label","payload":{"text":"STATUS_OK","target_sheet_ref":{},"position":{"x":10.0,"y":10.0}}}
+```
+
+The full payload schema, not the abbreviated examples, is validated before
+queueing. Reusing a key with a different canonical input returns a conflict.
+
+### 34.7 CST, semantic IR, Diff attribution, and prohibited edits
+
+The schematic adapter parses KiCad S-expressions into a loss-preserving CST,
+projects supported nodes into a semantic IR, applies typed edits, serializes
+the CST, and computes an attributed semantic Diff. Stable object UUIDs,
+hierarchy, units, Unicode, custom properties, and unknown inline nodes are
+preserved by the CST contract. Regex replacement, line-oriented search/replace,
+and unstructured text rewriting of `.kicad_sch` are prohibited.
+
+### 34.8 Verified module and footprint catalog
+
+Catalog entries are YAML metadata plus a KiCad schematic fragment. The catalog
+loader enforces the configured file and byte limits and verifies each module's
+declared SHA-256 digest before use. A command must reference a module revision
+id and include it in provenance. Arbitrary library paths and unverified
+footprints are rejected by the adapter contract.
+
+### 34.9 Worker leases, fencing, commits, evidence, and recovery
+
+The Worker claims one SQLite task, starts it with a fencing token, and passes
+the current clock to every start, complete, fail, and active-lease check. An
+expired token cannot transition or publish a result. Proposal execution uses a
+detached Git worktree, mandatory Schema/precondition/path-limit/post-write
+parse/semantic-Diff/ERC validations, deterministic commit metadata, and a
+digest-bound evidence set. A stale worker may leave a candidate ref or
+worktree, but the next attempt replays or repairs it from durable facts.
+
+### 34.10 REST/CLI reference, states, errors, and examples
+
+The CLI command groups are `project`, `requirements`, `approval`, and
+`proposal`; top-level commands include `validate`, `worker --once`,
+`findings`, `evidence`, `doctor`, and `serve`. The REST API exposes project
+adoption, requirement submission, approvals, proposal create/show/diff,
+accept/reject, task lookup, and `worker:run-once`. Write requests require the
+`Idempotency-Key` header. Proposal states are `queued`, `executing`,
+`validation_failed`, `ready_for_review`, `accepted`, `rejected`, and `stale`.
+Stable error examples include `DESIGN_COMMAND_SCHEMA_INVALID`,
+`DESIGN_COMMAND_PRECONDITION_FAILED`, `KICAD_CLI_UNAVAILABLE`,
+`CANDIDATE_VALIDATION_FAILED`, `REVISION_RECONCILIATION_REQUIRED`, and
+`STALE_LEASE`.
+
+### 34.11 Test layers and fixture rules
+
+Run unit, property, golden, integration, contract, and E2E tests with
+`python -m pytest -q`. Run the KiCad contract marker with
+`python -m pytest -m kicad -v`; the locator contract is optional and the single
+real-KiCad write/ERC test skips only when KiCad 9 is absent. Golden fixtures are
+parsed and byte-round-tripped, copied into paths with spaces, and checked for
+stable UUID identity, hierarchy, Unicode, units, custom properties, and ERC
+findings. Fault tests use constructor-injected `FaultInjector` instances and
+never patch production globals.
+
+### 34.12 Structured logs, audit outbox, metrics, and snapshot boundary
+
+Structured log context is limited to project, requirement, command batch,
+proposal, base/candidate revision, task, trace, error code, adapter contract,
+and result. Audit outbox payloads contain schema version, trace id, actor,
+action, object, before/after digests, result, and domain-specific stable ids.
+The eight metric families are proposal execution duration, schematic parse
+duration, KiCad ERC duration, proposal validation total, project revision
+conflict total, proposal review wait, Git-ref reconciliation retry total, and
+adapter contract execution total. Labels are limited to low-cardinality
+`result`, `code`, and `contract`; paths, tokens, and project content never enter
+logs or metrics. Metrics are process-local snapshots in Phase 2A and are not a
+distributed monitoring backend.
+
+### 34.13 Fault injection, troubleshooting, security, and Phase 2B+ non-goals
+
+Inject faults by passing a `FaultInjector` to `build_container`; the five
+points are before candidate commit, after proposal ref before the database
+write, during diff Artifact save, after execution before the final fence, and
+after acceptance database commit before design-ref promotion. A hook exception
+is allowed to propagate unchanged. Restart the container, run reconciliation,
+and retry the expired task to verify recovery and idempotency. For failures,
+check `doctor --json`, task lease expiry, current revision, proposal evidence
+digests, and Git ref reconciliation before changing files. Process execution is
+shell-free with a controlled environment; source paths, links, reparse points,
+tokens, and unbounded output are fenced. AI generation, arbitrary component or
+wire editing, PCB layout, manufacturing output, supplier access, Web UI,
+PostgreSQL, and resident Workers are outside Phase 2A and remain Phase 2B+ or
+later non-goals.

@@ -23,6 +23,7 @@ from sqlalchemy import select, text
 from pcbflow.canonical import canonical_digest
 from pcbflow.design_tables import (
     ChangeProposalRow,
+    DesignCommandBatchRow,
     GateDecisionRow,
     OutboxEventRow,
     RequirementSetRow,
@@ -876,10 +877,39 @@ class RevisionReconciler:
                         GateDecisionRow.decision == "approve",
                     )
                 )
+                expected_frozen_revision = revision
+                if stored.command_batch_id is not None:
+                    batch = session.get(DesignCommandBatchRow, stored.command_batch_id)
+                    if batch is None or batch.requirement_set_id != stored.requirement_set_id:
+                        raise self._terminal(
+                            project_id, "proposal command batch facts are inconsistent"
+                        )
+                    expected_frozen_revision = batch.base_revision
+                frozen_revision_is_valid = (
+                    requirement is not None
+                    and requirement.frozen_revision == expected_frozen_revision
+                )
+                if (
+                    not frozen_revision_is_valid
+                    and stored.command_batch_id is not None
+                    and requirement is not None
+                    and requirement.frozen_revision is not None
+                    and self._revisions is not None
+                ):
+                    try:
+                        frozen_revision_is_valid = self._revisions.is_ancestor(
+                            project_id,
+                            requirement.frozen_revision,
+                            expected_frozen_revision,
+                        )
+                    except Exception as error:
+                        raise self._terminal(
+                            project_id, "G1 revision ancestry cannot be verified"
+                        ) from error
                 if (
                     requirement is None
                     or requirement.status != "frozen"
-                    or requirement.frozen_revision != revision
+                    or not frozen_revision_is_valid
                     or decision is None
                 ):
                     raise self._terminal(project_id, "G1 acceptance facts are inconsistent")

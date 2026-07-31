@@ -1,0 +1,7 @@
+(kicad_sch
+  (version 20250114)
+  (generator "pcbflow-test")
+  (uuid 00000000-0000-0000-0000-000000000011)
+  (paper "A4")
+  (lib_symbols)
+)

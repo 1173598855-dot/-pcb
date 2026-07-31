@@ -20,7 +20,14 @@ from pcbflow.observability import Metrics
 from pcbflow.kicad import KicadCli, KicadPort
 from pcbflow.process import ProcessRunner
 from pcbflow.proposal_store import CommandBatchStore, ProposalStore
-from pcbflow.proposals import ProposalService, ProposalExecutor, ProposalDecisionService, DESIGN_PROPOSAL_TASK_KIND
+from pcbflow.proposals import (
+    DESIGN_PROPOSAL_TASK_KIND,
+    FaultInjector,
+    NoFaults,
+    ProposalDecisionService,
+    ProposalExecutor,
+    ProposalService,
+)
 from pcbflow.schematic.adapter import CstSchematicAdapter
 from pcbflow.schematic.modules import FileModuleCatalog
 from pcbflow.revision_store import ProjectRevisionStore
@@ -86,11 +93,13 @@ def build_container(
     *,
     metrics: Metrics | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    faults: FaultInjector | None = None,
 ) -> Container:
     settings.ensure_directories()
     _run_migrations(settings.database_url)
     engine, sessions = create_engine_and_session(settings.database_url)
     metric_sink = metrics if metrics is not None else Metrics()
+    fault_injector = faults if faults is not None else NoFaults()
 
     projects = ProjectRepository(sessions)
     tasks = TaskRepository(sessions)
@@ -144,7 +153,7 @@ def build_container(
     selected_kicad: KicadPort = kicad_override if kicad_override is not None else kicad
     module_catalog = (FileModuleCatalog(settings.module_catalog_dir, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes) if settings.module_catalog_dir is not None else None)
     adapter = CstSchematicAdapter(module_catalog, metrics=metric_sink, monotonic=monotonic)
-    proposal_executor = ProposalExecutor(proposal_store=proposal_store, command_batches=command_batches, projects=projects, requirements=requirement_store, tasks=tasks, revisions=revisions, adapter=adapter, kicad=selected_kicad, artifacts=artifacts, evidence=evidence, clock=clock, metrics=metric_sink, monotonic=monotonic, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes)
+    proposal_executor = ProposalExecutor(proposal_store=proposal_store, command_batches=command_batches, projects=projects, requirements=requirement_store, tasks=tasks, revisions=revisions, adapter=adapter, kicad=selected_kicad, artifacts=artifacts, evidence=evidence, clock=clock, metrics=metric_sink, monotonic=monotonic, faults=fault_injector, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes)
     proposal_decisions = ProposalDecisionService(
         proposal_store=proposal_store,
         command_batches=command_batches,
@@ -156,6 +165,7 @@ def build_container(
         reconciler=reconciler,
         clock=clock,
         metrics=metric_sink,
+        faults=fault_injector,
     )
     handler = ValidationTaskHandler(
         projects,
@@ -165,6 +175,8 @@ def build_container(
         selected_kicad,
         metrics=metric_sink,
         monotonic=monotonic,
+        revisions=revisions,
+        copier=workspace_copier,
         max_files=settings.max_project_files,
         max_bytes=settings.max_project_bytes,
     )

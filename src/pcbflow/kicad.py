@@ -211,7 +211,12 @@ class KicadCli:
     def validate(
         self, project_dir: Path, output_dir: Path
     ) -> tuple[RawValidationReport, ...]:
-        project = project_dir.resolve(strict=True)
+        try:
+            project = project_dir.resolve(strict=True)
+        except FileNotFoundError as error:
+            raise KicadProjectNotFoundError(
+                "KiCad project path does not exist"
+            ) from error
         if not project.is_dir():
             raise KicadProjectNotFoundError("KiCad project path must be a directory")
         output = output_dir.resolve()

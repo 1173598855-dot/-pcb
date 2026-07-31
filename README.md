@@ -230,3 +230,87 @@ pcbflow proposal diff <proposal-id> --json
 pcbflow proposal accept <proposal-id> --candidate-digest <sha256:...> --actor-id <id> --comment <text> --idempotency-key <key> --json
 pcbflow proposal reject <proposal-id> --reason <text> --actor-id <id> --idempotency-key <key> --json
 ```
+
+## Phase 2A controlled design change kernel
+
+Phase 2A is the implemented write-capable slice. It adopts an external KiCad
+project into managed Git, freezes a structured requirement set at G1, executes
+one of the four strict schematic operations in an isolated worktree, records
+semantic and tool evidence, and waits for an explicit accept or reject
+decision. The registered `source_path` is never written after adoption.
+
+### Initialize and configure
+
+Use Python 3.12 or 3.13, Git, and KiCad 9.x when proposal ERC or the real-KiCad
+contract is required. The first CLI invocation runs the Alembic migrations;
+they can also be run explicitly:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m alembic -c alembic.ini upgrade head
+```
+
+Set `PCBFLOW_KICAD_CLI` to the KiCad 9 `kicad-cli` executable when it is not on
+`PATH`. `PCBFLOW_MODULE_CATALOG_DIR` points at verified module revisions used by
+the instantiate operation.
+
+### Adopt, freeze G1, and propose
+
+The command arguments below match `python -m pcbflow ... --help`. Every write
+command requires an idempotency key and replays only the same canonical input.
+
+```powershell
+$p = .\.venv\Scripts\python.exe -m pcbflow project add C:\work\controller `
+  --name Controller --idempotency-key controller-add --json
+# Read the returned project id, then:
+.\.venv\Scripts\python.exe -m pcbflow project adopt <project-id> `
+  --idempotency-key controller-adopt --json
+.\.venv\Scripts\python.exe -m pcbflow requirements import <project-id> `
+  --file requirements.yaml --idempotency-key requirements-import --json
+.\.venv\Scripts\python.exe -m pcbflow requirements submit <requirement-set-id> `
+  --idempotency-key requirements-submit --json
+.\.venv\Scripts\python.exe -m pcbflow approval decide <requirement-set-id> `
+  --subject-digest sha256:<digest> --approve --actor-id reviewer `
+  --comment "G1 approved" --idempotency-key g1-approval --json
+```
+
+Create a JSON DesignCommand batch with `proposal create`. The supported
+operation types are `schematic.instantiate_module`,
+`schematic.set_property`, `schematic.assign_footprint`, and
+`schematic.add_label`.
+
+```powershell
+.\.venv\Scripts\python.exe -m pcbflow proposal create <project-id> `
+  --file commands.json --idempotency-key proposal-create --json
+.\.venv\Scripts\python.exe -m pcbflow worker --once --json
+.\.venv\Scripts\python.exe -m pcbflow proposal show <proposal-id> --json
+.\.venv\Scripts\python.exe -m pcbflow proposal diff <proposal-id> --json
+.\.venv\Scripts\python.exe -m pcbflow proposal accept <proposal-id> `
+  --candidate-digest sha256:<review-digest> --actor-id reviewer `
+  --comment "accepted" --idempotency-key proposal-accept --json
+# Or reject the candidate:
+.\.venv\Scripts\python.exe -m pcbflow proposal reject <proposal-id> `
+  --reason "needs another review" --actor-id reviewer `
+  --idempotency-key proposal-reject --json
+```
+
+### Read-only validation and storage
+
+Queue validation with `python -m pcbflow validate <project-id> --idempotency-key <key> --json`, then run `worker --once`. Registered projects are copied through the link, path, file-count, and byte-count policy. Managed projects are materialized from SQLite `Project.current_revision`; the external import path is not a validation input. A successful run stores immutable raw reports in the content-addressed artifact store and normalized findings in SQLite.
+
+The default data root is `.pcbflow-data/`. It contains `pcbflow.db`,
+`artifacts/`, `projects/<project-id>/repo.git/`, and temporary `workspaces/`.
+Set `PCBFLOW_DATA_DIR` to relocate the root, or set
+`PCBFLOW_DATABASE_URL`/`PCBFLOW_ARTIFACT_DIR` explicitly. Other supported
+settings are `PCBFLOW_TASK_LEASE_SECONDS`, `PCBFLOW_PROCESS_TIMEOUT_SECONDS`,
+`PCBFLOW_MAX_PROCESS_OUTPUT_BYTES`, `PCBFLOW_MAX_PROJECT_FILES`,
+`PCBFLOW_MAX_PROJECT_BYTES`, `PCBFLOW_MODULE_CATALOG_DIR`, and
+`PCBFLOW_REMOTE_MODE`.
+
+### Phase 2A limits
+
+Only SQLite and KiCad 9.x are supported. The Worker is an explicit `--once`
+runner, not a resident service. Phase 2A does not include AI generation,
+arbitrary component or wire editing, PCB layout, manufacturing outputs such as
+Gerber/BOM/CPL, supplier access, a Web UI, PostgreSQL, or a resident Worker.
