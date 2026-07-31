@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import tempfile
+import hashlib
 from pathlib import Path
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal
@@ -34,6 +35,7 @@ from pcbflow.schematic.diff import CommandAttribution, build_semantic_diff, sema
 from pcbflow.schematic.semantic import SchematicDocument, object_ref_key
 from pcbflow.kicad import KicadPort, KicadCapability, parse_kicad_report, KicadUnavailableError, KicadProjectNotFoundError, KicadToolError
 from pcbflow.repositories import ProjectRepository
+from pcbflow.validation import assert_project_tree_safe
 
 if TYPE_CHECKING:
     from pcbflow.proposal_store import ProposalStore
@@ -183,10 +185,12 @@ class _PreconditionContext:
 class ProposalExecutor:
     def __init__(self, *, proposal_store, command_batches, projects, requirements, tasks: TaskRepository,
                  revisions: RevisionService, adapter: CstSchematicAdapter, kicad: KicadPort,
-                 artifacts, evidence, clock) -> None:
+                 artifacts, evidence, clock, max_files: int = 10000,
+                 max_bytes: int = 512 * 1024 * 1024) -> None:
         self._proposal_store = proposal_store; self._command_batches = command_batches; self._projects = projects
         self._requirements = requirements; self._tasks = tasks; self._revisions = revisions; self._adapter = adapter
         self._kicad = kicad; self._artifacts = artifacts; self._evidence = evidence; self._clock = clock
+        self._max_files = max_files; self._max_bytes = max_bytes
 
     def begin(self, lease: TaskLease, *, now: datetime | None = None) -> ChangeProposal:
         now = self._clock() if now is None else now
@@ -217,6 +221,7 @@ class ProposalExecutor:
         self.begin(lease, now=now)
         evidence: list[EvidenceRegistration] = []
         capability: KicadCapability | None = None
+        candidate_revision: str | None = None
         def add(kind, data, media="application/octet-stream", verdict="pass"):
             descriptor = self._put(data, media); evidence.append(EvidenceRegistration(descriptor, EvidenceItem(kind=kind, artifact_digest=descriptor.digest, media_type=media, verdict=verdict))); return descriptor
         try:
@@ -240,6 +245,8 @@ class ProposalExecutor:
                     raise TerminalTaskError("DESIGN_COMMAND_PRECONDITION_FAILED", "a design command precondition failed")
                 applied = self._adapter.apply(workspace, batch.commands)
                 after = applied.after
+                capability_descriptor = add("adapter_capability_report", canonical_json_bytes({"adapter_contract": applied.capability_report.adapter_contract, "kicad_major": applied.capability_report.kicad_major, "supported_operations": applied.capability_report.supported_operations, "module_digests": applied.capability_report.module_digests}), "application/json")
+                assert_project_tree_safe(workspace, max_files=self._max_files, max_bytes=self._max_bytes)
                 attributions = tuple(CommandAttribution(command_id=result.command_id, requirement_ids=next(c.provenance.requirement_ids for c in batch.commands if c.command_id == result.command_id), risk=next(c.risk for c in batch.commands if c.command_id == result.command_id), selectors=result.effects) for result in applied.command_results)
                 semantic = build_semantic_diff(before, after, attributions)
                 if not semantic.changes:
@@ -251,39 +258,50 @@ class ProposalExecutor:
                 parsed = parse_kicad_report("erc", ercs[0].data)
                 erc_descriptor = add("kicad_erc", ercs[0].data, "application/json", "fail" if parsed.findings else "pass")
                 after_descriptor = add("project_snapshot_after", self._manifest(workspace, self._revisions), "application/json")
-                capability_descriptor = add("adapter_capability_report", canonical_json_bytes({"adapter_contract": applied.capability_report.adapter_contract, "kicad_major": applied.capability_report.kicad_major, "supported_operations": applied.capability_report.supported_operations, "module_digests": applied.capability_report.module_digests}), "application/json")
                 diff_bytes = self._revisions.git.diff_worktree(workspace)
                 diff_descriptor = add("git_text_diff", diff_bytes, "application/octet-stream")
                 if parsed.findings:
                     raise TerminalTaskError("CANDIDATE_VALIDATION_FAILED", "KiCad ERC reported findings")
-                candidate = self._revisions.commit_candidate(project, workspace, batch.base_revision, f"refs/pcbflow/proposals/{proposal_id}", f"pcbflow: proposal {proposal_id}", self._command_batches.created_at(batch.batch_id))
+                self._tasks.assert_active(lease.task_id, lease.lease_token, self._clock())
+                actor_name = f"PCBFlow {batch.actor.type}:{batch.actor.id}".replace("\r", "_").replace("\n", "_")
+                actor_email = f"pcbflow+{hashlib.sha256(f'{batch.actor.type}:{batch.actor.id}'.encode()).hexdigest()[:24]}@local.invalid"
+                candidate = self._revisions.commit_candidate(project, workspace, batch.base_revision, f"refs/pcbflow/proposals/{proposal_id}", f"pcbflow: proposal {proposal_id}", self._command_batches.created_at(batch.batch_id), publish_ref=False, author_name=actor_name, author_email=actor_email)
+                candidate_revision = candidate.revision
                 artifacts = tuple(item.item for item in evidence)
                 evidence_set = EvidenceSet(project_id=project.id, task_id=lease.task_id, proposal_id=proposal_id, base_revision=batch.base_revision, candidate_revision=candidate.revision, artifacts=artifacts)
                 evidence_set_descriptor = add("proposal_evidence_set", canonical_json_bytes(evidence_set.model_dump(mode="json")), "application/json")
                 evidence_set_digest = evidence_set_descriptor.digest
+                if not all(self._artifacts.verify(item.item.artifact_digest) for item in evidence):
+                    raise TerminalTaskError("CANDIDATE_VALIDATION_FAILED", "candidate evidence integrity check failed")
                 review = proposal_review_digest(proposal_id=proposal_id, project_id=project.id, base_revision=batch.base_revision, candidate_revision=candidate.revision, candidate_snapshot_digest=candidate.snapshot_digest, requirement_set_digest=requirements.canonical_digest, semantic_diff_digest=semantic_descriptor.digest, evidence_set_digest=evidence_set_digest, adapter_capability_digest=capability_descriptor.digest)
                 result = {"proposal_id": proposal_id, "candidate_revision": candidate.revision, "review_digest": review, "semantic_diff_digest": semantic_descriptor.digest, "evidence_set_digest": evidence_set_digest, "evidence_ids": []}
+                self._tasks.assert_active(lease.task_id, lease.lease_token, self._clock())
+                self._revisions.publish_candidate_ref(project.id, f"refs/pcbflow/proposals/{proposal_id}", candidate.revision)
+                self._tasks.assert_active(lease.task_id, lease.lease_token, self._clock())
                 self._proposal_store.mark_ready(proposal_id, lease.task_id, lease.lease_token, self._clock(), candidate.revision, candidate.snapshot_digest, review, semantic_descriptor.digest, evidence_set_digest, result, tuple(evidence))
                 return result
         except TerminalTaskError as error:
             if not any(item.item.kind == "proposal_evidence_set" for item in evidence):
-                failed_set = EvidenceSet(project_id=project.id, task_id=lease.task_id, proposal_id=proposal_id, base_revision=batch.base_revision, candidate_revision=None, artifacts=tuple(item.item for item in evidence))
+                failed_set = EvidenceSet(project_id=project.id, task_id=lease.task_id, proposal_id=proposal_id, base_revision=batch.base_revision, candidate_revision=candidate_revision, artifacts=tuple(item.item for item in evidence))
                 descriptor = add("proposal_evidence_set", canonical_json_bytes(failed_set.model_dump(mode="json")), "application/json", "fail")
                 evidence_set_digest = descriptor.digest
             else: evidence_set_digest = next(item.item.artifact_digest for item in evidence if item.item.kind == "proposal_evidence_set")
-            self._proposal_store.mark_validation_failed(proposal_id, lease.task_id, lease.lease_token, self._clock(), error.code, None, evidence_set_digest, {"error_code": error.code}, tuple(evidence))
+            digest_map = {item.item.kind: item.item.artifact_digest for item in evidence}
+            semantic_digest = digest_map.get("schematic_semantic_diff")
+            self._proposal_store.mark_validation_failed(proposal_id, lease.task_id, lease.lease_token, self._clock(), error.code, semantic_digest, evidence_set_digest, {"error_code": error.code, "artifact_digests": digest_map}, tuple(evidence))
             raise
         except StaleLeaseError:
             raise
         except Exception as error:
             failed = TerminalTaskError("CANDIDATE_VALIDATION_FAILED", str(error))
             if not any(item.item.kind == "proposal_evidence_set" for item in evidence):
-                failed_set = EvidenceSet(project_id=project.id, task_id=lease.task_id, proposal_id=proposal_id, base_revision=batch.base_revision, candidate_revision=None, artifacts=tuple(item.item for item in evidence))
+                failed_set = EvidenceSet(project_id=project.id, task_id=lease.task_id, proposal_id=proposal_id, base_revision=batch.base_revision, candidate_revision=candidate_revision, artifacts=tuple(item.item for item in evidence))
                 descriptor = add("proposal_evidence_set", canonical_json_bytes(failed_set.model_dump(mode="json")), "application/json", "fail")
                 evidence_set_digest = descriptor.digest
             else:
                 evidence_set_digest = next(item.item.artifact_digest for item in evidence if item.item.kind == "proposal_evidence_set")
-            self._proposal_store.mark_validation_failed(proposal_id, lease.task_id, lease.lease_token, self._clock(), failed.code, None, evidence_set_digest, {"error_code": failed.code}, tuple(evidence))
+            digest_map = {item.item.kind: item.item.artifact_digest for item in evidence}
+            self._proposal_store.mark_validation_failed(proposal_id, lease.task_id, lease.lease_token, self._clock(), failed.code, digest_map.get("schematic_semantic_diff"), evidence_set_digest, {"error_code": failed.code, "artifact_digests": digest_map}, tuple(evidence))
             raise failed from error
 
 

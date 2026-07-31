@@ -125,7 +125,7 @@ def build_container(
     selected_kicad: KicadPort = kicad_override if kicad_override is not None else kicad
     module_catalog = (FileModuleCatalog(settings.module_catalog_dir, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes) if settings.module_catalog_dir is not None else None)
     adapter = CstSchematicAdapter(module_catalog)
-    proposal_executor = ProposalExecutor(proposal_store=proposal_store, command_batches=command_batches, projects=projects, requirements=requirement_store, tasks=tasks, revisions=revisions, adapter=adapter, kicad=selected_kicad, artifacts=artifacts, evidence=evidence, clock=clock)
+    proposal_executor = ProposalExecutor(proposal_store=proposal_store, command_batches=command_batches, projects=projects, requirements=requirement_store, tasks=tasks, revisions=revisions, adapter=adapter, kicad=selected_kicad, artifacts=artifacts, evidence=evidence, clock=clock, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes)
     handler = ValidationTaskHandler(
         projects,
         evidence,
@@ -162,7 +162,7 @@ def build_container(
         evidence=evidence,
         findings=findings,
         artifacts=artifacts,
-        kicad=kicad,
+        kicad=selected_kicad,
         validation=validation,
         worker=worker,
         proposal_executor=proposal_executor,

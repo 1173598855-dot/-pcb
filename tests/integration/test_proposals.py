@@ -13,6 +13,7 @@ from pcbflow.domain import TaskStatus
 from pcbflow.kicad import KicadCapability, RawValidationReport
 from pcbflow.proposals import ProposalStatus
 from pcbflow.repositories import StaleLeaseError
+from pcbflow.validation import ProjectCopyLimitError, assert_project_tree_safe
 
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
 PASSING_ERC = b'{"version":"1.0","source":"board.kicad_sch","violations":[]}'
@@ -30,6 +31,23 @@ class FakeProposalKicad:
         assert project_dir.is_dir()
         output_dir.mkdir(parents=True, exist_ok=True)
         return (RawValidationReport("erc", self.report, ("kicad-cli", "sch", "erc"), 0, "9.0.2"),)
+
+
+def test_container_exposes_the_injected_kicad_port(tmp_path: Path) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    fake = FakeProposalKicad()
+    container = build_container(_settings(tmp_path, fixtures / "modules"), kicad_override=fake, clock=lambda: NOW)
+    try:
+        assert container.kicad is fake
+    finally:
+        container.dispose()
+
+
+def test_candidate_tree_limits_are_enforced_before_persistence(tmp_path: Path) -> None:
+    (tmp_path / "one").write_bytes(b"1")
+    (tmp_path / "two").write_bytes(b"2")
+    with pytest.raises(ProjectCopyLimitError, match="more than 1 files"):
+        assert_project_tree_safe(tmp_path, max_files=1, max_bytes=100)
 
 
 def _settings(tmp_path: Path, module_catalog: Path) -> Settings:
@@ -74,6 +92,11 @@ def test_worker_builds_one_reviewable_candidate_and_complete_evidence(tmp_path: 
         assert ready.review_digest is not None
         assert task.status is TaskStatus.SUCCEEDED
         assert container.revisions.resolve_proposal_ref(project.id, proposal.id) == ready.candidate_revision
+        commit_metadata = container.revisions.git._invoke(
+            ["git", f"--git-dir={container.revisions.repo_path(project.id)}", "show", "-s", "--format=%an <%ae>", ready.candidate_revision.removeprefix("git:")],
+            container.revisions.repo_path(project.id).parent,
+        )
+        assert "local-user" in commit_metadata.stdout
         evidence = container.evidence.list_for_project(project.id)
         assert {"design_command_batch", "project_snapshot_before", "project_snapshot_after", "git_text_diff", "schematic_semantic_diff", "kicad_erc", "command_execution_log", "adapter_capability_report", "proposal_evidence_set"} <= {item.kind for item in evidence}
         assert all(container.artifacts.verify(item.artifact_digest) for item in evidence)
@@ -94,6 +117,9 @@ def test_erc_failure_never_becomes_reviewable_or_advances_revision(tmp_path: Pat
         assert failed.status is ProposalStatus.VALIDATION_FAILED
         assert failed.candidate_revision is None
         assert failed.evidence_set_digest is not None
+        assert failed.semantic_diff_digest is not None
+        assert failed.result is not None
+        assert "adapter_capability_report" in failed.result["artifact_digests"]
         assert all(container.artifacts.verify(item.artifact_digest) for item in container.evidence.list_for_project(project.id) if item.task_id == proposal.task_id)
         assert container.projects.get(project.id).current_revision == before_revision
     finally:
@@ -112,6 +138,23 @@ def test_expired_lease_cannot_mark_proposal_executing(tmp_path: Path) -> None:
         with pytest.raises(StaleLeaseError):
             container.proposal_executor.begin(lease, now=NOW + timedelta(seconds=1))
         assert container.proposal_store.get(proposal.id).status is ProposalStatus.QUEUED
+    finally:
+        container.dispose()
+
+
+def test_fence_is_rechecked_after_execution_begins(tmp_path: Path) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    container = build_container(_settings(tmp_path, fixtures / "modules"), kicad_override=FakeProposalKicad(), clock=lambda: NOW)
+    try:
+        _source, project, requirement_set = _prepare(container, tmp_path)
+        proposal = container.proposals.create(_instantiate_batch(project, requirement_set), "execute-status-led")
+        lease = container.tasks.claim_next("worker-a", NOW, 1)
+        assert lease is not None
+        container.tasks.start(lease.task_id, lease.lease_token, NOW)
+        container.proposal_executor.begin(lease, now=NOW)
+        with pytest.raises(StaleLeaseError):
+            container.tasks.assert_active(lease.task_id, lease.lease_token, NOW + timedelta(seconds=1))
+        assert container.proposal_store.get(proposal.id).status is ProposalStatus.EXECUTING
     finally:
         container.dispose()
 

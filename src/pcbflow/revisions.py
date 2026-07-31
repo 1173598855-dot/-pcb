@@ -230,6 +230,10 @@ class GitCli:
         message: str,
         timestamp: datetime,
         registered_excludes: frozenset[str] = frozenset(),
+        author_name: str = "PCBFlow",
+        author_email: str = "pcbflow@local.invalid",
+        committer_name: str | None = None,
+        committer_email: str | None = None,
     ) -> str:
         repo = repo.resolve(strict=True)
         tree = tree.resolve(strict=True)
@@ -238,10 +242,10 @@ class GitCli:
             index_path = Path(temporary) / "index"
             env = {
                 "GIT_INDEX_FILE": str(index_path),
-                "GIT_AUTHOR_NAME": "PCBFlow",
-                "GIT_AUTHOR_EMAIL": "pcbflow@local.invalid",
-                "GIT_COMMITTER_NAME": "PCBFlow",
-                "GIT_COMMITTER_EMAIL": "pcbflow@local.invalid",
+                "GIT_AUTHOR_NAME": author_name,
+                "GIT_AUTHOR_EMAIL": author_email,
+                "GIT_COMMITTER_NAME": committer_name or author_name,
+                "GIT_COMMITTER_EMAIL": committer_email or author_email,
                 "GIT_AUTHOR_DATE": timestamp.isoformat(),
                 "GIT_COMMITTER_DATE": timestamp.isoformat(),
             }
@@ -656,6 +660,10 @@ class RevisionService:
         ref: str,
         message: str,
         timestamp: datetime,
+        *,
+        publish_ref: bool = True,
+        author_name: str = "PCBFlow",
+        author_email: str = "pcbflow@local.invalid",
     ) -> CandidateRevision:
         excludes = self._load_snapshot_excludes(workspace)
         snapshot = self.snapshot_digest(workspace, excludes)
@@ -666,11 +674,17 @@ class RevisionService:
             message=message,
             timestamp=timestamp,
             registered_excludes=excludes,
+            author_name=author_name,
+            author_email=author_email,
         )
-        self._git.update_ref(
-            self._repo(project.id), ref, revision, expected_revision=None
-        )
+        if publish_ref:
+            self._git.update_ref(self._repo(project.id), ref, revision, expected_revision=None)
         return CandidateRevision(revision=revision, snapshot_digest=snapshot)
+
+    def publish_candidate_ref(
+        self, project_id: str, ref: str, revision: str, expected_revision: str | None = None
+    ) -> None:
+        self._git.update_ref(self._repo(project_id), ref, revision, expected_revision)
 
     def resolve_design_ref(self, project_id: str) -> str | None:
         return self._git.resolve_ref(self._repo(project_id), "refs/heads/design")

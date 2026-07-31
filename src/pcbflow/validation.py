@@ -34,6 +34,43 @@ class ProjectLinkError(TerminalTaskError):
     pass
 
 
+def assert_project_tree_safe(root: Path, *, max_files: int, max_bytes: int) -> None:
+    """Reject links, reparse points, escapes, and oversized candidate trees."""
+    root = root.resolve(strict=True)
+    file_count = 0
+    total_bytes = 0
+    for directory, directories, files in os.walk(root, followlinks=False):
+        directory_path = Path(directory)
+        for name in [*directories, *files]:
+            path = directory_path / name
+            metadata = path.lstat()
+            attributes = getattr(metadata, "st_file_attributes", 0)
+            if path.is_symlink() or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise ProjectLinkError(
+                    "PROJECT_LINK_NOT_ALLOWED", f"candidate contains link: {path}"
+                )
+            try:
+                path.resolve(strict=True).relative_to(root)
+            except ValueError as error:
+                raise ProjectLinkError(
+                    "PROJECT_PATH_OUTSIDE_WORKTREE", f"candidate path escapes worktree: {path}"
+                ) from error
+        for name in files:
+            path = directory_path / name
+            file_count += 1
+            total_bytes += path.stat().st_size
+            if file_count > max_files:
+                raise ProjectCopyLimitError(
+                    "PROJECT_FILE_LIMIT_EXCEEDED",
+                    f"candidate contains more than {max_files} files",
+                )
+            if total_bytes > max_bytes:
+                raise ProjectCopyLimitError(
+                    "PROJECT_SIZE_LIMIT_EXCEEDED",
+                    f"candidate exceeds {max_bytes} bytes",
+                )
+
+
 class ValidationService:
     def __init__(
         self, projects: ProjectRepository, tasks: TaskRepository
