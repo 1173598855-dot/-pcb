@@ -421,6 +421,16 @@ class GitCli:
             return False
         raise GitOperationError(("git", "merge-base"), result.returncode)
 
+    def diff_worktree(self, workspace: Path) -> bytes:
+        workspace = workspace.resolve(strict=True)
+        result = self._invoke(
+            ["git", "diff", "--no-ext-diff", "--binary", "--no-renames", "--", "."],
+            workspace,
+        )
+        if result.returncode not in (0, 1):
+            raise GitOperationError(("git", "diff"), result.returncode)
+        return result.stdout_bytes
+
 
 class RevisionService:
     def __init__(

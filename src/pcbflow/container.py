@@ -18,7 +18,9 @@ from pcbflow.domain import new_id, utc_now
 from pcbflow.kicad import KicadCli, KicadPort
 from pcbflow.process import ProcessRunner
 from pcbflow.proposal_store import CommandBatchStore, ProposalStore
-from pcbflow.proposals import ProposalService
+from pcbflow.proposals import ProposalService, ProposalExecutor, DESIGN_PROPOSAL_TASK_KIND
+from pcbflow.schematic.adapter import CstSchematicAdapter
+from pcbflow.schematic.modules import FileModuleCatalog
 from pcbflow.revision_store import ProjectRevisionStore
 from pcbflow.repositories import (
     EvidenceRepository,
@@ -57,9 +59,10 @@ class Container:
     evidence: EvidenceRepository
     findings: FindingRepository
     artifacts: ContentAddressedStore
-    kicad: KicadCli
+    kicad: KicadPort
     validation: ValidationService
     worker: Worker
+    proposal_executor: ProposalExecutor
 
     def dispose(self) -> None:
         self.engine.dispose()
@@ -119,12 +122,16 @@ def build_container(
         KicadCli.locate(settings.kicad_cli),
         settings.process_timeout_seconds,
     )
+    selected_kicad: KicadPort = kicad_override if kicad_override is not None else kicad
+    module_catalog = (FileModuleCatalog(settings.module_catalog_dir, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes) if settings.module_catalog_dir is not None else None)
+    adapter = CstSchematicAdapter(module_catalog)
+    proposal_executor = ProposalExecutor(proposal_store=proposal_store, command_batches=command_batches, projects=projects, requirements=requirement_store, tasks=tasks, revisions=revisions, adapter=adapter, kicad=selected_kicad, artifacts=artifacts, evidence=evidence, clock=clock)
     handler = ValidationTaskHandler(
         projects,
         evidence,
         findings,
         artifacts,
-        kicad_override if kicad_override is not None else kicad,
+        selected_kicad,
         max_files=settings.max_project_files,
         max_bytes=settings.max_project_bytes,
     )
@@ -132,7 +139,7 @@ def build_container(
     worker = Worker(
         tasks,
         new_id("wrk"),
-        {VALIDATION_TASK_KIND: handler},
+        {VALIDATION_TASK_KIND: handler, DESIGN_PROPOSAL_TASK_KIND: proposal_executor},
         clock,
         settings.task_lease_seconds,
     )
@@ -158,4 +165,5 @@ def build_container(
         kicad=kicad,
         validation=validation,
         worker=worker,
+        proposal_executor=proposal_executor,
     )

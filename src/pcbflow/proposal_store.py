@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from pcbflow.canonical import canonical_digest, canonical_json_bytes
@@ -20,8 +20,9 @@ from pcbflow.proposals import (
     ChangeProposal,
     ProposalStatus,
 )
-from pcbflow.repositories import IdempotencyConflictError
-from pcbflow.tables import TaskRow
+from pcbflow.repositories import IdempotencyConflictError, StaleLeaseError, EvidenceConflictError
+from pcbflow.tables import ArtifactRow, EvidenceRow, TaskRow
+from pcbflow.proposals import EvidenceRegistration, EvidenceSet
 
 
 class CommandBatchNotFoundError(LookupError):
@@ -90,6 +91,13 @@ class CommandBatchStore:
             if row is None:
                 raise CommandBatchNotFoundError(batch_id)
             return _batch(row)
+
+    def created_at(self, batch_id: str) -> datetime:
+        with self._sessions() as session:
+            row = session.get(DesignCommandBatchRow, batch_id)
+            if row is None:
+                raise CommandBatchNotFoundError(batch_id)
+            return _utc(row.created_at)
 
 
 class ProposalStore:
@@ -242,3 +250,114 @@ class ProposalStore:
             )
             session.flush()
             return _proposal(proposal)
+
+    @staticmethod
+    def _assert_active_fence(session: Session, task_id: str, lease_token: str, now: datetime) -> None:
+        active = session.scalar(select(TaskRow.id).where(TaskRow.id == task_id,
+            TaskRow.lease_token == lease_token, TaskRow.status == TaskStatus.RUNNING.value,
+            TaskRow.lease_expires_at.is_not(None), TaskRow.lease_expires_at > now))
+        if active is None:
+            raise StaleLeaseError(task_id)
+
+    @staticmethod
+    def _register_evidence(session: Session, proposal: ChangeProposalRow,
+                           registrations: tuple[EvidenceRegistration, ...], now: datetime,
+                           subject: str) -> None:
+        for registration in registrations:
+            descriptor, item = registration.descriptor, registration.item
+            artifact = session.get(ArtifactRow, descriptor.digest)
+            if artifact is None:
+                session.add(ArtifactRow(digest=descriptor.digest, size=descriptor.size,
+                    media_type=descriptor.media_type, storage_path=str(descriptor.path), created_at=now))
+            elif (artifact.size, artifact.media_type, artifact.storage_path) != (descriptor.size, descriptor.media_type, str(descriptor.path)):
+                raise EvidenceConflictError(descriptor.digest)
+            existing = session.scalar(select(EvidenceRow).where(EvidenceRow.task_id == proposal.task_id, EvidenceRow.kind == item.kind))
+            if existing is None:
+                session.add(EvidenceRow(id=new_id("evd"), project_id=proposal.project_id,
+                    task_id=proposal.task_id, kind=item.kind, artifact_digest=item.artifact_digest,
+                    subject=subject, verdict=item.verdict, created_at=now))
+            elif (existing.project_id, existing.artifact_digest, existing.subject, existing.verdict) != (proposal.project_id, item.artifact_digest, subject, item.verdict):
+                raise EvidenceConflictError(f"{proposal.task_id}:{item.kind}")
+
+    def begin_execution(self, proposal_id: str, task_id: str, lease_token: str, now: datetime) -> ChangeProposal:
+        with self._sessions.begin() as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            self._assert_active_fence(session, task_id, lease_token, now)
+            row = session.get(ChangeProposalRow, proposal_id)
+            if row is None or row.task_id != task_id:
+                raise ProposalNotFoundError(proposal_id)
+            if row.status not in (ProposalStatus.QUEUED.value, ProposalStatus.EXECUTING.value):
+                return _proposal(row)
+            changed = session.execute(update(ChangeProposalRow).where(ChangeProposalRow.id == proposal_id,
+                ChangeProposalRow.task_id == task_id, ChangeProposalRow.version == row.version,
+                ChangeProposalRow.status.in_([ProposalStatus.QUEUED.value, ProposalStatus.EXECUTING.value])).values(
+                    status=ProposalStatus.EXECUTING.value, updated_at=now, version=ChangeProposalRow.version + 1))
+            if changed.rowcount != 1:
+                raise StaleLeaseError(task_id)
+            session.expire_all(); refreshed = session.get(ChangeProposalRow, proposal_id); assert refreshed is not None
+            return _proposal(refreshed)
+
+    def mark_validation_failed(self, proposal_id: str, task_id: str, lease_token: str, now: datetime,
+                               error_code: str, semantic_diff_digest: str | None,
+                               evidence_set_digest: str, result: dict[str, object],
+                               evidence: tuple[EvidenceRegistration, ...]) -> ChangeProposal:
+        with self._sessions.begin() as session:
+            session.execute(text("BEGIN IMMEDIATE")); self._assert_active_fence(session, task_id, lease_token, now)
+            row = session.get(ChangeProposalRow, proposal_id)
+            if row is None or row.task_id != task_id: raise ProposalNotFoundError(proposal_id)
+            if row.status != ProposalStatus.VALIDATION_FAILED.value:
+                if row.status not in (ProposalStatus.EXECUTING.value, ProposalStatus.QUEUED.value): raise StaleLeaseError(task_id)
+                changed = session.execute(update(ChangeProposalRow).where(ChangeProposalRow.id == proposal_id, ChangeProposalRow.version == row.version).values(
+                    status=ProposalStatus.VALIDATION_FAILED.value, last_error_code=error_code,
+                    semantic_diff_digest=semantic_diff_digest, evidence_set_digest=evidence_set_digest,
+                    result_json=result, updated_at=now, version=ChangeProposalRow.version + 1))
+                if changed.rowcount != 1: raise StaleLeaseError(task_id)
+            self._register_evidence(session, row, evidence, now, proposal_id)
+            session.add(OutboxEventRow(id=new_id("evt"), aggregate_type="change_proposal", aggregate_id=proposal_id,
+                event_type="proposal.validation_failed", payload_json={"project_id": row.project_id, "task_id": task_id, "error_code": error_code}, created_at=now, processed_at=None, attempt_count=0, last_error_code=None))
+            session.expire_all(); refreshed = session.get(ChangeProposalRow, proposal_id); assert refreshed is not None
+            return _proposal(refreshed)
+
+    def mark_ready(self, proposal_id: str, task_id: str, lease_token: str, now: datetime,
+                   candidate_revision: str, candidate_snapshot_digest: str, review_digest: str,
+                   semantic_diff_digest: str, evidence_set_digest: str, result: dict[str, object],
+                   evidence: tuple[EvidenceRegistration, ...]) -> ChangeProposal:
+        with self._sessions.begin() as session:
+            session.execute(text("BEGIN IMMEDIATE")); self._assert_active_fence(session, task_id, lease_token, now)
+            row = session.get(ChangeProposalRow, proposal_id)
+            if row is None or row.task_id != task_id: raise ProposalNotFoundError(proposal_id)
+            if row.status == ProposalStatus.READY_FOR_REVIEW.value: return _proposal(row)
+            if row.status != ProposalStatus.EXECUTING.value: raise StaleLeaseError(task_id)
+            kinds = {r.item.kind for r in evidence}
+            if "proposal_evidence_set" not in kinds: raise ValueError("proposal evidence set is required")
+            evidence_set_registration = next(r for r in evidence if r.item.kind == "proposal_evidence_set")
+            try:
+                evidence_set = EvidenceSet.model_validate_json(
+                    evidence_set_registration.descriptor.path.read_bytes(), strict=True
+                )
+            except Exception as error:
+                raise ValueError("invalid proposal evidence set") from error
+            batch_row = session.get(DesignCommandBatchRow, row.command_batch_id)
+            if (batch_row is None or evidence_set.project_id != row.project_id
+                    or evidence_set.task_id != row.task_id or evidence_set.proposal_id != row.id
+                    or evidence_set.base_revision != batch_row.base_revision
+                    or evidence_set.candidate_revision != candidate_revision):
+                raise ValueError("proposal evidence set binding mismatch")
+            required_kinds = {
+                "design_command_batch", "project_snapshot_before", "project_snapshot_after",
+                "git_text_diff", "schematic_semantic_diff", "kicad_erc",
+                "command_execution_log", "adapter_capability_report", "proposal_evidence_set",
+            }
+            if kinds != required_kinds:
+                raise ValueError("incomplete proposal evidence")
+            self._register_evidence(session, row, evidence, now, f"{proposal_id}@{candidate_revision}")
+            changed = session.execute(update(ChangeProposalRow).where(ChangeProposalRow.id == proposal_id, ChangeProposalRow.task_id == task_id, ChangeProposalRow.version == row.version).values(
+                status=ProposalStatus.READY_FOR_REVIEW.value, candidate_revision=candidate_revision,
+                candidate_snapshot_digest=candidate_snapshot_digest, review_digest=review_digest,
+                semantic_diff_digest=semantic_diff_digest, evidence_set_digest=evidence_set_digest,
+                result_json=result, updated_at=now, version=ChangeProposalRow.version + 1))
+            if changed.rowcount != 1: raise StaleLeaseError(task_id)
+            session.add(OutboxEventRow(id=new_id("evt"), aggregate_type="change_proposal", aggregate_id=proposal_id,
+                event_type="proposal.ready_for_review", payload_json={"project_id": row.project_id, "task_id": task_id, "candidate_revision": candidate_revision}, created_at=now, processed_at=None, attempt_count=0, last_error_code=None))
+            session.expire_all(); refreshed = session.get(ChangeProposalRow, proposal_id); assert refreshed is not None
+            return _proposal(refreshed)

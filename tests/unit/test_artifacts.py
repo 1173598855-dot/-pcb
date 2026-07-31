@@ -4,7 +4,15 @@ from pathlib import Path
 import pytest
 from hypothesis import HealthCheck, given, settings, strategies as st
 
-from pcbflow.artifacts import ContentAddressedStore, InvalidDigestError
+from pcbflow.artifacts import ArtifactConflictError, ContentAddressedStore, InvalidDigestError
+
+
+def test_put_rejects_a_corrupted_existing_digest_object(tmp_path: Path) -> None:
+    store = ContentAddressedStore(tmp_path / "artifacts")
+    descriptor = store.put_bytes(b"trusted evidence", "application/octet-stream")
+    descriptor.path.write_bytes(b"corrupted bytes")
+    with pytest.raises(ArtifactConflictError, match=descriptor.digest):
+        store.put_bytes(b"trusted evidence", "application/octet-stream")
 
 
 def test_put_bytes_is_content_addressed_and_idempotent(tmp_path: Path) -> None:

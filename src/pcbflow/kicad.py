@@ -34,6 +34,8 @@ class RawValidationReport:
 
 
 class KicadPort(Protocol):
+    def probe(self) -> KicadCapability: ...
+
     def validate(
         self, project_dir: Path, output_dir: Path
     ) -> tuple[RawValidationReport, ...]: ...
