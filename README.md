@@ -211,3 +211,22 @@ git diff --check
 - `docs/superpowers/specs/2026-07-29-automated-pcb-development-platform-design.md`
 - `docs/superpowers/specs/2026-07-29-phase-2a-controlled-design-change-kernel-design.md`
 - `docs/superpowers/plans/2026-07-29-phase-0-1-read-only-validation.md`
+
+## Phase 2A controlled-change CLI
+
+The controlled workflow is available from the same CLI. Write operations
+require a distinct `--idempotency-key`; JSON output is stable and intended for
+automation.
+
+```powershell
+pcbflow project adopt <project-id> --idempotency-key <key> --json
+pcbflow requirements import <project-id> --file <requirements.yaml> --idempotency-key <key> --json
+pcbflow requirements show <requirement-set-id> --json
+pcbflow requirements submit <requirement-set-id> --idempotency-key <key> --json
+pcbflow approval decide <requirement-set-id> --subject-digest <sha256:...> --approve --actor-id <id> --comment <text> --idempotency-key <key> --json
+pcbflow proposal create <project-id> --file <commands.json> --idempotency-key <key> --json
+pcbflow proposal show <proposal-id> --json
+pcbflow proposal diff <proposal-id> --json
+pcbflow proposal accept <proposal-id> --candidate-digest <sha256:...> --actor-id <id> --comment <text> --idempotency-key <key> --json
+pcbflow proposal reject <proposal-id> --reason <text> --actor-id <id> --idempotency-key <key> --json
+```
