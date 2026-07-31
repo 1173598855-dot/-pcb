@@ -161,6 +161,14 @@ class ProposalStore:
             ).all()
             return tuple(_proposal(row) for row in rows)
 
+    def evidence_items_match_registered_artifacts(self, items) -> bool:
+        with self._sessions() as session:
+            for item in items:
+                artifact = session.get(ArtifactRow, item.artifact_digest)
+                if artifact is None or artifact.media_type != item.media_type:
+                    return False
+        return True
+
     def decision_for_key(self, project_id: str, idempotency_key: str) -> dict[str, str] | None:
         with self._sessions() as session:
             row = session.scalar(select(GateDecisionRow).where(
@@ -650,3 +658,11 @@ class ProposalStore:
             ))
             session.flush()
             return _proposal(row)
+
+    def accept(self, **kwargs) -> ChangeProposal:
+        """Compatibility name for the single acceptance transaction."""
+        return self.decide_accept(**kwargs)
+
+    def reject(self, **kwargs) -> ChangeProposal:
+        """Compatibility name for the single rejection transaction."""
+        return self.decide_reject(**kwargs)

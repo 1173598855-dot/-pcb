@@ -496,6 +496,12 @@ class ApprovalService:
         if requirement_set.candidate_snapshot_digest is None:
             raise ValueError("requirement set has no candidate snapshot")
         project = self._projects.get(requirement_set.project_id)
+        if (
+            decision == "approve"
+            and self._reconciler is not None
+            and self._decisions.find_by_key(project.id, idempotency_key) is None
+        ):
+            self._reconciler.assert_writable(project.id)
         result = self._decisions.decide_g1(
             project_id=project.id,
             requirement_set_id=requirement_set.id,

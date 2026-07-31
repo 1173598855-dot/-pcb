@@ -707,7 +707,7 @@ class RevisionService:
     def object_exists(self, project_id: str, revision: str) -> bool:
         try:
             return self._git.object_exists(self._repo(project_id), revision)
-        except (ValueError, GitOperationError):
+        except (OSError, ValueError, GitOperationError):
             return False
 
     def snapshot_digest_for_revision(self, project_id: str, revision: str) -> str:
@@ -743,6 +743,13 @@ class RevisionService:
     def list_requirement_refs(self, project_id: str) -> dict[str, str]:
         return self._git.list_refs(
             self._repo(project_id), "refs/pcbflow/requirements/"
+        )
+
+    def resolve_requirement_ref(
+        self, project_id: str, requirement_set_id: str
+    ) -> str | None:
+        return self._git.resolve_ref(
+            self._repo(project_id), f"refs/pcbflow/requirements/{requirement_set_id}"
         )
 
     def is_ancestor(
@@ -993,11 +1000,11 @@ class RevisionReconciler:
             object_exists = getattr(self._revisions, "object_exists", None)
             if object_exists is not None and not object_exists(project.id, project.current_revision):
                 raise self._terminal(project.id, "current revision object is missing")
+            self._assert_projection_facts(project.id, project.current_revision)
             self._scan_candidate_refs(project.id)
             actual = self._revisions.resolve_design_ref(project.id)
             if actual == project.current_revision:
                 continue
-            self._assert_projection_facts(project.id, project.current_revision)
             self._revisions.promote_design_ref(
                 project.id,
                 project.current_revision,

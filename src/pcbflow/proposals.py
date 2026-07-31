@@ -519,9 +519,37 @@ class ProposalDecisionService:
             raise CandidateNotReviewableError("requirement set is not the active frozen set")
         if proposal.candidate_revision is None or proposal.candidate_snapshot_digest is None:
             raise CandidateNotReviewableError("candidate revision is missing")
-        if not self._revisions.object_exists(project.id, proposal.candidate_revision):
+        try:
+            candidate_exists = self._revisions.object_exists(
+                project.id, proposal.candidate_revision
+            )
+        except Exception as error:
+            raise CandidateNotReviewableError(
+                "candidate object cannot be read"
+            ) from error
+        if not candidate_exists:
             raise CandidateNotReviewableError("candidate object is missing")
-        if self._revisions.resolve_proposal_ref(project.id, proposal.id) != proposal.candidate_revision:
+        snapshot_checker = getattr(self._revisions, "snapshot_digest_for_revision", None)
+        if snapshot_checker is not None:
+            try:
+                actual_snapshot_digest = snapshot_checker(
+                    project.id, proposal.candidate_revision
+                )
+            except Exception as error:
+                raise CandidateNotReviewableError(
+                    "candidate snapshot cannot be read"
+                ) from error
+            if actual_snapshot_digest != proposal.candidate_snapshot_digest:
+                raise CandidateNotReviewableError(
+                    "candidate snapshot digest does not match"
+                )
+        try:
+            proposal_ref = self._revisions.resolve_proposal_ref(project.id, proposal.id)
+        except Exception as error:
+            raise CandidateNotReviewableError(
+                "candidate proposal ref cannot be read"
+            ) from error
+        if proposal_ref != proposal.candidate_revision:
             raise CandidateNotReviewableError("candidate proposal ref is missing or stale")
         validations = (proposal.result or {}).get("validations", {})
         if not isinstance(validations, dict) or any(validations.get(name) != "pass" for name in (
@@ -539,8 +567,15 @@ class ProposalDecisionService:
             or evidence_set_record.verdict != "pass"
         ):
             raise CandidateNotReviewableError("candidate evidence set row is not bound")
-        if any(not self._artifacts.verify(item.artifact_digest) for item in records):
+        def cas_verified(digest: str) -> bool:
+            try:
+                return self._artifacts.verify(digest)
+            except Exception:
+                return False
+
+        if any(not cas_verified(item.artifact_digest) for item in records):
             raise CandidateNotReviewableError("candidate evidence object is corrupted")
+        media_type_lookup = getattr(self._evidence, "artifact_media_type", None)
         try:
             evidence_set = EvidenceSet.model_validate_json(
                 self._artifacts.open(proposal.evidence_set_digest or "").read(), strict=True
@@ -558,6 +593,12 @@ class ProposalDecisionService:
             or len(items) != len(READY_EVIDENCE_MEDIA_TYPES)
         ):
             raise CandidateNotReviewableError("candidate evidence set binding is invalid")
+        if not self._proposal_store.evidence_items_match_registered_artifacts(
+            tuple(items.values())
+        ):
+            raise CandidateNotReviewableError(
+                "candidate evidence media types are inconsistent"
+            )
         for kind, item in items.items():
             record = by_kind.get(kind)
             if (
@@ -565,9 +606,13 @@ class ProposalDecisionService:
                 or record.artifact_digest != item.artifact_digest
                 or not item.media_type
                 or item.verdict != "pass"
+                or (
+                    media_type_lookup is not None
+                    and media_type_lookup(item.artifact_digest) != item.media_type
+                )
             ):
                 raise CandidateNotReviewableError("candidate evidence rows do not match evidence set")
-            if not self._artifacts.verify(item.artifact_digest):
+            if not cas_verified(item.artifact_digest):
                 raise CandidateNotReviewableError("candidate evidence artifact is corrupted")
         capability = items["adapter_capability_report"].artifact_digest
         if proposal.semantic_diff_digest != items["schematic_semantic_diff"].artifact_digest:

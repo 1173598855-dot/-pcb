@@ -19,7 +19,7 @@ from pcbflow.proposals import (
 )
 from pcbflow.repositories import RevisionConflictError
 from pcbflow.design_tables import OutboxEventRow
-from pcbflow.tables import EvidenceRow
+from pcbflow.tables import ArtifactRow, EvidenceRow
 from pcbflow.revisions import RevisionReconciler
 
 
@@ -507,4 +507,28 @@ def test_accept_rejects_an_evidence_set_row_that_is_not_bound_to_its_digest(
             actor_id="local-user",
             comment="accept tampered evidence",
             idempotency_key="tampered-evidence",
+        )
+
+
+def test_accept_rejects_evidence_with_mismatched_registered_media_type(
+    container, frozen_requirement_set
+) -> None:
+    revisions = FakeDecisionRevisions()
+    _project, proposal = _ready(container, frozen_requirement_set, "accept")
+    revisions.proposal_revision = proposal.candidate_revision
+    with container.sessions.begin() as session:
+        session.execute(
+            update(ArtifactRow)
+            .where(ArtifactRow.digest == proposal.semantic_diff_digest)
+            .values(media_type="application/x-tampered")
+        )
+
+    with pytest.raises(CandidateNotReviewableError):
+        _decision_service(container, revisions).accept(
+            proposal_id=proposal.id,
+            candidate_digest=proposal.review_digest,
+            actor_type="human",
+            actor_id="local-user",
+            comment="accept tampered media",
+            idempotency_key="tampered-media",
         )
