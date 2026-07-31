@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 
 import httpx
+import yaml
 from typer.testing import CliRunner
 
 from pcbflow.api import create_app
 from pcbflow.cli import app
 from pcbflow.config import Settings
 from pcbflow.container import build_container
-from pcbflow.kicad import RawValidationReport
+from pcbflow.kicad import KicadCapability, RawValidationReport
 
 
 class FakeKicad:
@@ -287,3 +289,226 @@ def test_cli_commands_share_persisted_services(tmp_path: Path) -> None:
     evidence = runner.invoke(app, ["evidence", project_id, "--json"], env=env)
     assert evidence.exit_code == 0, evidence.output
     assert json.loads(evidence.stdout) == []
+
+
+class FakeCliKicad:
+    def probe(self) -> KicadCapability:
+        return KicadCapability(
+            True,
+            Path("kicad-cli"),
+            "9.0.2",
+            "sha256:" + "9" * 64,
+            None,
+        )
+
+    def validate(self, project_dir: Path, output_dir: Path):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return (
+            RawValidationReport(
+                kind="erc",
+                data=b'{"version":"1.0","source":"board.kicad_sch","violations":[]}',
+                argv=("kicad-cli", "sch", "erc"),
+                returncode=0,
+                tool_version="9.0.2",
+            ),
+        )
+
+
+def _command_batch(project: dict, requirement_set: dict) -> dict:
+    actor = {"type": "human", "id": "local-user"}
+    return {
+        "schema_version": "1.0",
+        "batch_id": "bat_api_status_led",
+        "project_id": project["id"],
+        "base_revision": project["current_revision"],
+        "requirement_set_id": requirement_set["id"],
+        "idempotency_key": "api-proposal",
+        "actor": actor,
+        "intent": "Add the verified status LED",
+        "risk": "medium",
+        "commands": [
+            {
+                "schema_version": "1.0",
+                "command_id": "cmd_api_status_led",
+                "batch_id": "bat_api_status_led",
+                "project_id": project["id"],
+                "base_revision": project["current_revision"],
+                "idempotency_key": "api-proposal:1",
+                "actor": actor,
+                "intent": "Add the verified status LED",
+                "risk": "medium",
+                "preconditions": [],
+                "operation": {
+                    "type": "schematic.instantiate_module",
+                    "payload": {
+                        "module_revision_id": "modrev_status_led_v1",
+                        "instance_name": "STATUS_LED",
+                        "target_sheet_ref": {
+                            "kind": "sheet",
+                            "sheet_uuid": "00000000-0000-0000-0000-000000000001",
+                            "object_uuid": "00000000-0000-0000-0000-000000000001",
+                            "pin_number": None,
+                        },
+                        "parameter_bindings": {"LED_VALUE": "GREEN"},
+                        "port_bindings": {},
+                        "placement_slot": "auto",
+                    },
+                },
+                "required_validations": ["semantic_diff", "kicad_erc"],
+                "provenance": {
+                    "requirement_ids": ["REQ-FUNC-001"],
+                    "evidence_ids": [],
+                    "module_revision_ids": ["modrev_status_led_v1"],
+                },
+            }
+        ],
+    }
+
+
+def test_phase_2a_cli_help_lists_all_command_groups() -> None:
+    runner = CliRunner()
+    root = runner.invoke(app, ["--help"])
+    assert root.exit_code == 0
+    for name in ("project", "requirements", "approval", "proposal", "worker"):
+        assert name in root.output
+
+    assert "adopt" in runner.invoke(app, ["project", "--help"]).output
+    assert "import" in runner.invoke(app, ["requirements", "--help"]).output
+    assert "decide" in runner.invoke(app, ["approval", "--help"]).output
+    proposal_help = runner.invoke(app, ["proposal", "--help"]).output
+    for name in ("create", "show", "diff", "accept", "reject"):
+        assert name in proposal_help
+
+
+def test_cli_runs_the_controlled_change_workflow(
+    tmp_path: Path, monkeypatch
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    source = tmp_path / "cli controlled source"
+    shutil.copytree(fixtures / "kicad" / "controlled-design", source)
+    data_dir = tmp_path / "cli-controlled-data"
+    env = {
+        "PCBFLOW_DATA_DIR": str(data_dir),
+        "PCBFLOW_MODULE_CATALOG_DIR": str(fixtures / "modules"),
+    }
+
+    def build_for_test():
+        return build_container(
+            Settings.from_env(env),
+            kicad_override=FakeCliKicad(),
+        )
+
+    monkeypatch.setattr("pcbflow.cli._build", build_for_test)
+    runner = CliRunner()
+    created = runner.invoke(
+        app,
+        [
+            "project", "add", str(source),
+            "--name", "Controller",
+            "--idempotency-key", "cli-controlled-project",
+            "--json",
+        ],
+        env=env,
+    )
+    assert created.exit_code == 0, created.output
+    project = json.loads(created.stdout)
+
+    adopted = runner.invoke(
+        app,
+        [
+            "project", "adopt", project["id"],
+            "--idempotency-key", "cli-adopt",
+            "--json",
+        ],
+        env=env,
+    )
+    assert adopted.exit_code == 0, adopted.output
+
+    requirements = runner.invoke(
+        app,
+        [
+            "requirements", "import", project["id"],
+            "--file", str(fixtures / "requirements" / "reference-controller.yaml"),
+            "--idempotency-key", "cli-requirements",
+            "--json",
+        ],
+        env=env,
+    )
+    assert requirements.exit_code == 0, requirements.output
+    requirement_set = json.loads(requirements.stdout)
+    assert requirement_set["subject_digest"] is None
+    submitted = runner.invoke(
+        app,
+        [
+            "requirements", "submit", requirement_set["id"],
+            "--idempotency-key", "cli-submit-requirements",
+            "--json",
+        ],
+        env=env,
+    )
+    assert submitted.exit_code == 0, submitted.output
+    pending = json.loads(submitted.stdout)
+    assert pending["subject_digest"].startswith("sha256:")
+    approved = runner.invoke(
+        app,
+        [
+            "approval", "decide", pending["id"],
+            "--subject-digest", pending["subject_digest"],
+            "--approve",
+            "--actor-id", "local-user",
+            "--comment", "approved",
+            "--idempotency-key", "cli-approve-g1",
+            "--json",
+        ],
+        env=env,
+    )
+    assert approved.exit_code == 0, approved.output
+    frozen = json.loads(approved.stdout)
+    assert frozen["subject_digest"] == pending["subject_digest"]
+
+    managed = json.loads(
+        runner.invoke(app, ["project", "list", "--json"], env=env).stdout
+    )[0]
+    batch = _command_batch(managed, frozen)
+    batch_file = tmp_path / "commands.json"
+    batch_file.write_text(json.dumps(batch), encoding="utf-8")
+    queued = runner.invoke(
+        app,
+        [
+            "proposal", "create", managed["id"],
+            "--file", str(batch_file),
+            "--idempotency-key", "api-proposal",
+            "--json",
+        ],
+        env=env,
+    )
+    assert queued.exit_code == 0, queued.output
+    proposal = json.loads(queued.stdout)
+    worked = runner.invoke(app, ["worker", "--once", "--json"], env=env)
+    assert worked.exit_code == 0, worked.output
+    assert json.loads(worked.stdout) == {"handled": True}
+    shown = runner.invoke(
+        app, ["proposal", "show", proposal["id"], "--json"], env=env
+    )
+    assert shown.exit_code == 0, shown.output
+    shown_payload = json.loads(shown.stdout)
+    assert shown_payload["status"] == "ready_for_review"
+    diff = runner.invoke(
+        app, ["proposal", "diff", proposal["id"], "--json"], env=env
+    )
+    assert diff.exit_code == 0, diff.output
+    assert json.loads(diff.stdout)["changes"]
+    accepted = runner.invoke(
+        app,
+        [
+            "proposal", "accept", proposal["id"],
+            "--candidate-digest", shown_payload["review_digest"],
+            "--actor-id", "local-user",
+            "--comment", "accepted",
+            "--idempotency-key", "cli-accept-proposal",
+            "--json",
+        ],
+        env=env,
+    )
+    assert accepted.exit_code == 0, accepted.output
+    assert json.loads(accepted.stdout)["status"] == "accepted"

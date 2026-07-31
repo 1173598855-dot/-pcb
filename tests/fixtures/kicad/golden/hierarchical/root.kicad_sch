@@ -1,0 +1,14 @@
+(kicad_sch
+  (version 20250114)
+  (generator "pcbflow-test")
+  (uuid 00000000-0000-0000-0000-000000000012)
+  (paper "A4")
+  (lib_symbols)
+  (sheet
+    (at 100 100 0)
+    (size 50 25)
+    (uuid 00000000-0000-0000-0000-000000000013)
+    (property "Sheetname" "Child")
+    (property "Sheetfile" "child/child.kicad_sch")
+  )
+)

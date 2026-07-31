@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import shutil
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -196,7 +197,7 @@ def test_expired_running_validation_is_completed_after_container_restart(
     task = first.validation.enqueue(project.id, "restart-validation")
     lease = first.tasks.claim_next("crashed-worker", NOW, 1)
     assert lease is not None
-    first.tasks.start(task.id, lease.lease_token)
+    first.tasks.start(task.id, lease.lease_token, NOW)
 
     first.dispose()
 
@@ -224,3 +225,44 @@ def test_expired_running_validation_is_completed_after_container_restart(
         assert attempts[1].outcome == "succeeded"
     finally:
         second.dispose()
+
+
+def test_managed_validation_reads_database_revision_not_changed_import_source(
+    tmp_path: Path,
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    source = tmp_path / "source"
+    shutil.copytree(fixtures / "kicad" / "controlled-design", source)
+    expected_schematic = (source / "board.kicad_sch").read_bytes()
+    settings = Settings.from_env(
+        {
+            "PCBFLOW_DATA_DIR": str(tmp_path / "data"),
+            "PCBFLOW_TASK_LEASE_SECONDS": "30",
+        }
+    )
+
+    class InspectingKicad:
+        def validate(self, project_dir: Path, output_dir: Path):
+            assert (project_dir / "board.kicad_sch").read_bytes() == expected_schematic
+            output_dir.mkdir(parents=True, exist_ok=True)
+            return (
+                RawValidationReport(
+                    "erc",
+                    (fixtures / "kicad" / "erc.json").read_bytes(),
+                    ("kicad-cli", "sch", "erc"),
+                    0,
+                    "9.0.2",
+                ),
+            )
+
+    container = build_container(settings, kicad_override=InspectingKicad())
+    try:
+        project = container.projects.create("Controller", source, "managed-validation")
+        managed = container.revisions.adopt(project.id, "managed-validation-adopt")
+        (source / "board.kicad_sch").write_bytes(b"changed outside pcbflow")
+
+        task = container.validation.enqueue(managed.id, "managed-validation-run")
+        assert container.worker.run_once()
+        assert container.tasks.get(task.id).status is TaskStatus.SUCCEEDED
+    finally:
+        container.dispose()

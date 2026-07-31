@@ -8,6 +8,9 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from pcbflow.db import create_engine_and_session
+from pcbflow.config import Settings
+from pcbflow.container import build_container
+from pcbflow.domain import Project
 
 
 @pytest.fixture
@@ -42,3 +45,60 @@ def session_factory(
     migrated_database: tuple[Engine, sessionmaker[Session]],
 ) -> sessionmaker[Session]:
     return migrated_database[1]
+
+
+@pytest.fixture
+def container(database_url: str, tmp_path: Path):
+    settings = Settings.from_env(
+        {
+            "PCBFLOW_DATA_DIR": str(tmp_path / "service-data"),
+            "PCBFLOW_DATABASE_URL": database_url,
+        }
+    )
+    services = build_container(settings)
+    try:
+        yield services
+    finally:
+        services.dispose()
+
+
+@pytest.fixture
+def artifact_store(container):
+    return container.artifacts
+
+
+@pytest.fixture
+def managed_project(container, tmp_path: Path) -> Project:
+    source = tmp_path / "managed-source"
+    source.mkdir()
+    (source / "board.kicad_sch").write_bytes(b"(kicad_sch)\n")
+    project = container.projects.create("Controller", source, "managed-project")
+    return container.revisions.adopt(project.id, "adopt-managed-project")
+
+
+@pytest.fixture
+def requirement_yaml() -> bytes:
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "requirements"
+        / "reference-controller.yaml"
+    )
+    return fixture.read_bytes()
+
+
+@pytest.fixture
+def frozen_requirement_set(container, managed_project, requirement_yaml: bytes):
+    draft = container.requirements.import_draft(
+        managed_project.id, requirement_yaml, "command-test-requirements"
+    )
+    pending = container.requirements.submit(draft.id, "command-test-submit")
+    return container.approvals.decide_g1(
+        requirement_set_id=pending.id,
+        subject_digest=pending.subject_digest(),
+        decision="approve",
+        actor_type="human",
+        actor_id="local-user",
+        comment="approved",
+        idempotency_key="command-test-g1",
+    )

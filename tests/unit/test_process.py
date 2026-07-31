@@ -1,6 +1,7 @@
+import os
 import sys
-from time import perf_counter
 from pathlib import Path
+from time import perf_counter
 
 import pytest
 
@@ -45,3 +46,28 @@ def test_runner_reports_timeout(tmp_path: Path) -> None:
 def test_runner_rejects_empty_command(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="argv"):
         ProcessRunner(max_output_bytes=1_024).run([], tmp_path, 1)
+
+
+def test_runner_uses_controlled_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PCBFLOW_SECRET_SHOULD_NOT_LEAK", "secret")
+    runner = ProcessRunner(10_000)
+    result = runner.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os;"
+                "print(os.environ.get('PCBFLOW_VISIBLE'));"
+                "print(os.environ.get('PCBFLOW_SECRET_SHOULD_NOT_LEAK'))"
+            ),
+        ],
+        tmp_path,
+        10,
+        env={"PCBFLOW_VISIBLE": "yes"},
+    )
+
+    assert result.stdout.splitlines() == ["yes", "None"]
+    expected_bytes = b"yes\r\nNone\r\n" if os.name == "nt" else b"yes\nNone\n"
+    assert result.stdout_bytes == expected_bytes

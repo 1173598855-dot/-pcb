@@ -15,6 +15,12 @@ class InvalidDigestError(ValueError):
     pass
 
 
+class ArtifactConflictError(RuntimeError):
+    def __init__(self, digest: str) -> None:
+        super().__init__(f"artifact integrity conflict: {digest}")
+        self.digest = digest
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactDescriptor:
     digest: str
@@ -39,7 +45,16 @@ class ContentAddressedStore:
         digest = f"sha256:{value}"
         target = self._path(digest)
         target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists():
+        if target.exists():
+            digest_hash = hashlib.sha256()
+            size = 0
+            with target.open("rb") as existing:
+                while chunk := existing.read(1024 * 1024):
+                    digest_hash.update(chunk)
+                    size += len(chunk)
+            if size != len(data) or digest_hash.hexdigest() != value:
+                raise ArtifactConflictError(digest)
+        else:
             handle, temporary_name = tempfile.mkstemp(
                 prefix="artifact-", dir=target.parent
             )

@@ -7,20 +7,24 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import and_, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from pcbflow.artifacts import ArtifactDescriptor
+from pcbflow.design_tables import OutboxEventRow, ProjectRevisionRow
 from pcbflow.domain import (
     Evidence,
     Finding,
     NormalizedFinding,
     Project,
+    ProjectMode,
     Task,
     TaskLease,
     TaskStatus,
     new_id,
     utc_now,
 )
+from pcbflow.observability import audit_payload
 from pcbflow.tables import (
     ArtifactRow,
     EvidenceRow,
@@ -37,6 +41,13 @@ class ProjectNotFoundError(LookupError):
 
 class IdempotencyConflictError(RuntimeError):
     pass
+
+
+class RevisionConflictError(RuntimeError):
+    def __init__(self, expected: str | None, actual: str | None) -> None:
+        super().__init__(f"expected {expected}, found {actual}")
+        self.expected = expected
+        self.actual = actual
 
 
 class TaskNotFoundError(LookupError):
@@ -61,6 +72,15 @@ def _project(row: ProjectRow) -> Project:
         name=row.name,
         source_path=Path(row.source_path),
         created_at=_utc(row.created_at),
+        mode=ProjectMode(row.mode),
+        managed_repo_key=row.managed_repo_key,
+        current_revision=row.current_revision,
+        project_snapshot_digest=row.project_snapshot_digest,
+        active_requirement_set_id=row.active_requirement_set_id,
+        adoption_idempotency_key=row.adoption_idempotency_key,
+        adoption_input_digest=row.adoption_input_digest,
+        managed_at=_utc(row.managed_at) if row.managed_at is not None else None,
+        version=row.version,
     )
 
 
@@ -154,6 +174,232 @@ class ProjectRepository:
                 select(ProjectRow).order_by(ProjectRow.created_at, ProjectRow.id)
             ).all()
             return [_project(row) for row in rows]
+
+    def find_by_adoption_key(self, idempotency_key: str) -> Project | None:
+        with self._sessions() as session:
+            row = session.scalar(
+                select(ProjectRow).where(
+                    ProjectRow.adoption_idempotency_key == idempotency_key
+                )
+            )
+            return _project(row) if row is not None else None
+
+    @staticmethod
+    def _replay_adoption(
+        row: ProjectRow,
+        *,
+        project_id: str,
+        repo_key: str,
+        revision: str,
+        snapshot_digest: str,
+        adoption_idempotency_key: str,
+        adoption_input_digest: str,
+    ) -> Project:
+        if row.id != project_id:
+            raise IdempotencyConflictError(adoption_idempotency_key)
+        if row.adoption_idempotency_key == adoption_idempotency_key:
+            if (
+                row.mode == ProjectMode.MANAGED.value
+                and row.managed_repo_key == repo_key
+                and row.current_revision == revision
+                and row.project_snapshot_digest == snapshot_digest
+                and row.adoption_input_digest == adoption_input_digest
+            ):
+                return _project(row)
+            raise IdempotencyConflictError(adoption_idempotency_key)
+        if (
+            row.mode == ProjectMode.MANAGED.value
+            and row.adoption_input_digest == adoption_input_digest
+        ):
+            return _project(row)
+        raise IdempotencyConflictError(adoption_idempotency_key)
+
+    def mark_managed(
+        self,
+        project_id: str,
+        *,
+        repo_key: str,
+        revision: str,
+        snapshot_digest: str,
+        adoption_idempotency_key: str,
+        adoption_input_digest: str,
+        source_head: str | None,
+        expected_version: int,
+    ) -> Project:
+        try:
+            with self._sessions.begin() as session:
+                keyed = session.scalar(
+                    select(ProjectRow).where(
+                        ProjectRow.adoption_idempotency_key
+                        == adoption_idempotency_key
+                    )
+                )
+                if keyed is not None:
+                    return self._replay_adoption(
+                        keyed,
+                        project_id=project_id,
+                        repo_key=repo_key,
+                        revision=revision,
+                        snapshot_digest=snapshot_digest,
+                        adoption_idempotency_key=adoption_idempotency_key,
+                        adoption_input_digest=adoption_input_digest,
+                    )
+
+                row = session.get(ProjectRow, project_id)
+                if row is None:
+                    raise ProjectNotFoundError(project_id)
+                if row.mode == ProjectMode.MANAGED.value:
+                    return self._replay_adoption(
+                        row,
+                        project_id=project_id,
+                        repo_key=repo_key,
+                        revision=revision,
+                        snapshot_digest=snapshot_digest,
+                        adoption_idempotency_key=adoption_idempotency_key,
+                        adoption_input_digest=adoption_input_digest,
+                    )
+
+                now = utc_now()
+                changed = session.execute(
+                    update(ProjectRow)
+                    .where(
+                        ProjectRow.id == project_id,
+                        ProjectRow.mode == ProjectMode.REGISTERED.value,
+                        ProjectRow.version == expected_version,
+                    )
+                    .values(
+                        mode=ProjectMode.MANAGED.value,
+                        managed_repo_key=repo_key,
+                        current_revision=revision,
+                        project_snapshot_digest=snapshot_digest,
+                        adoption_idempotency_key=adoption_idempotency_key,
+                        adoption_input_digest=adoption_input_digest,
+                        managed_at=now,
+                        version=ProjectRow.version + 1,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                if changed.rowcount != 1:
+                    session.expire_all()
+                    actual = session.get(ProjectRow, project_id)
+                    if actual is None:
+                        raise ProjectNotFoundError(project_id)
+                    if actual.mode == ProjectMode.MANAGED.value:
+                        return self._replay_adoption(
+                            actual,
+                            project_id=project_id,
+                            repo_key=repo_key,
+                            revision=revision,
+                            snapshot_digest=snapshot_digest,
+                            adoption_idempotency_key=adoption_idempotency_key,
+                            adoption_input_digest=adoption_input_digest,
+                        )
+                    raise RevisionConflictError(
+                        row.current_revision, actual.current_revision
+                    )
+
+                adopted_payload = audit_payload(
+                    actor_type="service",
+                    actor_id="pcbflow",
+                    action="project.adopt",
+                    object_type="project",
+                    object_id=project_id,
+                    before_digest=None,
+                    after_digest=snapshot_digest,
+                    result="adopted",
+                )
+                adopted_payload.update(
+                    {
+                        "project_id": project_id,
+                        "revision": revision,
+                        "snapshot_digest": snapshot_digest,
+                        "adoption_input_digest": adoption_input_digest,
+                        "source_head": source_head,
+                    }
+                )
+                session.add(
+                    ProjectRevisionRow(
+                        id=new_id("rev"),
+                        project_id=project_id,
+                        revision=revision,
+                        parent_revision=None,
+                        snapshot_digest=snapshot_digest,
+                        requirement_set_id=None,
+                        command_batch_id=None,
+                        created_at=now,
+                    )
+                )
+                session.add(
+                    OutboxEventRow(
+                        id=new_id("evt"),
+                        aggregate_type="project",
+                        aggregate_id=project_id,
+                        event_type="project.adopted",
+                        payload_json=adopted_payload,
+                        created_at=now,
+                        processed_at=None,
+                        attempt_count=0,
+                        last_error_code=None,
+                    )
+                )
+                session.flush()
+                session.expire_all()
+                managed = session.get(ProjectRow, project_id)
+                assert managed is not None
+                return _project(managed)
+        except IntegrityError:
+            with self._sessions() as session:
+                keyed = session.scalar(
+                    select(ProjectRow).where(
+                        ProjectRow.adoption_idempotency_key
+                        == adoption_idempotency_key
+                    )
+                )
+                if keyed is None:
+                    raise
+                return self._replay_adoption(
+                    keyed,
+                    project_id=project_id,
+                    repo_key=repo_key,
+                    revision=revision,
+                    snapshot_digest=snapshot_digest,
+                    adoption_idempotency_key=adoption_idempotency_key,
+                    adoption_input_digest=adoption_input_digest,
+                )
+
+    def compare_and_set_revision(
+        self,
+        project_id: str,
+        *,
+        expected_revision: str,
+        new_revision: str,
+        snapshot_digest: str,
+        expected_version: int,
+    ) -> Project:
+        with self._sessions.begin() as session:
+            changed = session.execute(
+                update(ProjectRow)
+                .where(
+                    ProjectRow.id == project_id,
+                    ProjectRow.version == expected_version,
+                    ProjectRow.current_revision == expected_revision,
+                )
+                .values(
+                    current_revision=new_revision,
+                    project_snapshot_digest=snapshot_digest,
+                    version=ProjectRow.version + 1,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if changed.rowcount != 1:
+                actual = session.get(ProjectRow, project_id)
+                if actual is None:
+                    raise ProjectNotFoundError(project_id)
+                raise RevisionConflictError(expected_revision, actual.current_revision)
+            session.expire_all()
+            updated = session.get(ProjectRow, project_id)
+            assert updated is not None
+            return _project(updated)
 
 
 class TaskRepository:
@@ -296,13 +542,14 @@ class TaskRepository:
                 )
         return None
 
-    def start(self, task_id: str, lease_token: str) -> None:
+    def start(self, task_id: str, lease_token: str, now: datetime) -> None:
         self._transition_with_lease(
             task_id,
             lease_token,
             [TaskStatus.LEASED],
+            now,
             status=TaskStatus.RUNNING.value,
-            updated_at=utc_now(),
+            updated_at=now,
         )
 
     def complete(
@@ -310,9 +557,9 @@ class TaskRepository:
         task_id: str,
         lease_token: str,
         result: dict[str, Any],
+        now: datetime,
     ) -> None:
         json.dumps(result, sort_keys=True, allow_nan=False)
-        now = utc_now()
         self._finish_attempt(
             task_id,
             lease_token,
@@ -330,8 +577,8 @@ class TaskRepository:
         lease_token: str,
         error_code: str,
         retryable: bool,
+        now: datetime,
     ) -> None:
-        now = utc_now()
         status = (
             TaskStatus.RETRY_WAIT.value
             if retryable
@@ -353,6 +600,7 @@ class TaskRepository:
         task_id: str,
         lease_token: str,
         allowed: list[TaskStatus],
+        now: datetime,
         **values: Any,
     ) -> None:
         with self._sessions.begin() as session:
@@ -362,12 +610,28 @@ class TaskRepository:
                     TaskRow.id == task_id,
                     TaskRow.lease_token == lease_token,
                     TaskRow.status.in_([status.value for status in allowed]),
+                    TaskRow.lease_expires_at.is_not(None),
+                    TaskRow.lease_expires_at > now,
                 )
                 .values(**values, version=TaskRow.version + 1)
                 .execution_options(synchronize_session=False)
             )
             if changed.rowcount != 1:
                 raise StaleLeaseError(task_id)
+
+    def assert_active(self, task_id: str, lease_token: str, now: datetime) -> None:
+        with self._sessions() as session:
+            active = session.scalar(
+                select(TaskRow.id).where(
+                    TaskRow.id == task_id,
+                    TaskRow.lease_token == lease_token,
+                    TaskRow.status == TaskStatus.RUNNING.value,
+                    TaskRow.lease_expires_at.is_not(None),
+                    TaskRow.lease_expires_at > now,
+                )
+            )
+        if active is None:
+            raise StaleLeaseError(task_id)
 
     def _finish_attempt(
         self,
@@ -387,6 +651,8 @@ class TaskRepository:
                     TaskRow.status.in_(
                         [TaskStatus.LEASED.value, TaskStatus.RUNNING.value]
                     ),
+                    TaskRow.lease_expires_at.is_not(None),
+                    TaskRow.lease_expires_at > now,
                 )
                 .values(
                     **values,
@@ -479,6 +745,11 @@ class EvidenceRepository:
                 .order_by(EvidenceRow.created_at, EvidenceRow.id)
             ).all()
             return [_evidence(row) for row in rows]
+
+    def artifact_media_type(self, digest: str) -> str | None:
+        with self._sessions() as session:
+            row = session.get(ArtifactRow, digest)
+            return row.media_type if row is not None else None
 
 
 class FindingRepository:

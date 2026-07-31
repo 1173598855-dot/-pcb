@@ -1,0 +1,19 @@
+schema_version: "1.0"
+requirements:
+  - id: REQ-FUNC-001
+    kind: functional
+    statement: The board shall expose one status LED.
+    rationale: Local diagnostics.
+    priority: must
+    source: user
+    verification_method: inspection
+    acceptance_criteria: LED D1 is present in the schematic.
+interfaces: []
+power_rails: []
+assumptions: []
+verification_items:
+  - id: VER-001
+    requirement_ids:
+      - REQ-FUNC-001
+    method: inspection
+    acceptance_criteria: Semantic diff contains the verified LED module.
