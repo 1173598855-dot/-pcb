@@ -295,9 +295,9 @@ def _apply_controlled_operations(
     edits_by_file: dict[Path, list[CstEdit]] = {}
     inserted_by_file: dict[Path, list[CstList]] = {}
     original_bytes: dict[Path, bytes] = {}
-    direct: list[ChangeSelector] = []
     specs: list[tuple[DesignCommand, ChangeSelector, str | None, str | None]] = []
     module_digests: list[str] = []
+    pending_bindings: dict[tuple[str, str], str | None] = {}
     reference_values = {
         object_ref_key(symbol.ref): symbol.reference for symbol in before.document.symbols
     }
@@ -351,7 +351,6 @@ def _apply_controlled_operations(
                 replacement_items[2] = make_string(payload.value)
                 add_edit(location.file_path, replace_node(existing, make_list(*replacement_items)))
             selector = ChangeSelector(ChangeKind.SYMBOL_PROPERTY_CHANGED, symbol.ref, name)
-            direct.append(selector)
             specs.append((command, selector, None, None))
             continue
 
@@ -382,7 +381,6 @@ def _apply_controlled_operations(
                 replacement_items[2] = make_string(footprint.library_id)
                 add_edit(location.file_path, replace_node(existing, make_list(*replacement_items)))
             selector = ChangeSelector(ChangeKind.FOOTPRINT_CHANGED, symbol.ref, "Footprint")
-            direct.append(selector)
             specs.append((command, selector, footprint.digest, None))
             module_digests.append(footprint.digest)
             continue
@@ -393,6 +391,14 @@ def _apply_controlled_operations(
                 raise LabelTargetError(payload.target_ref.kind)
             path, position, target_net = _label_target(before, payload.target_ref)
             _check_label_binding(before.document, payload.name, payload.scope, target_net)
+            binding_key = (payload.name, payload.scope)
+            if binding_key in pending_bindings:
+                pending_net = pending_bindings[binding_key]
+                if pending_net != target_net and (
+                    pending_net is not None or target_net is not None
+                ):
+                    raise LabelTargetError("label name/scope is already bound to another net")
+            pending_bindings[binding_key] = target_net
             label_uuid = _label_uuid(command, payload.target_ref, payload.name, payload.scope)
             head = {
                 "local": "label",
@@ -423,7 +429,6 @@ def _apply_controlled_operations(
                 ),
                 None,
             )
-            direct.append(selector)
             specs.append((command, selector, None, target_net))
             continue
 
@@ -541,7 +546,7 @@ def _label_target(
         for net in parsed.document.nets:
             if net.ref == reference:
                 location = parsed.location(net.ref)
-                return location.file_path, _node_position(location.node), key
+                return location.file_path, _net_position(parsed, net, location), key
     elif reference.kind == "wire_endpoint":
         for location in _unique_locations(parsed):
             for wire in location.document.root.find_children("wire"):
@@ -550,7 +555,9 @@ def _label_target(
                 points = _wire_points(wire)
                 if len(points) < 2:
                     break
-                endpoint = reference.pin_number or "1"
+                endpoint = reference.pin_number
+                if endpoint is None:
+                    raise LabelTargetError("wire endpoint must identify start/end or 1/2")
                 if endpoint in {"1", "start"}:
                     point = points[0]
                 elif endpoint in {"2", "end"}:
@@ -579,6 +586,53 @@ def _node_position(node: CstList) -> Point:
     if points:
         return points[0]
     raise LabelTargetError("target has no semantic position")
+
+
+def _net_position(parsed: ParsedSchematic, net, location) -> Point:
+    try:
+        return _node_position(location.node)
+    except LabelTargetError:
+        pass
+    for member in net.members:
+        if member.startswith(("pin:", "hierarchical_port:", "label:")):
+            for candidate in (
+                *parsed.document.symbols,
+                *(port for sheet in parsed.document.sheets for port in sheet.ports),
+                *parsed.document.labels,
+            ):
+                references = [candidate.ref]
+                if hasattr(candidate, "pins"):
+                    references.extend(pin.ref for pin in candidate.pins)
+                for reference in references:
+                    if object_ref_key(reference) != member:
+                        continue
+                    if reference.kind == "pin":
+                        return next(
+                            pin.position
+                            for symbol in parsed.document.symbols
+                            for pin in symbol.pins
+                            if pin.ref == reference
+                        )
+                    if reference.kind == "hierarchical_port":
+                        return next(
+                            port.position
+                            for sheet in parsed.document.sheets
+                            for port in sheet.ports
+                            if port.ref == reference
+                        )
+                    if reference.kind == "label":
+                        return next(label.position for label in parsed.document.labels if label.ref == reference)
+        if member.startswith("wire:"):
+            _, sheet_uuid, wire_uuid = member.split(":", 2)
+            for candidate in _unique_locations(parsed):
+                if candidate.node.head != "kicad_sch":
+                    continue
+                for wire in candidate.document.root.find_children("wire"):
+                    if _optional_uuid(wire) == wire_uuid:
+                        points = _wire_points(wire)
+                        if points:
+                            return points[0]
+    raise LabelTargetError("known net has no concrete semantic endpoint")
 
 
 def _wire_points(node: CstList) -> tuple[Point, ...]:

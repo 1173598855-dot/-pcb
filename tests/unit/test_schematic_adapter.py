@@ -16,6 +16,14 @@ from pcbflow.schematic.modules import (
     FileModuleCatalog,
     FootprintRevisionNotFoundError,
 )
+from pcbflow.schematic.cst import (
+    apply_edits,
+    insert_before_close,
+    make_atom,
+    make_list,
+    make_string,
+    parse_cst,
+)
 
 
 def _fixtures() -> Path:
@@ -189,3 +197,111 @@ def test_add_label_rejects_symbol_or_coordinate_like_target(tmp_path: Path) -> N
     )
     with pytest.raises(LabelTargetError):
         _adapter().apply(project, (command,))
+
+
+def _wire(uuid: str, start: tuple[str, str], end: tuple[str, str]):
+    return make_list(
+        make_atom("wire"),
+        make_list(
+            make_atom("pts"),
+            make_list(make_atom("xy"), make_atom(start[0]), make_atom(start[1])),
+            make_list(make_atom("xy"), make_atom(end[0]), make_atom(end[1])),
+        ),
+        make_list(make_atom("uuid"), make_atom(uuid)),
+    )
+
+
+def test_add_label_rejects_same_batch_binding_to_different_nets(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    shutil.copytree(_fixtures() / "kicad" / "controlled-design", project)
+    board = project / "board.kicad_sch"
+    document = parse_cst(board.read_bytes())
+    board.write_bytes(
+        apply_edits(
+            document,
+            (
+                insert_before_close(
+                    document.root,
+                    (
+                        _wire("00000000-0000-0000-0000-000000000100", ("123.19", "88.9"), ("120", "88.9")),
+                        _wire("00000000-0000-0000-0000-000000000101", ("130.81", "88.9"), ("140", "88.9")),
+                    ),
+                    indent=2,
+                ),
+            ),
+        )
+    )
+    first = _command(
+        {
+            "type": "schematic.add_label",
+            "payload": {
+                "target_ref": {
+                    "kind": "wire_endpoint",
+                    "sheet_uuid": "00000000-0000-0000-0000-000000000001",
+                    "object_uuid": "00000000-0000-0000-0000-000000000100",
+                    "pin_number": "start",
+                },
+                "name": "DUPLICATE_NET",
+                "scope": "local",
+            },
+        },
+        "cmd_label_one",
+    )
+    second = _command(
+        {
+            "type": "schematic.add_label",
+            "payload": {
+                "target_ref": {
+                    "kind": "wire_endpoint",
+                    "sheet_uuid": "00000000-0000-0000-0000-000000000001",
+                    "object_uuid": "00000000-0000-0000-0000-000000000101",
+                    "pin_number": "start",
+                },
+                "name": "DUPLICATE_NET",
+                "scope": "local",
+            },
+        },
+        "cmd_label_two",
+    )
+
+    with pytest.raises(LabelTargetError, match="another net"):
+        _adapter().apply(project, (first, second))
+
+
+def test_add_label_resolves_explicit_net_from_existing_member_endpoint(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    shutil.copytree(_fixtures() / "kicad" / "controlled-design", project)
+    board = project / "board.kicad_sch"
+    document = parse_cst(board.read_bytes())
+    explicit_net = make_list(
+        make_atom("net"),
+        make_string("KNOWN_NET"),
+        make_list(
+            make_atom("members"),
+            make_atom("pin:00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000003:1"),
+        ),
+        make_list(make_atom("uuid"), make_atom("00000000-0000-0000-0000-000000000102")),
+    )
+    board.write_bytes(apply_edits(document, (insert_before_close(document.root, (explicit_net,), indent=2),)))
+    command = _command(
+        {
+            "type": "schematic.add_label",
+            "payload": {
+                "target_ref": {
+                    "kind": "net",
+                    "sheet_uuid": "00000000-0000-0000-0000-000000000001",
+                    "object_uuid": "00000000-0000-0000-0000-000000000102",
+                    "pin_number": None,
+                },
+                "name": "KNOWN_NET_LABEL",
+                "scope": "local",
+            },
+        },
+        "cmd_known_net_label",
+    )
+
+    result = _adapter().apply(project, (command,))
+
+    assert any(label.name == "KNOWN_NET_LABEL" for label in result.after.labels)
