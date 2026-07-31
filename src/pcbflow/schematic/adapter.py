@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -15,6 +16,7 @@ from pcbflow.commands import (
     SetPropertyOperation,
     SchematicObjectRef,
 )
+from pcbflow.observability import MetricName, Metrics
 from pcbflow.schematic.cst import (
     CstAtom,
     CstDocument,
@@ -109,13 +111,46 @@ class SchematicAdapter(Protocol):
 class CstSchematicAdapter:
     _ADAPTER_CONTRACT = "pcbflow.schematic.cst.v1"
 
-    def __init__(self, module_catalog: ModuleCatalogPort | None) -> None:
+    def __init__(
+        self,
+        module_catalog: ModuleCatalogPort | None,
+        *,
+        metrics: Metrics | None = None,
+        monotonic=time.monotonic,
+    ) -> None:
         self._module_catalog = module_catalog
+        self._metrics = metrics
+        self._monotonic = monotonic
 
     def inspect(self, project: Path) -> SchematicDocument:
-        return inspect_schematic(project)
+        started = self._monotonic()
+        try:
+            return inspect_schematic(project)
+        finally:
+            if self._metrics is not None:
+                self._metrics.observe(
+                    MetricName.SCHEMATIC_PARSE_SECONDS,
+                    max(0.0, self._monotonic() - started),
+                )
 
     def apply(self, project: Path, commands: tuple[DesignCommand, ...]) -> ApplyResult:
+        try:
+            result = self._apply(project, commands)
+        except Exception:
+            if self._metrics is not None:
+                self._metrics.increment(
+                    MetricName.ADAPTER_EXECUTION_TOTAL,
+                    labels={"contract": self._ADAPTER_CONTRACT, "result": "failed"},
+                )
+            raise
+        if self._metrics is not None:
+            self._metrics.increment(
+                MetricName.ADAPTER_EXECUTION_TOTAL,
+                labels={"contract": self._ADAPTER_CONTRACT, "result": "pass"},
+            )
+        return result
+
+    def _apply(self, project: Path, commands: tuple[DesignCommand, ...]) -> ApplyResult:
         if not commands:
             raise ValueError("at least one design command is required")
         if self._module_catalog is None and any(

@@ -18,6 +18,7 @@ from pcbflow.design_tables import (
     ProjectRevisionRow,
 )
 from pcbflow.domain import TaskStatus, new_id, utc_now
+from pcbflow.observability import audit_payload, ensure_trace_id
 from pcbflow.proposals import (
     DESIGN_PROPOSAL_TASK_KIND,
     ChangeProposal,
@@ -228,6 +229,7 @@ class ProposalStore:
                         "proposal_id": proposal_id,
                         "command_batch_id": batch.batch_id,
                         "project_id": batch.project_id,
+                        "trace_id": ensure_trace_id(),
                     },
                     result_json=None,
                     status=TaskStatus.QUEUED.value,
@@ -276,17 +278,30 @@ class ProposalStore:
                 version=1,
             )
             session.add(proposal)
+            queued_payload = audit_payload(
+                actor_type=batch.actor.type,
+                actor_id=batch.actor.id,
+                action="proposal.create",
+                object_type="change_proposal",
+                object_id=proposal_id,
+                before_digest=None,
+                after_digest=digest,
+                result="queued",
+            )
+            queued_payload.update(
+                {
+                    "project_id": batch.project_id,
+                    "command_batch_id": batch.batch_id,
+                    "task_id": task_id,
+                }
+            )
             session.add(
                 OutboxEventRow(
                     id=new_id("evt"),
                     aggregate_type="change_proposal",
                     aggregate_id=proposal_id,
                     event_type="proposal.queued",
-                    payload_json={
-                        "project_id": batch.project_id,
-                        "command_batch_id": batch.batch_id,
-                        "task_id": task_id,
-                    },
+                    payload_json=queued_payload,
                     created_at=now,
                     processed_at=None,
                     attempt_count=0,
@@ -358,8 +373,11 @@ class ProposalStore:
                     result_json=result, updated_at=now, version=ChangeProposalRow.version + 1))
                 if changed.rowcount != 1: raise StaleLeaseError(task_id)
             self._register_evidence(session, row, evidence, now, proposal_id)
+            batch = session.get(DesignCommandBatchRow, row.command_batch_id)
+            payload = audit_payload(actor_type="service", actor_id="pcbflow", action="proposal.validate", object_type="change_proposal", object_id=proposal_id, before_digest=batch.canonical_digest if batch else None, after_digest=evidence_set_digest, result="failed")
+            payload.update({"project_id": row.project_id, "task_id": task_id, "error_code": error_code})
             session.add(OutboxEventRow(id=new_id("evt"), aggregate_type="change_proposal", aggregate_id=proposal_id,
-                event_type="proposal.validation_failed", payload_json={"project_id": row.project_id, "task_id": task_id, "error_code": error_code}, created_at=now, processed_at=None, attempt_count=0, last_error_code=None))
+                event_type="proposal.validation_failed", payload_json=payload, created_at=now, processed_at=None, attempt_count=0, last_error_code=None))
             session.expire_all(); refreshed = session.get(ChangeProposalRow, proposal_id); assert refreshed is not None
             return _proposal(refreshed)
 
@@ -412,8 +430,10 @@ class ProposalStore:
                 semantic_diff_digest=semantic_diff_digest, evidence_set_digest=evidence_set_digest,
                 result_json=result, updated_at=now, version=ChangeProposalRow.version + 1))
             if changed.rowcount != 1: raise StaleLeaseError(task_id)
+            payload = audit_payload(actor_type="service", actor_id="pcbflow", action="proposal.execute", object_type="change_proposal", object_id=proposal_id, before_digest=batch_row.canonical_digest, after_digest=review_digest, result="ready_for_review")
+            payload.update({"project_id": row.project_id, "task_id": task_id, "candidate_revision": candidate_revision})
             session.add(OutboxEventRow(id=new_id("evt"), aggregate_type="change_proposal", aggregate_id=proposal_id,
-                event_type="proposal.ready_for_review", payload_json={"project_id": row.project_id, "task_id": task_id, "candidate_revision": candidate_revision}, created_at=now, processed_at=None, attempt_count=0, last_error_code=None))
+                event_type="proposal.ready_for_review", payload_json=payload, created_at=now, processed_at=None, attempt_count=0, last_error_code=None))
             session.expire_all(); refreshed = session.get(ChangeProposalRow, proposal_id); assert refreshed is not None
             return _proposal(refreshed)
 
@@ -531,12 +551,12 @@ class ProposalStore:
                 row.status = ProposalStatus.STALE.value
                 row.updated_at = now
                 row.version += 1
+                stale_payload = audit_payload(actor_type=actor_type, actor_id=actor_id, action="proposal.accept", object_type="change_proposal", object_id=proposal_id, before_digest=subject_digest, after_digest=None, result="stale")
+                stale_payload.update({"project_id": row.project_id, "proposal_id": proposal_id, "base_revision": base_revision, "current_revision": project.current_revision})
                 session.add(OutboxEventRow(
                     id=new_id("evt"), aggregate_type="change_proposal",
                     aggregate_id=proposal_id, event_type="proposal.stale",
-                    payload_json={"project_id": row.project_id, "proposal_id": proposal_id,
-                                  "base_revision": base_revision,
-                                  "current_revision": project.current_revision},
+                    payload_json=stale_payload,
                     created_at=now, processed_at=None, attempt_count=0,
                     last_error_code=None,
                 ))
@@ -582,13 +602,12 @@ class ProposalStore:
                 row.status = ProposalStatus.ACCEPTED.value
                 row.updated_at = now
                 row.version += 1
+                accepted_payload = audit_payload(actor_type=actor_type, actor_id=actor_id, action="proposal.accept", object_type="change_proposal", object_id=proposal_id, before_digest=subject_digest, after_digest=candidate_snapshot_digest, result="accepted")
+                accepted_payload.update({"project_id": row.project_id, "proposal_id": proposal_id, "revision": candidate_revision, "snapshot_digest": candidate_snapshot_digest, "decision": "approve"})
                 session.add(OutboxEventRow(
                     id=new_id("evt"), aggregate_type="project",
                     aggregate_id=row.project_id, event_type="project.revision.accepted",
-                    payload_json={"project_id": row.project_id, "proposal_id": proposal_id,
-                                  "revision": candidate_revision,
-                                  "snapshot_digest": candidate_snapshot_digest,
-                                  "decision": "approve"},
+                    payload_json=accepted_payload,
                     created_at=now, processed_at=None, attempt_count=0,
                     last_error_code=None,
                 ))
@@ -648,11 +667,12 @@ class ProposalStore:
             row.status = ProposalStatus.REJECTED.value
             row.updated_at = now
             row.version += 1
+            rejected_payload = audit_payload(actor_type=actor_type, actor_id=actor_id, action="proposal.reject", object_type="change_proposal", object_id=proposal_id, before_digest=subject_digest, after_digest=None, result="rejected")
+            rejected_payload.update({"project_id": row.project_id, "proposal_id": proposal_id, "decision": "reject"})
             session.add(OutboxEventRow(
                 id=new_id("evt"), aggregate_type="change_proposal",
                 aggregate_id=proposal_id, event_type="proposal.rejected",
-                payload_json={"project_id": row.project_id, "proposal_id": proposal_id,
-                              "decision": "reject"},
+                payload_json=rejected_payload,
                 created_at=now, processed_at=None, attempt_count=0,
                 last_error_code=None,
             ))

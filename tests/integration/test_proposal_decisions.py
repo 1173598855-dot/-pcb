@@ -21,6 +21,7 @@ from pcbflow.repositories import RevisionConflictError
 from pcbflow.design_tables import OutboxEventRow
 from pcbflow.tables import ArtifactRow, EvidenceRow
 from pcbflow.revisions import RevisionReconciler
+from pcbflow.observability import MetricName
 
 
 NOW = datetime(2026, 7, 29, 13, 0, tzinfo=UTC)
@@ -64,6 +65,7 @@ def _decision_service(container, revisions) -> ProposalDecisionService:
         artifacts=container.artifacts,
         evidence=container.evidence,
         reconciler=reconciler,
+        metrics=container.metrics,
         clock=lambda: NOW,
     )
 
@@ -75,6 +77,7 @@ def _reconciler(container, revisions) -> RevisionReconciler:
         proposals=container.proposal_store,
         revisions=revisions,
         sessions=container.sessions,
+        metrics=container.metrics,
         clock=lambda: NOW,
     )
 
@@ -348,6 +351,9 @@ def test_accept_is_idempotent_and_advances_database_revision(
         item.kind == "approval_signature"
         for item in container.evidence.list_for_project(project.id)
     )
+    assert MetricName.PROPOSAL_REVIEW_WAIT_SECONDS in {
+        point.name for point in container.metrics.snapshot()
+    }
 
 
 def test_reject_records_decision_without_advancing_revision(
@@ -394,6 +400,9 @@ def test_accept_with_changed_base_marks_proposal_stale(
             idempotency_key="accept-stale",
         )
     assert container.proposal_store.get(proposal.id).status is ProposalStatus.STALE
+    assert MetricName.PROJECT_REVISION_CONFLICT_TOTAL in {
+        point.name for point in container.metrics.snapshot()
+    }
 
 
 def test_digest_mismatch_cannot_reuse_acceptance_key(
@@ -437,6 +446,9 @@ def test_reconciler_repairs_design_ref_after_committed_acceptance(
     reconciler = _reconciler(container, revisions)
     assert reconciler.run_once() == 1
     assert revisions.design_revision == proposal.candidate_revision
+    assert MetricName.GIT_REF_RECONCILIATION_RETRY_TOTAL in {
+        point.name for point in container.metrics.snapshot()
+    }
 
 
 def test_stale_accept_replays_without_appending_a_second_stale_event(

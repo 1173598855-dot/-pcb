@@ -99,6 +99,7 @@ def test_project_can_be_marked_managed_and_revision_compared(
         )
         assert adopted_event is not None
         assert adopted_event.payload_json["source_head"] == "git:" + "9" * 40
+        assert {"actor", "action", "object", "before_digest", "after_digest", "result", "trace_id"} <= set(adopted_event.payload_json)
 
     with pytest.raises(RevisionConflictError):
         projects.compare_and_set_revision(

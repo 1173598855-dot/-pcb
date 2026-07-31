@@ -66,8 +66,11 @@ def test_reconciler_audits_an_unknown_proposal_ref_only_once(
             )
         ).all()
     assert len(events) == 1
-    assert events[0].payload_json == {
-        "project_id": project.id,
-        "ref_name": ref_name,
-        "revision": project.current_revision,
-    }
+    payload = events[0].payload_json
+    assert payload["project_id"] == project.id
+    assert payload["ref_name"] == ref_name
+    assert payload["revision"] == project.current_revision
+    assert payload["actor"] == {"type": "service", "id": "pcbflow"}
+    assert payload["action"] == "revision.unknown_ref"
+    assert payload["result"] == "unknown_ref"
+    assert payload["trace_id"].startswith("trc_")

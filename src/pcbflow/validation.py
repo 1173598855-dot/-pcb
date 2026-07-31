@@ -3,11 +3,13 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.domain import Task, TaskLease
+from pcbflow.observability import MetricName, Metrics, ensure_trace_id
 from pcbflow.kicad import (
     KicadPort,
     KicadProjectNotFoundError,
@@ -82,7 +84,7 @@ class ValidationService:
         self._projects.get(project_id)
         return self._tasks.enqueue(
             VALIDATION_TASK_KIND,
-            {"project_id": project_id},
+            {"project_id": project_id, "trace_id": ensure_trace_id()},
             idempotency_key,
             project_id,
         )
@@ -99,6 +101,8 @@ class ValidationTaskHandler:
         *,
         max_files: int,
         max_bytes: int,
+        metrics: Metrics | None = None,
+        monotonic=time.monotonic,
     ) -> None:
         self._projects = projects
         self._evidence = evidence
@@ -107,6 +111,8 @@ class ValidationTaskHandler:
         self._kicad = kicad
         self._max_files = max_files
         self._max_bytes = max_bytes
+        self._metrics = metrics
+        self._monotonic = monotonic
 
     def __call__(self, lease: TaskLease) -> dict[str, object]:
         project_id = str(lease.payload["project_id"])
@@ -121,6 +127,7 @@ class ValidationTaskHandler:
             output = temporary_path / "output"
             self._copy_project(project.source_path, workspace)
             try:
+                started = self._monotonic()
                 reports = self._kicad.validate(workspace, output)
             except KicadUnavailableError as error:
                 raise TerminalTaskError("KICAD_CLI_UNAVAILABLE", str(error)) from error
@@ -128,6 +135,12 @@ class ValidationTaskHandler:
                 raise TerminalTaskError("INVALID_KICAD_PROJECT", str(error)) from error
             except KicadToolError as error:
                 raise RetryableTaskError("KICAD_TOOL_FAILED", str(error)) from error
+            finally:
+                if self._metrics is not None:
+                    self._metrics.observe(
+                        MetricName.KICAD_ERC_SECONDS,
+                        max(0.0, self._monotonic() - started),
+                    )
 
             evidence_ids: list[str] = []
             finding_count = 0

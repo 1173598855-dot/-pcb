@@ -14,6 +14,7 @@ from pcbflow.approvals import ApprovalDigestMismatchError
 from pcbflow.commands import DesignCommandSchemaError, load_command_batch
 from pcbflow.config import Settings
 from pcbflow.container import Container, build_container
+from pcbflow.observability import ensure_trace_id
 from pcbflow.proposal_store import ProposalNotFoundError
 from pcbflow.proposals import (
     CandidateNotReviewableError,
@@ -131,6 +132,7 @@ def _read_input_file(path: Path, max_bytes: int) -> bytes:
 
 
 def _build() -> Container:
+    ensure_trace_id()
     return build_container(Settings.from_env())
 
 

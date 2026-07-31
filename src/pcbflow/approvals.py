@@ -16,6 +16,8 @@ from pcbflow.design_tables import (
     RequirementSetRow,
 )
 from pcbflow.domain import new_id, utc_now
+from pcbflow.observability import audit_payload
+from pcbflow.observability import MetricName, Metrics
 from pcbflow.repositories import (
     IdempotencyConflictError,
     ProjectNotFoundError,
@@ -84,9 +86,11 @@ class GateDecisionStore:
         self,
         sessions: sessionmaker[Session],
         artifacts: ContentAddressedStore | None = None,
+        metrics: Metrics | None = None,
     ) -> None:
         self._sessions = sessions
         self._artifacts = artifacts
+        self._metrics = metrics
 
     @staticmethod
     def _register_artifact(
@@ -326,6 +330,8 @@ class GateDecisionStore:
                     project.version != expected_project_version
                     or project.current_revision != base_revision
                 ):
+                    if self._metrics is not None:
+                        self._metrics.increment(MetricName.PROJECT_REVISION_CONFLICT_TOTAL)
                     raise RevisionConflictError(base_revision, project.current_revision)
                 now = utc_now()
                 decision_id = new_id("gdec")
@@ -381,6 +387,8 @@ class GateDecisionStore:
                         actual = session.get(ProjectRow, project_id)
                         if actual is None:
                             raise ProjectNotFoundError(project_id)
+                        if self._metrics is not None:
+                            self._metrics.increment(MetricName.PROJECT_REVISION_CONFLICT_TOTAL)
                         raise RevisionConflictError(
                             base_revision, actual.current_revision
                         )
@@ -400,7 +408,17 @@ class GateDecisionStore:
                         )
                     )
                     event_type = "project.revision.accepted"
-                    event_payload = {
+                    event_payload = audit_payload(
+                        actor_type=actor_type,
+                        actor_id=actor_id,
+                        action="approval.g1",
+                        object_type="requirement_set",
+                        object_id=requirement_set_id,
+                        before_digest=subject_digest,
+                        after_digest=candidate_snapshot_digest,
+                        result="accepted",
+                    )
+                    event_payload.update({
                         "project_id": project_id,
                         "gate": "G1",
                         "requirement_set_id": requirement_set_id,
@@ -413,11 +431,21 @@ class GateDecisionStore:
                         "approval_artifact_digest": approval_artifact.digest,
                         "actor": {"type": actor_type, "id": actor_id},
                         "comment": comment,
-                    }
+                    })
                 else:
                     requirement_row.status = RequirementSetStatus.REJECTED.value
                     event_type = "gate.decided"
-                    event_payload = {
+                    event_payload = audit_payload(
+                        actor_type=actor_type,
+                        actor_id=actor_id,
+                        action="approval.g1",
+                        object_type="requirement_set",
+                        object_id=requirement_set_id,
+                        before_digest=subject_digest,
+                        after_digest=None,
+                        result="rejected",
+                    )
+                    event_payload.update({
                         "project_id": project_id,
                         "gate": "G1",
                         "requirement_set_id": requirement_set_id,
@@ -428,7 +456,7 @@ class GateDecisionStore:
                         "approval_artifact_digest": approval_artifact.digest,
                         "actor": {"type": actor_type, "id": actor_id},
                         "comment": comment,
-                    }
+                    })
 
                 session.add(
                     OutboxEventRow(

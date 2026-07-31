@@ -24,6 +24,7 @@ from pcbflow.domain import (
     new_id,
     utc_now,
 )
+from pcbflow.observability import audit_payload
 from pcbflow.tables import (
     ArtifactRow,
     EvidenceRow,
@@ -297,6 +298,25 @@ class ProjectRepository:
                         row.current_revision, actual.current_revision
                     )
 
+                adopted_payload = audit_payload(
+                    actor_type="service",
+                    actor_id="pcbflow",
+                    action="project.adopt",
+                    object_type="project",
+                    object_id=project_id,
+                    before_digest=None,
+                    after_digest=snapshot_digest,
+                    result="adopted",
+                )
+                adopted_payload.update(
+                    {
+                        "project_id": project_id,
+                        "revision": revision,
+                        "snapshot_digest": snapshot_digest,
+                        "adoption_input_digest": adoption_input_digest,
+                        "source_head": source_head,
+                    }
+                )
                 session.add(
                     ProjectRevisionRow(
                         id=new_id("rev"),
@@ -315,13 +335,7 @@ class ProjectRepository:
                         aggregate_type="project",
                         aggregate_id=project_id,
                         event_type="project.adopted",
-                        payload_json={
-                            "project_id": project_id,
-                            "revision": revision,
-                            "snapshot_digest": snapshot_digest,
-                            "adoption_input_digest": adoption_input_digest,
-                            "source_head": source_head,
-                        },
+                        payload_json=adopted_payload,
                         created_at=now,
                         processed_at=None,
                         attempt_count=0,

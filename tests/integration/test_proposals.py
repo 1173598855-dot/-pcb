@@ -12,6 +12,7 @@ from pcbflow.config import Settings
 from pcbflow.container import build_container
 from pcbflow.domain import TaskLease, TaskStatus
 from pcbflow.kicad import KicadCapability, RawValidationReport
+from pcbflow.observability import MetricName
 from pcbflow.design_tables import ChangeProposalRow
 from pcbflow.proposals import EvidenceSet, ProposalStatus
 from pcbflow.repositories import StaleLeaseError
@@ -143,6 +144,14 @@ def test_worker_builds_one_reviewable_candidate_and_complete_evidence(tmp_path: 
         evidence = container.evidence.list_for_project(project.id)
         assert {"design_command_batch", "project_snapshot_before", "project_snapshot_after", "git_text_diff", "schematic_semantic_diff", "kicad_erc", "command_execution_log", "adapter_capability_report", "proposal_evidence_set"} <= {item.kind for item in evidence}
         assert all(container.artifacts.verify(item.artifact_digest) for item in evidence)
+        metric_names = {point.name for point in container.metrics.snapshot()}
+        assert {
+            MetricName.PROPOSAL_EXECUTION_SECONDS,
+            MetricName.SCHEMATIC_PARSE_SECONDS,
+            MetricName.KICAD_ERC_SECONDS,
+            MetricName.PROPOSAL_VALIDATION_TOTAL,
+            MetricName.ADAPTER_EXECUTION_TOTAL,
+        } <= metric_names
         assert _snapshot(source) == source_before
     finally:
         container.dispose()

@@ -18,6 +18,7 @@ from pcbflow.repositories import (
     ProjectRepository,
     RevisionConflictError,
 )
+from pcbflow.observability import MetricName, Metrics
 from pcbflow.requirements import (
     RequirementSet,
     RequirementSetPayload,
@@ -389,11 +390,13 @@ class RequirementService:
         projects: ProjectRepository,
         revisions: RevisionService,
         reconciler=None,
+        metrics: Metrics | None = None,
     ) -> None:
         self._store = store
         self._projects = projects
         self._revisions = revisions
         self._reconciler = reconciler
+        self._metrics = metrics
 
     @staticmethod
     def _write_manifest_candidate(
@@ -469,6 +472,8 @@ class RequirementService:
         if blocking_ids:
             raise RequirementsBlockedError(blocking_ids)
         if project.current_revision != requirement_set.base_revision:
+            if self._metrics is not None:
+                self._metrics.increment(MetricName.PROJECT_REVISION_CONFLICT_TOTAL)
             raise RevisionConflictError(
                 requirement_set.base_revision, project.current_revision
             )

@@ -16,6 +16,7 @@ from pcbflow.commands import DesignCommandSchemaError, load_command_batch
 from pcbflow.config import Settings
 from pcbflow.container import Container, build_container
 from pcbflow.domain import new_id
+from pcbflow.observability import bind_log_context
 from pcbflow.proposal_store import ProposalNotFoundError
 from pcbflow.proposals import (
     CandidateNotReviewableError,
@@ -243,7 +244,8 @@ def create_app(container: Container | None = None) -> FastAPI:
         request.state.correlation_id = request.headers.get(
             "X-Correlation-ID", new_id("cor")
         )
-        response = await call_next(request)
+        with bind_log_context(trace_id=request.state.correlation_id):
+            response = await call_next(request)
         response.headers["X-Correlation-ID"] = request.state.correlation_id
         return response
 

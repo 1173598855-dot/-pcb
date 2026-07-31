@@ -17,6 +17,7 @@ from pcbflow.design_tables import (
     OutboxEventRow,
 )
 from pcbflow.domain import TaskStatus
+from pcbflow.observability import bind_log_context
 from pcbflow.repositories import IdempotencyConflictError
 from pcbflow.tables import TaskRow
 
@@ -82,7 +83,8 @@ def test_create_persists_batch_commands_task_proposal_and_outbox_once(
     value = _batch(project, frozen_requirement_set)
     data = json.dumps(value, separators=(",", ":")).encode()
 
-    first = container.proposals.create(data, value["idempotency_key"])
+    with bind_log_context(trace_id="trc_command_batch"):
+        first = container.proposals.create(data, value["idempotency_key"])
     repeated = container.proposals.create(data, value["idempotency_key"])
 
     assert repeated.id == first.id
@@ -95,6 +97,7 @@ def test_create_persists_batch_commands_task_proposal_and_outbox_once(
         "proposal_id": first.id,
         "command_batch_id": first.command_batch_id,
         "project_id": first.project_id,
+        "trace_id": "trc_command_batch",
     }
     with container.sessions() as session:
         assert session.scalar(select(func.count()).select_from(DesignCommandBatchRow)) == 1
@@ -111,11 +114,14 @@ def test_create_persists_batch_commands_task_proposal_and_outbox_once(
         ).all()
 
     assert len(events) == 1
-    assert events[0].payload_json == {
-        "project_id": first.project_id,
-        "command_batch_id": first.command_batch_id,
-        "task_id": first.task_id,
-    }
+    payload = events[0].payload_json
+    assert payload["trace_id"] == "trc_command_batch"
+    assert payload["actor"] == {"type": "human", "id": "local-user"}
+    assert payload["action"] == "proposal.create"
+    assert payload["object"] == {"type": "change_proposal", "id": first.id}
+    assert payload["result"] == "queued"
+    assert payload["command_batch_id"] == first.command_batch_id
+    assert payload["task_id"] == first.task_id
 
 
 @pytest.mark.parametrize("change", ["intent", "risk", "command payload"])

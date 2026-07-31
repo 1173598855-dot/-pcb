@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -27,6 +28,7 @@ from pcbflow.design_tables import (
     RequirementSetRow,
 )
 from pcbflow.domain import Project, ProjectMode, new_id, utc_now
+from pcbflow.observability import MetricName, Metrics, audit_payload, log_event
 from pcbflow.process import ProcessPort, ProcessResult
 from pcbflow.repositories import IdempotencyConflictError, ProjectRepository
 from pcbflow.revision_store import ProjectRevisionStore
@@ -780,6 +782,7 @@ class RevisionReconciler:
         proposals=None,
         sessions=None,
         clock: Callable[[], datetime] | None = None,
+        metrics: Metrics | None = None,
     ) -> None:
         self._projects = projects
         self._revision_store = revision_store
@@ -788,6 +791,7 @@ class RevisionReconciler:
         self._proposals = proposals
         self._sessions = sessions
         self._clock = clock or utc_now
+        self._metrics = metrics
 
     @staticmethod
     def _terminal(project_id: str, detail: str) -> RuntimeError:
@@ -800,11 +804,21 @@ class RevisionReconciler:
     ) -> None:
         if self._sessions is None:
             return
-        payload = {
+        payload = audit_payload(
+            actor_type="service",
+            actor_id="pcbflow",
+            action="revision.unknown_ref",
+            object_type="project",
+            object_id=project_id,
+            before_digest=None,
+            after_digest=revision,
+            result="unknown_ref",
+        )
+        payload.update({
             "project_id": project_id,
             "ref_name": ref_name,
             "revision": revision,
-        }
+        })
         with self._sessions.begin() as session:
             session.execute(text("BEGIN IMMEDIATE"))
             existing = session.scalars(
@@ -812,7 +826,12 @@ class RevisionReconciler:
                     OutboxEventRow.event_type == "revision.unknown_ref"
                 )
             ).all()
-            if any(event.payload_json == payload for event in existing):
+            if any(
+                event.payload_json.get("project_id") == project_id
+                and event.payload_json.get("ref_name") == ref_name
+                and event.payload_json.get("revision") == revision
+                for event in existing
+            ):
                 return
             session.add(
                 OutboxEventRow(
@@ -1005,10 +1024,21 @@ class RevisionReconciler:
             actual = self._revisions.resolve_design_ref(project.id)
             if actual == project.current_revision:
                 continue
+            if self._metrics is not None:
+                self._metrics.increment(MetricName.GIT_REF_RECONCILIATION_RETRY_TOTAL)
             self._revisions.promote_design_ref(
                 project.id,
                 project.current_revision,
                 actual,
+            )
+            log_event(
+                logging.getLogger(__name__),
+                logging.INFO,
+                "revision.reconciled",
+                project_id=project.id,
+                base_revision=actual,
+                candidate_revision=project.current_revision,
+                result="repaired",
             )
             repaired += 1
         return repaired

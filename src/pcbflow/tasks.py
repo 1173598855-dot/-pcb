@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from pcbflow.domain import TaskLease
+from pcbflow.observability import bind_log_context, log_event
 from pcbflow.repositories import TaskRepository
 
 logger = logging.getLogger(__name__)
@@ -57,27 +58,38 @@ class Worker:
                 self._clock(),
             )
             return True
-        try:
-            result = handler(lease)
-        except RetryableTaskError as error:
-            self._repository.fail(
-                lease.task_id, lease.lease_token, error.code, True, self._clock()
-            )
-        except TerminalTaskError as error:
-            self._repository.fail(
-                lease.task_id, lease.lease_token, error.code, False, self._clock()
-            )
-        except Exception:
-            logger.exception("Unhandled task error", extra={"task_id": lease.task_id})
-            self._repository.fail(
-                lease.task_id,
-                lease.lease_token,
-                "UNHANDLED_TASK_ERROR",
-                False,
-                self._clock(),
-            )
-        else:
-            self._repository.complete(
-                lease.task_id, lease.lease_token, result, self._clock()
-            )
+        with bind_log_context(
+            task_id=lease.task_id,
+            project_id=lease.payload.get("project_id"),
+            trace_id=lease.payload.get("trace_id"),
+        ):
+            try:
+                result = handler(lease)
+            except RetryableTaskError as error:
+                self._repository.fail(
+                    lease.task_id, lease.lease_token, error.code, True, self._clock()
+                )
+            except TerminalTaskError as error:
+                self._repository.fail(
+                    lease.task_id, lease.lease_token, error.code, False, self._clock()
+                )
+            except Exception:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "task.unhandled_error",
+                    error_code="UNHANDLED_TASK_ERROR",
+                    result="failed",
+                )
+                self._repository.fail(
+                    lease.task_id,
+                    lease.lease_token,
+                    "UNHANDLED_TASK_ERROR",
+                    False,
+                    self._clock(),
+                )
+            else:
+                self._repository.complete(
+                    lease.task_id, lease.lease_token, result, self._clock()
+                )
         return True

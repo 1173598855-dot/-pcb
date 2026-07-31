@@ -7,6 +7,7 @@ import os
 import stat
 import tempfile
 import hashlib
+import time
 from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 from pathlib import Path
@@ -41,6 +42,7 @@ from pcbflow.validation import assert_project_tree_safe
 from pcbflow.design_tables import GateDecisionRow, OutboxEventRow, ProjectRevisionRow, ChangeProposalRow, DesignCommandBatchRow, RequirementSetRow
 from pcbflow.tables import ArtifactRow, EvidenceRow, ProjectRow
 from pcbflow.domain import ProjectMode, new_id
+from pcbflow.observability import MetricName, Metrics, bind_log_context
 
 
 class CandidateNotReviewableError(RuntimeError):
@@ -160,11 +162,13 @@ class ProposalService:
         requirements: RequirementStore,
         store: ProposalStore,
         reconciler=None,
+        metrics: Metrics | None = None,
     ) -> None:
         self._projects = projects
         self._requirements = requirements
         self._store = store
         self._reconciler = reconciler
+        self._metrics = metrics
 
     def create(self, data: bytes, idempotency_key: str) -> ChangeProposal:
         batch = load_command_batch(data)
@@ -179,6 +183,8 @@ class ProposalService:
         if self._reconciler is not None:
             self._reconciler.assert_writable(project.id)
         if project.current_revision != batch.base_revision:
+            if self._metrics is not None:
+                self._metrics.increment(MetricName.PROJECT_REVISION_CONFLICT_TOTAL)
             raise RevisionConflictError(batch.base_revision, project.current_revision)
         requirement_set = self._requirements.get(batch.requirement_set_id)
         if (
@@ -218,11 +224,14 @@ class ProposalExecutor:
     def __init__(self, *, proposal_store, command_batches, projects, requirements, tasks: TaskRepository,
                  revisions: RevisionService, adapter: CstSchematicAdapter, kicad: KicadPort,
                  artifacts, evidence, clock, max_files: int = 10000,
-                 max_bytes: int = 512 * 1024 * 1024) -> None:
+                 max_bytes: int = 512 * 1024 * 1024, metrics: Metrics | None = None,
+                 monotonic=time.monotonic) -> None:
         self._proposal_store = proposal_store; self._command_batches = command_batches; self._projects = projects
         self._requirements = requirements; self._tasks = tasks; self._revisions = revisions; self._adapter = adapter
         self._kicad = kicad; self._artifacts = artifacts; self._evidence = evidence; self._clock = clock
         self._max_files = max_files; self._max_bytes = max_bytes
+        self._metrics = metrics
+        self._monotonic = monotonic
 
     def begin(self, lease: TaskLease, *, now: datetime | None = None) -> ChangeProposal:
         now = self._clock() if now is None else now
@@ -240,6 +249,45 @@ class ProposalExecutor:
         return self._artifacts.put_bytes(data, media_type)
 
     def __call__(self, lease: TaskLease) -> dict[str, object]:
+        started = self._monotonic()
+        proposal_id = str(lease.payload["proposal_id"])
+        with bind_log_context(
+            task_id=lease.task_id,
+            proposal_id=proposal_id,
+            project_id=lease.payload.get("project_id"),
+            trace_id=lease.payload.get("trace_id"),
+        ):
+            try:
+                result = self._execute(lease)
+            except TerminalTaskError as error:
+                if self._metrics is not None:
+                    self._metrics.increment(
+                        MetricName.PROPOSAL_VALIDATION_TOTAL,
+                        labels={"result": "failed", "code": error.code},
+                    )
+                raise
+            except Exception:
+                if self._metrics is not None:
+                    self._metrics.increment(
+                        MetricName.PROPOSAL_VALIDATION_TOTAL,
+                        labels={"result": "failed", "code": "CANDIDATE_VALIDATION_FAILED"},
+                    )
+                raise
+            else:
+                if self._metrics is not None:
+                    self._metrics.increment(
+                        MetricName.PROPOSAL_VALIDATION_TOTAL,
+                        labels={"result": "pass", "code": "OK"},
+                    )
+                return result
+            finally:
+                if self._metrics is not None:
+                    self._metrics.observe(
+                        MetricName.PROPOSAL_EXECUTION_SECONDS,
+                        max(0.0, self._monotonic() - started),
+                    )
+
+    def _execute(self, lease: TaskLease) -> dict[str, object]:
         now = self._clock(); proposal_id = str(lease.payload["proposal_id"])
         proposal = self._proposal_store.get(proposal_id)
         batch = self._command_batches.get(proposal.command_batch_id)
@@ -392,7 +440,15 @@ class ProposalExecutor:
                 if not semantic.changes:
                     raise TerminalTaskError("DESIGN_COMMAND_NO_EFFECT", "design commands produced no semantic change")
                 semantic_descriptor = add("schematic_semantic_diff", semantic_diff_bytes(semantic), "application/json")
-                reports = self._kicad.validate(workspace, workspace.parent / "validation-output")
+                erc_started = self._monotonic()
+                try:
+                    reports = self._kicad.validate(workspace, workspace.parent / "validation-output")
+                finally:
+                    if self._metrics is not None:
+                        self._metrics.observe(
+                            MetricName.KICAD_ERC_SECONDS,
+                            max(0.0, self._monotonic() - erc_started),
+                        )
                 ercs = [report for report in reports if report.kind == "erc"]
                 if len(ercs) != 1: raise TerminalTaskError("CANDIDATE_VALIDATION_FAILED", "exactly one ERC report is required")
                 erc_descriptor = add("kicad_erc", ercs[0].data, "application/json", "pass")
@@ -476,6 +532,7 @@ class ProposalDecisionService:
         evidence,
         reconciler,
         clock,
+        metrics: Metrics | None = None,
     ) -> None:
         self._proposal_store = proposal_store
         self._command_batches = command_batches
@@ -486,6 +543,7 @@ class ProposalDecisionService:
         self._evidence = evidence
         self._reconciler = reconciler
         self._clock = clock
+        self._metrics = metrics
 
     def _replay_or_none(
         self,
@@ -651,6 +709,36 @@ class ProposalDecisionService:
         return project, batch, requirements, items
 
     def accept(
+        self,
+        *,
+        proposal_id: str,
+        candidate_digest: str,
+        actor_type: str,
+        actor_id: str,
+        comment: str,
+        idempotency_key: str,
+    ) -> ChangeProposal:
+        proposal = self._proposal_store.get(proposal_id)
+        if self._metrics is not None:
+            self._metrics.observe(
+                MetricName.PROPOSAL_REVIEW_WAIT_SECONDS,
+                max(0.0, (self._clock() - proposal.updated_at).total_seconds()),
+            )
+        try:
+            return self._accept(
+                proposal_id=proposal_id,
+                candidate_digest=candidate_digest,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                comment=comment,
+                idempotency_key=idempotency_key,
+            )
+        except RevisionConflictError:
+            if self._metrics is not None:
+                self._metrics.increment(MetricName.PROJECT_REVISION_CONFLICT_TOTAL)
+            raise
+
+    def _accept(
         self,
         *,
         proposal_id: str,

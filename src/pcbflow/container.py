@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import time
 
 from alembic import command
 from alembic.config import Config
@@ -15,6 +16,7 @@ from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.config import Settings
 from pcbflow.db import create_engine_and_session
 from pcbflow.domain import new_id, utc_now
+from pcbflow.observability import Metrics
 from pcbflow.kicad import KicadCli, KicadPort
 from pcbflow.process import ProcessRunner
 from pcbflow.proposal_store import CommandBatchStore, ProposalStore
@@ -64,6 +66,7 @@ class Container:
     worker: Worker
     proposal_executor: ProposalExecutor
     proposal_decisions: ProposalDecisionService
+    metrics: Metrics
 
     def dispose(self) -> None:
         self.engine.dispose()
@@ -80,10 +83,14 @@ def build_container(
     settings: Settings,
     kicad_override: KicadPort | None = None,
     clock: Callable[[], datetime] = utc_now,
+    *,
+    metrics: Metrics | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> Container:
     settings.ensure_directories()
     _run_migrations(settings.database_url)
     engine, sessions = create_engine_and_session(settings.database_url)
+    metric_sink = metrics if metrics is not None else Metrics()
 
     projects = ProjectRepository(sessions)
     tasks = TaskRepository(sessions)
@@ -108,19 +115,20 @@ def build_container(
         workspaces_dir=settings.workspaces_dir,
     )
     requirement_store = RequirementStore(sessions, artifacts)
-    gate_decisions = GateDecisionStore(sessions, artifacts)
+    gate_decisions = GateDecisionStore(sessions, artifacts, metrics=metric_sink)
     reconciler = RevisionReconciler(
         projects, revision_store, revisions,
         requirements=requirement_store,
         proposals=proposal_store,
         sessions=sessions,
         clock=clock,
+        metrics=metric_sink,
     )
     requirements = RequirementService(
-        requirement_store, projects, revisions, reconciler=reconciler
+        requirement_store, projects, revisions, reconciler=reconciler, metrics=metric_sink
     )
     proposals = ProposalService(
-        projects, requirement_store, proposal_store, reconciler=reconciler
+        projects, requirement_store, proposal_store, reconciler=reconciler, metrics=metric_sink
     )
     approvals = ApprovalService(
         requirement_store,
@@ -135,8 +143,8 @@ def build_container(
     )
     selected_kicad: KicadPort = kicad_override if kicad_override is not None else kicad
     module_catalog = (FileModuleCatalog(settings.module_catalog_dir, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes) if settings.module_catalog_dir is not None else None)
-    adapter = CstSchematicAdapter(module_catalog)
-    proposal_executor = ProposalExecutor(proposal_store=proposal_store, command_batches=command_batches, projects=projects, requirements=requirement_store, tasks=tasks, revisions=revisions, adapter=adapter, kicad=selected_kicad, artifacts=artifacts, evidence=evidence, clock=clock, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes)
+    adapter = CstSchematicAdapter(module_catalog, metrics=metric_sink, monotonic=monotonic)
+    proposal_executor = ProposalExecutor(proposal_store=proposal_store, command_batches=command_batches, projects=projects, requirements=requirement_store, tasks=tasks, revisions=revisions, adapter=adapter, kicad=selected_kicad, artifacts=artifacts, evidence=evidence, clock=clock, metrics=metric_sink, monotonic=monotonic, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes)
     proposal_decisions = ProposalDecisionService(
         proposal_store=proposal_store,
         command_batches=command_batches,
@@ -147,6 +155,7 @@ def build_container(
         evidence=evidence,
         reconciler=reconciler,
         clock=clock,
+        metrics=metric_sink,
     )
     handler = ValidationTaskHandler(
         projects,
@@ -154,6 +163,8 @@ def build_container(
         findings,
         artifacts,
         selected_kicad,
+        metrics=metric_sink,
+        monotonic=monotonic,
         max_files=settings.max_project_files,
         max_bytes=settings.max_project_bytes,
     )
@@ -189,6 +200,7 @@ def build_container(
         worker=worker,
         proposal_executor=proposal_executor,
         proposal_decisions=proposal_decisions,
+        metrics=metric_sink,
     )
     try:
         reconciler.run_once()
