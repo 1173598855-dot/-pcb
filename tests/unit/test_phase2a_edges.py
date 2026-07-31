@@ -190,6 +190,15 @@ def test_cli_preflight_rejects_invalid_write_options() -> None:
     assert "only --once is supported" in worker.output
 
 
+def test_module_entrypoint_shows_help(monkeypatch) -> None:
+    import runpy
+
+    monkeypatch.setattr(sys, "argv", ["pcbflow", "--help"])
+    with pytest.raises(SystemExit) as exc_info:
+        runpy.run_module("pcbflow.__main__", run_name="__main__")
+    assert exc_info.value.code == 0
+
+
 class _FailingServiceContainer:
     settings = SimpleNamespace(max_project_bytes=32)
 
