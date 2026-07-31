@@ -28,8 +28,9 @@ PCBFlow 是一个本地优先、以证据为中心的自动化 PCB 开发平台�
 | 隔离 ERC/DRC | 已实现 | 在临时副本中只读执行 |
 | Artifact/Evidence/Finding | 已实现 | SHA-256 内容寻址 |
 | 重启后读取任务结果 | 已实现 | SQLite 持久化 |
-| 需求冻结与 G1 | 已设计 | Phase 2A，尚未实现 |
-| 原理图自动修改 | 已设计 | Phase 2A 首批受控操作 |
+| 需求冻结与 G1 | 已实现 | Phase 2A：导入、提交、G1 审批与摘要绑定 |
+| 原理图自动修改 | 已实现 | Phase 2A：模块实例化、属性、封装与标签操作 |
+| 受控候选与恢复 | 已实现 | Phase 2A：fencing、语义 Diff、ERC、接受/拒绝与 reconcile |
 | PCB 自动布局布线 | 路线图 | Phase 3 |
 | Gerber/BOM/CPL | 路线图 | Phase 4 |
 | 嘉立创规则与交换 | 路线图 | Phase 4 |
@@ -1038,7 +1039,7 @@ Phase 2A 的启动协调器以数据库 current revision 为准。若候选对�
 
 ### Phase 2A：受控设计变更内核
 
-状态：设计完成，下一步编写实施计划。
+状态：已实现。Task 1-20 完成；本机无 KiCad 9 CLI 时，真实 KiCad 契约测试会明确跳过。
 
 ### Phase 2B：器件与模块库
 

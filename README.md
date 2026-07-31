@@ -1,8 +1,8 @@
 # PCBFlow
 
-PCBFlow 是一个本地优先、以证据为中心的自动化 PCB 开发工作流。本仓库当前实现的是 Phase 0/1 的首个可恢复纵向切片：注册本地 KiCad 工程，探测 `kicad-cli`，在隔离副本中运行 ERC/DRC，并持久化任务、原始证据和规范化 Finding。
+PCBFlow 是一个本地优先、以证据为中心的自动化 PCB 开发工作流。当前仓库已实现 Phase 0/1 的只读验证切片和 Phase 2A 的受控设计变更内核：注册本地 KiCad 工程，探测 `kicad-cli`，在隔离副本中运行 ERC/DRC，持久化任务、原始证据和规范化 Finding，并将项目采纳到受管 Git，冻结 G1 需求，在隔离 worktree 中执行受控原理图命令，记录语义 Diff 与 ERC 证据后接受或拒绝候选。
 
-当前切片严格只读：不会修改注册的 KiCad 源文件，不会生成 Gerber、BOM、坐标或其他制造包，也不包含 AI 自动设计、Web UI、自动改图或嘉立创导出。
+Phase 2A 不会修改注册的外部 `source_path`；制造资料、PCB 自动布局布线、AI 设计、Web UI、常驻 Worker 和嘉立创导出不在当前范围内。
 
 ## 前置条件
 
@@ -11,7 +11,7 @@ PCBFlow 是一个本地优先、以证据为中心的自动化 PCB 开发工作�
 - Git；仅开发验证和查看差异时需要。
 - 可选：KiCad 9.x 的 `kicad-cli`。可将其加入 `PATH`，或通过 `PCBFLOW_KICAD_CLI` 指定完整路径。
 
-未安装 KiCad 时，项目注册、持久任务和查询功能仍可使用；真实验证任务会以稳定错误码 `KICAD_CLI_UNAVAILABLE` 终止，不会伪造成功结果。
+未安装 KiCad 时，项目注册、受管采纳、G1 和查询功能仍可使用；真实验证任务与候选 ERC 会以稳定错误码 `KICAD_CLI_UNAVAILABLE` 终止，不会伪造成功结果。
 
 ## 安装
 
@@ -140,13 +140,23 @@ Invoke-RestMethod http://127.0.0.1:8765/api/v1/projects
 - `GET /health`
 - `POST /api/v1/projects`
 - `GET /api/v1/projects`
+- `POST /api/v1/projects/{project_id}:adopt`
+- `POST /api/v1/projects/{project_id}/requirement-sets`
+- `GET /api/v1/requirement-sets/{requirement_set_id}`
+- `POST /api/v1/requirement-sets/{requirement_set_id}:submit`
+- `POST /api/v1/approvals`
+- `POST /api/v1/projects/{project_id}/proposals`
+- `GET /api/v1/proposals/{proposal_id}`
+- `GET /api/v1/proposals/{proposal_id}/diff`
+- `POST /api/v1/proposals/{proposal_id}:accept`
+- `POST /api/v1/proposals/{proposal_id}:reject`
 - `POST /api/v1/projects/{project_id}/validations`
 - `GET /api/v1/tasks/{task_id}`
 - `POST /api/v1/worker:run-once`
 - `GET /api/v1/projects/{project_id}/evidence`
 - `GET /api/v1/projects/{project_id}/findings`
 
-两个 `POST` 创建操作需要 `Idempotency-Key` 请求头。若服务以远程模式启动，本地路径注册会被拒绝：
+写操作需要 `Idempotency-Key` 请求头。若服务以远程模式启动，本地路径注册会被拒绝：
 
 ```powershell
 $env:PCBFLOW_REMOTE_MODE = "true"
@@ -183,25 +193,28 @@ $env:PCBFLOW_REMOTE_MODE = "true"
 - `PCBFLOW_MAX_PROCESS_OUTPUT_BYTES`
 - `PCBFLOW_MAX_PROJECT_FILES`
 - `PCBFLOW_MAX_PROJECT_BYTES`
+- `PCBFLOW_MODULE_CATALOG_DIR`
 - `PCBFLOW_REMOTE_MODE`
 
 `PCBFLOW_DATABASE_URL` 和 `PCBFLOW_ARTIFACT_DIR` 的显式值优先于根据 `PCBFLOW_DATA_DIR` 推导出的默认位置。
 
 ## 当前限制
 
-- 仅支持 KiCad 9.x CLI 的只读 ERC/DRC。
+- 仅支持 SQLite 与 KiCad 9.x 写入契约。
 - 每种设计文件在工程根目录中最多一个；多个根原理图或 PCB 会被判定为歧义工程。
+- Phase 2A 支持四种受控操作：模块实例化、属性设置、封装指派和标签添加。
 - Worker 当前只提供 `--once` 单任务模式。
-- 不修改 KiCad 工程，不生成制造资料，不访问供应商网络。
-- 不包含自动设计、审批流、React UI、PostgreSQL 或生产部署能力。
+- 不修改注册的外部 `source_path`，不生成制造资料，不访问供应商网络。
+- 不包含 AI 自动设计、任意元件/导线编辑、PCB 布局、Web UI、PostgreSQL 或常驻 Worker。
 
 ## 开发验证
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m pytest --cov=pcbflow --cov-report=term-missing --cov-fail-under=80
+.\.venv\Scripts\python.exe -m pytest --cov=pcbflow --cov-report=term-missing --cov-fail-under=90
 .\.venv\Scripts\python.exe -m pytest -m kicad -v
 .\.venv\Scripts\pcbflow.exe doctor --json
+.\.venv\Scripts\python.exe -m pcbflow --help
 git diff --check
 ```
 
