@@ -7,14 +7,16 @@ from pathlib import Path
 
 import pytest
 
+from pcbflow.canonical import canonical_json_bytes
 from pcbflow.config import Settings
 from pcbflow.container import build_container
 from pcbflow.domain import TaskLease, TaskStatus
 from pcbflow.kicad import KicadCapability, RawValidationReport
-from pcbflow.proposals import ProposalStatus
+from pcbflow.design_tables import ChangeProposalRow
+from pcbflow.proposals import EvidenceSet, ProposalStatus
 from pcbflow.repositories import StaleLeaseError
 from pcbflow.validation import ProjectCopyLimitError, assert_project_tree_safe
-from pcbflow.tables import TaskRow
+from pcbflow.tables import ArtifactRow, EvidenceRow, TaskRow
 from sqlalchemy import update
 from pcbflow.tasks import TerminalTaskError
 
@@ -167,6 +169,39 @@ def test_erc_failure_never_becomes_reviewable_or_advances_revision(tmp_path: Pat
         container.dispose()
 
 
+def test_post_commit_integrity_failure_rebuilds_failed_evidence_set(
+    tmp_path: Path,
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    container = build_container(_settings(tmp_path, fixtures / "modules"), kicad_override=FakeProposalKicad(), clock=lambda: NOW)
+    try:
+        _source, project, requirement_set = _prepare(container, tmp_path)
+        proposal = container.proposals.create(_instantiate_batch(project, requirement_set), "execute-status-led")
+        original_verify = container.artifacts.verify
+
+        def fail_evidence_set_verification(digest: str) -> bool:
+            try:
+                EvidenceSet.model_validate_json(
+                    container.artifacts.open(digest).read(), strict=True
+                )
+            except Exception:
+                return original_verify(digest)
+            return False
+
+        container.artifacts.verify = fail_evidence_set_verification
+        assert container.worker.run_once()
+        failed = container.proposal_store.get(proposal.id)
+        assert failed.status is ProposalStatus.VALIDATION_FAILED
+        assert failed.candidate_revision is None
+        assert failed.evidence_set_digest is not None
+        evidence_set = EvidenceSet.model_validate_json(
+            container.artifacts.open(failed.evidence_set_digest).read(), strict=True
+        )
+        assert evidence_set.candidate_revision is None
+    finally:
+        container.dispose()
+
+
 def test_expired_lease_cannot_mark_proposal_executing(tmp_path: Path) -> None:
     fixtures = Path(__file__).resolve().parents[1] / "fixtures"
     container = build_container(_settings(tmp_path, fixtures / "modules"), kicad_override=FakeProposalKicad(), clock=lambda: NOW)
@@ -221,6 +256,59 @@ def test_ready_replay_rejects_corrupted_evidence_object(tmp_path: Path) -> None:
             session.execute(update(TaskRow).where(TaskRow.id == proposal.task_id).values(
                 status=TaskStatus.RUNNING.value, lease_token=replay_token,
                 lease_expires_at=NOW + timedelta(seconds=60)))
+        lease = TaskLease(proposal.task_id, "design.execute_proposal", {"proposal_id": proposal.id}, replay_token, NOW + timedelta(seconds=60), 2)
+        with pytest.raises(TerminalTaskError, match="stored proposal evidence integrity"):
+            container.proposal_executor(lease)
+    finally:
+        container.dispose()
+
+
+@pytest.mark.parametrize("corruption", ["duplicate_kind", "media_type"])
+def test_ready_replay_rejects_invalid_evidence_set_contract(
+    tmp_path: Path, corruption: str
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    container = build_container(_settings(tmp_path, fixtures / "modules"), kicad_override=FakeProposalKicad(), clock=lambda: NOW)
+    try:
+        _source, project, requirement_set = _prepare(container, tmp_path)
+        proposal = container.proposals.create(_instantiate_batch(project, requirement_set), "execute-status-led")
+        assert container.worker.run_once()
+        ready = container.proposal_store.get(proposal.id)
+        assert ready.evidence_set_digest is not None
+        evidence_set = EvidenceSet.model_validate_json(
+            container.artifacts.open(ready.evidence_set_digest).read(), strict=True
+        )
+        value = evidence_set.model_dump(mode="json")
+        if corruption == "duplicate_kind":
+            value["artifacts"].append(value["artifacts"][0].copy())
+        else:
+            value["artifacts"][0]["media_type"] = "text/plain"
+        descriptor = container.artifacts.put_bytes(
+            canonical_json_bytes(value), "application/json"
+        )
+        result = dict(ready.result or {})
+        result["evidence_set_digest"] = descriptor.digest
+        replay_token = "replay-token"
+        with container.sessions.begin() as session:
+            session.add(ArtifactRow(
+                digest=descriptor.digest,
+                size=descriptor.size,
+                media_type=descriptor.media_type,
+                storage_path=str(descriptor.path),
+                created_at=NOW,
+            ))
+            session.execute(update(EvidenceRow).where(
+                EvidenceRow.task_id == proposal.task_id,
+                EvidenceRow.kind == "proposal_evidence_set",
+            ).values(artifact_digest=descriptor.digest))
+            session.execute(update(ChangeProposalRow).where(
+                ChangeProposalRow.id == proposal.id,
+            ).values(evidence_set_digest=descriptor.digest, result_json=result))
+            session.execute(update(TaskRow).where(TaskRow.id == proposal.task_id).values(
+                status=TaskStatus.RUNNING.value,
+                lease_token=replay_token,
+                lease_expires_at=NOW + timedelta(seconds=60),
+            ))
         lease = TaskLease(proposal.task_id, "design.execute_proposal", {"proposal_id": proposal.id}, replay_token, NOW + timedelta(seconds=60), 2)
         with pytest.raises(TerminalTaskError, match="stored proposal evidence integrity"):
             container.proposal_executor(lease)

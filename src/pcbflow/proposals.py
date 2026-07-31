@@ -92,6 +92,21 @@ class EvidenceSet(BaseModel):
     artifacts: tuple[EvidenceItem, ...]
 
 
+READY_EVIDENCE_MEDIA_TYPES = {
+    "design_command_batch": "application/json",
+    "project_snapshot_before": "application/json",
+    "project_snapshot_after": "application/json",
+    "git_text_diff": "application/octet-stream",
+    "schematic_semantic_diff": "application/json",
+    "kicad_erc": "application/json",
+    "command_execution_log": "application/json",
+    "adapter_capability_report": "application/json",
+}
+READY_EVIDENCE_KINDS = frozenset(
+    (*READY_EVIDENCE_MEDIA_TYPES, "proposal_evidence_set")
+)
+
+
 @dataclass(frozen=True, slots=True)
 class EvidenceRegistration:
     descriptor: ArtifactDescriptor
@@ -216,14 +231,21 @@ class ProposalExecutor:
         self._tasks.assert_active(lease.task_id, lease.lease_token, now)
         if proposal.status is ProposalStatus.READY_FOR_REVIEW and proposal.result is not None and self._revisions.resolve_proposal_ref(project.id, proposal.id) == proposal.candidate_revision:
             records = [item for item in self._evidence.list_for_project(project.id) if item.task_id == lease.task_id]
-            required_kinds = {
-                "design_command_batch", "project_snapshot_before", "project_snapshot_after",
-                "git_text_diff", "schematic_semantic_diff", "kicad_erc",
-                "command_execution_log", "adapter_capability_report", "proposal_evidence_set",
-            }
             by_kind = {item.kind: item for item in records}
-            valid_contract = set(by_kind) == required_kinds and all(
-                self._artifacts.verify(item.artifact_digest) for item in records
+            valid_contract = (
+                proposal.candidate_revision is not None
+                and proposal.candidate_snapshot_digest is not None
+                and proposal.review_digest is not None
+                and proposal.semantic_diff_digest is not None
+                and proposal.evidence_set_digest is not None
+                and len(records) == len(READY_EVIDENCE_KINDS)
+                and set(by_kind) == READY_EVIDENCE_KINDS
+                and all(
+                    item.verdict == "pass"
+                    and item.subject == f"{proposal.id}@{proposal.candidate_revision}"
+                    and self._artifacts.verify(item.artifact_digest)
+                    for item in records
+                )
             )
             evidence_row = by_kind.get("proposal_evidence_set")
             if evidence_row is None or evidence_row.artifact_digest != proposal.evidence_set_digest:
@@ -233,14 +255,43 @@ class ProposalExecutor:
                     self._artifacts.open(proposal.evidence_set_digest or "").read(), strict=True
                 )
                 evidence_items = {item.kind: item for item in evidence_set.artifacts}
-                valid_contract = valid_contract and evidence_set.project_id == project.id and evidence_set.task_id == lease.task_id and evidence_set.proposal_id == proposal.id and evidence_set.base_revision == batch.base_revision and evidence_set.candidate_revision == proposal.candidate_revision and set(evidence_items) == required_kinds - {"proposal_evidence_set"}
+                valid_contract = valid_contract and all((
+                    evidence_set.project_id == project.id,
+                    evidence_set.task_id == lease.task_id,
+                    evidence_set.proposal_id == proposal.id,
+                    evidence_set.base_revision == batch.base_revision,
+                    evidence_set.candidate_revision == proposal.candidate_revision,
+                    len(evidence_set.artifacts) == len(READY_EVIDENCE_MEDIA_TYPES),
+                    len(evidence_items) == len(READY_EVIDENCE_MEDIA_TYPES),
+                    set(evidence_items) == set(READY_EVIDENCE_MEDIA_TYPES),
+                ))
                 valid_contract = valid_contract and all(
                     by_kind[kind].artifact_digest == item.artifact_digest
                     and by_kind[kind].kind == item.kind
-                    and by_kind[kind].verdict == item.verdict
+                    and by_kind[kind].verdict == item.verdict == "pass"
+                    and item.media_type == READY_EVIDENCE_MEDIA_TYPES[kind]
                     for kind, item in evidence_items.items()
                 )
-                valid_contract = valid_contract and proposal.result.get("candidate_revision") == proposal.candidate_revision and proposal.result.get("evidence_set_digest") == proposal.evidence_set_digest and proposal.result.get("semantic_diff_digest") == proposal.semantic_diff_digest
+                expected_review = proposal_review_digest(
+                    proposal_id=proposal.id,
+                    project_id=project.id,
+                    base_revision=batch.base_revision,
+                    candidate_revision=proposal.candidate_revision or "",
+                    candidate_snapshot_digest=proposal.candidate_snapshot_digest or "",
+                    requirement_set_digest=requirements.canonical_digest,
+                    semantic_diff_digest=proposal.semantic_diff_digest or "",
+                    evidence_set_digest=proposal.evidence_set_digest or "",
+                    adapter_capability_digest=evidence_items["adapter_capability_report"].artifact_digest,
+                )
+                valid_contract = valid_contract and all((
+                    evidence_items["schematic_semantic_diff"].artifact_digest == proposal.semantic_diff_digest,
+                    proposal.review_digest == expected_review,
+                    proposal.result.get("proposal_id") == proposal.id,
+                    proposal.result.get("candidate_revision") == proposal.candidate_revision,
+                    proposal.result.get("review_digest") == proposal.review_digest,
+                    proposal.result.get("evidence_set_digest") == proposal.evidence_set_digest,
+                    proposal.result.get("semantic_diff_digest") == proposal.semantic_diff_digest,
+                ))
             except Exception:
                 valid_contract = False
             if not valid_contract:
@@ -262,6 +313,25 @@ class ProposalExecutor:
                     return descriptor
             evidence.append(registration)
             return descriptor
+        def add_failed_evidence_set():
+            evidence[:] = [
+                item for item in evidence
+                if item.item.kind != "proposal_evidence_set"
+            ]
+            failed_set = EvidenceSet(
+                project_id=project.id,
+                task_id=lease.task_id,
+                proposal_id=proposal_id,
+                base_revision=batch.base_revision,
+                candidate_revision=None,
+                artifacts=tuple(item.item for item in evidence),
+            )
+            return add(
+                "proposal_evidence_set",
+                canonical_json_bytes(failed_set.model_dump(mode="json")),
+                "application/json",
+                "fail",
+            )
         try:
             add("design_command_batch", canonical_json_bytes(batch.model_dump(mode="json")), "application/json")
             capability = self._kicad.probe()
@@ -336,11 +406,7 @@ class ProposalExecutor:
                 self._proposal_store.mark_ready(proposal_id, lease.task_id, lease.lease_token, self._clock(), candidate.revision, candidate.snapshot_digest, review, semantic_descriptor.digest, evidence_set_digest, result, tuple(evidence))
                 return result
         except TerminalTaskError as error:
-            if not any(item.item.kind == "proposal_evidence_set" for item in evidence):
-                failed_set = EvidenceSet(project_id=project.id, task_id=lease.task_id, proposal_id=proposal_id, base_revision=batch.base_revision, candidate_revision=None, artifacts=tuple(item.item for item in evidence))
-                descriptor = add("proposal_evidence_set", canonical_json_bytes(failed_set.model_dump(mode="json")), "application/json", "fail")
-                evidence_set_digest = descriptor.digest
-            else: evidence_set_digest = next(item.item.artifact_digest for item in evidence if item.item.kind == "proposal_evidence_set")
+            evidence_set_digest = add_failed_evidence_set().digest
             digest_map = {item.item.kind: item.item.artifact_digest for item in evidence}
             semantic_digest = digest_map.get("schematic_semantic_diff")
             self._proposal_store.mark_validation_failed(proposal_id, lease.task_id, lease.lease_token, self._clock(), error.code, semantic_digest, evidence_set_digest, {"error_code": error.code, "artifact_digests": digest_map}, tuple(evidence))
@@ -349,12 +415,7 @@ class ProposalExecutor:
             raise
         except Exception as error:
             failed = TerminalTaskError("CANDIDATE_VALIDATION_FAILED", str(error))
-            if not any(item.item.kind == "proposal_evidence_set" for item in evidence):
-                failed_set = EvidenceSet(project_id=project.id, task_id=lease.task_id, proposal_id=proposal_id, base_revision=batch.base_revision, candidate_revision=None, artifacts=tuple(item.item for item in evidence))
-                descriptor = add("proposal_evidence_set", canonical_json_bytes(failed_set.model_dump(mode="json")), "application/json", "fail")
-                evidence_set_digest = descriptor.digest
-            else:
-                evidence_set_digest = next(item.item.artifact_digest for item in evidence if item.item.kind == "proposal_evidence_set")
+            evidence_set_digest = add_failed_evidence_set().digest
             digest_map = {item.item.kind: item.item.artifact_digest for item in evidence}
             self._proposal_store.mark_validation_failed(proposal_id, lease.task_id, lease.lease_token, self._clock(), failed.code, digest_map.get("schematic_semantic_diff"), evidence_set_digest, {"error_code": failed.code, "artifact_digests": digest_map}, tuple(evidence))
             raise failed from error

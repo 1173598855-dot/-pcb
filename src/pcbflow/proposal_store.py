@@ -19,6 +19,8 @@ from pcbflow.proposals import (
     DESIGN_PROPOSAL_TASK_KIND,
     ChangeProposal,
     ProposalStatus,
+    READY_EVIDENCE_KINDS,
+    READY_EVIDENCE_MEDIA_TYPES,
 )
 from pcbflow.repositories import IdempotencyConflictError, StaleLeaseError, EvidenceConflictError
 from pcbflow.tables import ArtifactRow, EvidenceRow, TaskRow
@@ -329,8 +331,13 @@ class ProposalStore:
             if row.status == ProposalStatus.READY_FOR_REVIEW.value: return _proposal(row)
             if row.status != ProposalStatus.EXECUTING.value: raise StaleLeaseError(task_id)
             kinds = {r.item.kind for r in evidence}
-            if "proposal_evidence_set" not in kinds: raise ValueError("proposal evidence set is required")
+            if len(evidence) != len(READY_EVIDENCE_KINDS) or kinds != READY_EVIDENCE_KINDS:
+                raise ValueError("incomplete proposal evidence")
             evidence_set_registration = next(r for r in evidence if r.item.kind == "proposal_evidence_set")
+            if (evidence_set_registration.descriptor.digest != evidence_set_digest
+                    or evidence_set_registration.item.verdict != "pass"
+                    or evidence_set_registration.item.media_type != "application/json"):
+                raise ValueError("proposal evidence set digest mismatch")
             try:
                 evidence_set = EvidenceSet.model_validate_json(
                     evidence_set_registration.descriptor.path.read_bytes(), strict=True
@@ -343,13 +350,18 @@ class ProposalStore:
                     or evidence_set.base_revision != batch_row.base_revision
                     or evidence_set.candidate_revision != candidate_revision):
                 raise ValueError("proposal evidence set binding mismatch")
-            required_kinds = {
-                "design_command_batch", "project_snapshot_before", "project_snapshot_after",
-                "git_text_diff", "schematic_semantic_diff", "kicad_erc",
-                "command_execution_log", "adapter_capability_report", "proposal_evidence_set",
-            }
-            if kinds != required_kinds:
-                raise ValueError("incomplete proposal evidence")
+            evidence_items = {item.kind: item for item in evidence_set.artifacts}
+            registrations = {item.item.kind: item for item in evidence}
+            if (len(evidence_set.artifacts) != len(READY_EVIDENCE_MEDIA_TYPES)
+                    or len(evidence_items) != len(READY_EVIDENCE_MEDIA_TYPES)
+                    or set(evidence_items) != set(READY_EVIDENCE_MEDIA_TYPES)
+                    or any(
+                        item.media_type != READY_EVIDENCE_MEDIA_TYPES[kind]
+                        or item.verdict != "pass"
+                        or registrations[kind].item != item
+                        for kind, item in evidence_items.items()
+                    )):
+                raise ValueError("invalid proposal evidence set contents")
             self._register_evidence(session, row, evidence, now, f"{proposal_id}@{candidate_revision}")
             changed = session.execute(update(ChangeProposalRow).where(ChangeProposalRow.id == proposal_id, ChangeProposalRow.task_id == task_id, ChangeProposalRow.version == row.version).values(
                 status=ProposalStatus.READY_FOR_REVIEW.value, candidate_revision=candidate_revision,
