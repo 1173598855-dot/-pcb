@@ -9,11 +9,14 @@ import pytest
 
 from pcbflow.config import Settings
 from pcbflow.container import build_container
-from pcbflow.domain import TaskStatus
+from pcbflow.domain import TaskLease, TaskStatus
 from pcbflow.kicad import KicadCapability, RawValidationReport
 from pcbflow.proposals import ProposalStatus
 from pcbflow.repositories import StaleLeaseError
 from pcbflow.validation import ProjectCopyLimitError, assert_project_tree_safe
+from pcbflow.tables import TaskRow
+from sqlalchemy import update
+from pcbflow.tasks import TerminalTaskError
 
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
 PASSING_ERC = b'{"version":"1.0","source":"board.kicad_sch","violations":[]}'
@@ -155,6 +158,28 @@ def test_fence_is_rechecked_after_execution_begins(tmp_path: Path) -> None:
         with pytest.raises(StaleLeaseError):
             container.tasks.assert_active(lease.task_id, lease.lease_token, NOW + timedelta(seconds=1))
         assert container.proposal_store.get(proposal.id).status is ProposalStatus.EXECUTING
+    finally:
+        container.dispose()
+
+
+def test_ready_replay_rejects_corrupted_evidence_object(tmp_path: Path) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    container = build_container(_settings(tmp_path, fixtures / "modules"), kicad_override=FakeProposalKicad(), clock=lambda: NOW)
+    try:
+        _source, project, requirement_set = _prepare(container, tmp_path)
+        proposal = container.proposals.create(_instantiate_batch(project, requirement_set), "execute-status-led")
+        assert container.worker.run_once()
+        ready = container.proposal_store.get(proposal.id)
+        evidence = next(item for item in container.evidence.list_for_project(project.id) if item.task_id == proposal.task_id)
+        Path(container.artifacts._path(evidence.artifact_digest)).write_bytes(b"corrupt replay evidence")
+        replay_token = "replay-token"
+        with container.sessions.begin() as session:
+            session.execute(update(TaskRow).where(TaskRow.id == proposal.task_id).values(
+                status=TaskStatus.RUNNING.value, lease_token=replay_token,
+                lease_expires_at=NOW + timedelta(seconds=60)))
+        lease = TaskLease(proposal.task_id, "design.execute_proposal", {"proposal_id": proposal.id}, replay_token, NOW + timedelta(seconds=60), 2)
+        with pytest.raises(TerminalTaskError, match="stored proposal evidence integrity"):
+            container.proposal_executor(lease)
     finally:
         container.dispose()
 
