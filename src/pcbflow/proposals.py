@@ -215,6 +215,9 @@ class ProposalExecutor:
         requirements = self._requirements.get(batch.requirement_set_id)
         self._tasks.assert_active(lease.task_id, lease.lease_token, now)
         if proposal.status is ProposalStatus.READY_FOR_REVIEW and proposal.result is not None and self._revisions.resolve_proposal_ref(project.id, proposal.id) == proposal.candidate_revision:
+            records = [item for item in self._evidence.list_for_project(project.id) if item.task_id == lease.task_id]
+            if not records or not all(self._artifacts.verify(item.artifact_digest) for item in records):
+                raise TerminalTaskError("CANDIDATE_VALIDATION_FAILED", "stored proposal evidence integrity check failed")
             return proposal.result
         if proposal.status is ProposalStatus.VALIDATION_FAILED:
             raise TerminalTaskError(proposal.last_error_code or "CANDIDATE_VALIDATION_FAILED", "proposal validation already failed")
@@ -246,6 +249,12 @@ class ProposalExecutor:
                 applied = self._adapter.apply(workspace, batch.commands)
                 after = applied.after
                 capability_descriptor = add("adapter_capability_report", canonical_json_bytes({"adapter_contract": applied.capability_report.adapter_contract, "kicad_major": applied.capability_report.kicad_major, "supported_operations": applied.capability_report.supported_operations, "module_digests": applied.capability_report.module_digests}), "application/json")
+                for modified_path in applied.modified_files:
+                    candidate_path = workspace / modified_path
+                    try:
+                        candidate_path.resolve(strict=False).relative_to(workspace.resolve())
+                    except ValueError as error:
+                        raise TerminalTaskError("PROJECT_PATH_OUTSIDE_WORKTREE", "adapter modified a path outside the worktree") from error
                 assert_project_tree_safe(workspace, max_files=self._max_files, max_bytes=self._max_bytes)
                 attributions = tuple(CommandAttribution(command_id=result.command_id, requirement_ids=next(c.provenance.requirement_ids for c in batch.commands if c.command_id == result.command_id), risk=next(c.risk for c in batch.commands if c.command_id == result.command_id), selectors=result.effects) for result in applied.command_results)
                 semantic = build_semantic_diff(before, after, attributions)
@@ -255,8 +264,10 @@ class ProposalExecutor:
                 reports = self._kicad.validate(workspace, workspace.parent / "validation-output")
                 ercs = [report for report in reports if report.kind == "erc"]
                 if len(ercs) != 1: raise TerminalTaskError("CANDIDATE_VALIDATION_FAILED", "exactly one ERC report is required")
+                erc_descriptor = add("kicad_erc", ercs[0].data, "application/json", "pass")
                 parsed = parse_kicad_report("erc", ercs[0].data)
-                erc_descriptor = add("kicad_erc", ercs[0].data, "application/json", "fail" if parsed.findings else "pass")
+                if parsed.findings:
+                    evidence[-1] = EvidenceRegistration(erc_descriptor, EvidenceItem(kind="kicad_erc", artifact_digest=erc_descriptor.digest, media_type="application/json", verdict="fail"))
                 after_descriptor = add("project_snapshot_after", self._manifest(workspace, self._revisions), "application/json")
                 diff_bytes = self._revisions.git.diff_worktree(workspace)
                 diff_descriptor = add("git_text_diff", diff_bytes, "application/octet-stream")
