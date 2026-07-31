@@ -216,7 +216,34 @@ class ProposalExecutor:
         self._tasks.assert_active(lease.task_id, lease.lease_token, now)
         if proposal.status is ProposalStatus.READY_FOR_REVIEW and proposal.result is not None and self._revisions.resolve_proposal_ref(project.id, proposal.id) == proposal.candidate_revision:
             records = [item for item in self._evidence.list_for_project(project.id) if item.task_id == lease.task_id]
-            if not records or not all(self._artifacts.verify(item.artifact_digest) for item in records):
+            required_kinds = {
+                "design_command_batch", "project_snapshot_before", "project_snapshot_after",
+                "git_text_diff", "schematic_semantic_diff", "kicad_erc",
+                "command_execution_log", "adapter_capability_report", "proposal_evidence_set",
+            }
+            by_kind = {item.kind: item for item in records}
+            valid_contract = set(by_kind) == required_kinds and all(
+                self._artifacts.verify(item.artifact_digest) for item in records
+            )
+            evidence_row = by_kind.get("proposal_evidence_set")
+            if evidence_row is None or evidence_row.artifact_digest != proposal.evidence_set_digest:
+                valid_contract = False
+            try:
+                evidence_set = EvidenceSet.model_validate_json(
+                    self._artifacts.open(proposal.evidence_set_digest or "").read(), strict=True
+                )
+                evidence_items = {item.kind: item for item in evidence_set.artifacts}
+                valid_contract = valid_contract and evidence_set.project_id == project.id and evidence_set.task_id == lease.task_id and evidence_set.proposal_id == proposal.id and evidence_set.base_revision == batch.base_revision and evidence_set.candidate_revision == proposal.candidate_revision and set(evidence_items) == required_kinds - {"proposal_evidence_set"}
+                valid_contract = valid_contract and all(
+                    by_kind[kind].artifact_digest == item.artifact_digest
+                    and by_kind[kind].kind == item.kind
+                    and by_kind[kind].verdict == item.verdict
+                    for kind, item in evidence_items.items()
+                )
+                valid_contract = valid_contract and proposal.result.get("candidate_revision") == proposal.candidate_revision and proposal.result.get("evidence_set_digest") == proposal.evidence_set_digest and proposal.result.get("semantic_diff_digest") == proposal.semantic_diff_digest
+            except Exception:
+                valid_contract = False
+            if not valid_contract:
                 raise TerminalTaskError("CANDIDATE_VALIDATION_FAILED", "stored proposal evidence integrity check failed")
             return proposal.result
         if proposal.status is ProposalStatus.VALIDATION_FAILED:
@@ -227,15 +254,23 @@ class ProposalExecutor:
         candidate_revision: str | None = None
         def add(kind, data, media="application/octet-stream", verdict="pass"):
             descriptor = self._put(data, media); evidence.append(EvidenceRegistration(descriptor, EvidenceItem(kind=kind, artifact_digest=descriptor.digest, media_type=media, verdict=verdict))); return descriptor
+        def replace(kind, descriptor, verdict="pass"):
+            registration = EvidenceRegistration(descriptor, EvidenceItem(kind=kind, artifact_digest=descriptor.digest, media_type=descriptor.media_type, verdict=verdict))
+            for index, item in enumerate(evidence):
+                if item.item.kind == kind:
+                    evidence[index] = registration
+                    return descriptor
+            evidence.append(registration)
+            return descriptor
         try:
             add("design_command_batch", canonical_json_bytes(batch.model_dump(mode="json")), "application/json")
-            if project.mode is not ProjectMode.MANAGED or project.current_revision != batch.base_revision or requirements.status is not RequirementSetStatus.FROZEN or project.active_requirement_set_id != requirements.id:
-                raise TerminalTaskError("DESIGN_COMMAND_PRECONDITION_FAILED", "proposal base is no longer current")
-            if requirements.frozen_revision is None or not self._revisions.is_ancestor(project.id, requirements.frozen_revision, batch.base_revision):
-                raise TerminalTaskError("DESIGN_COMMAND_PRECONDITION_FAILED", "requirement revision is not an ancestor")
             capability = self._kicad.probe()
-            if not capability.available or not capability.version or int(capability.version.split(".", 1)[0]) != 9:
-                raise TerminalTaskError("KICAD_CLI_UNAVAILABLE", capability.reason or "KiCad 9 is required")
+            capability_descriptor = add("adapter_capability_report", canonical_json_bytes({
+                "adapter_contract": "pcbflow.schematic.cst.v1", "kicad_major": 9,
+                "kicad": {"available": capability.available, "version": capability.version,
+                          "executable_digest": capability.executable_digest, "reason": capability.reason},
+            }), "application/json")
+            add("command_execution_log", canonical_json_bytes({"stage": "preflight", "preconditions": []}), "application/json")
             with self._revisions.materialize(project.id, batch.base_revision, "proposal") as workspace:
                 self._revisions.assert_clean(project.id, batch.base_revision, workspace)
                 before_manifest = add("project_snapshot_before", self._manifest(workspace, self._revisions), "application/json")
@@ -243,12 +278,21 @@ class ProposalExecutor:
                 assert capability is not None
                 context = _PreconditionContext(before, batch.base_revision, requirements.canonical_digest, capability)
                 results = [evaluate_precondition(precondition, context) for command in batch.commands for precondition in command.preconditions]
-                add("command_execution_log", canonical_json_bytes({"preconditions": [result.model_dump(mode="json") for result in results]}), "application/json")
+                execution_descriptor = self._put(canonical_json_bytes({"preconditions": [result.model_dump(mode="json") for result in results]}), "application/json")
+                replace("command_execution_log", execution_descriptor)
+                if not capability.available or not capability.version or int(capability.version.split(".", 1)[0]) != 9:
+                    raise TerminalTaskError("KICAD_CLI_UNAVAILABLE", capability.reason or "KiCad 9 is required")
+                if project.mode is not ProjectMode.MANAGED or project.current_revision != batch.base_revision or requirements.status is not RequirementSetStatus.FROZEN or project.active_requirement_set_id != requirements.id:
+                    raise TerminalTaskError("DESIGN_COMMAND_PRECONDITION_FAILED", "proposal base is no longer current")
+                if requirements.frozen_revision is None or not self._revisions.is_ancestor(project.id, requirements.frozen_revision, batch.base_revision):
+                    raise TerminalTaskError("DESIGN_COMMAND_PRECONDITION_FAILED", "requirement revision is not an ancestor")
                 if any(result.state.value != "true" for result in results):
                     raise TerminalTaskError("DESIGN_COMMAND_PRECONDITION_FAILED", "a design command precondition failed")
                 applied = self._adapter.apply(workspace, batch.commands)
                 after = applied.after
-                capability_descriptor = add("adapter_capability_report", canonical_json_bytes({"adapter_contract": applied.capability_report.adapter_contract, "kicad_major": applied.capability_report.kicad_major, "supported_operations": applied.capability_report.supported_operations, "module_digests": applied.capability_report.module_digests}), "application/json")
+                applied_capability_descriptor = self._put(canonical_json_bytes({"adapter_contract": applied.capability_report.adapter_contract, "kicad_major": applied.capability_report.kicad_major, "supported_operations": applied.capability_report.supported_operations, "module_digests": applied.capability_report.module_digests}), "application/json")
+                replace("adapter_capability_report", applied_capability_descriptor)
+                capability_descriptor = applied_capability_descriptor
                 for modified_path in applied.modified_files:
                     candidate_path = workspace / modified_path
                     try:
@@ -293,7 +337,7 @@ class ProposalExecutor:
                 return result
         except TerminalTaskError as error:
             if not any(item.item.kind == "proposal_evidence_set" for item in evidence):
-                failed_set = EvidenceSet(project_id=project.id, task_id=lease.task_id, proposal_id=proposal_id, base_revision=batch.base_revision, candidate_revision=candidate_revision, artifacts=tuple(item.item for item in evidence))
+                failed_set = EvidenceSet(project_id=project.id, task_id=lease.task_id, proposal_id=proposal_id, base_revision=batch.base_revision, candidate_revision=None, artifacts=tuple(item.item for item in evidence))
                 descriptor = add("proposal_evidence_set", canonical_json_bytes(failed_set.model_dump(mode="json")), "application/json", "fail")
                 evidence_set_digest = descriptor.digest
             else: evidence_set_digest = next(item.item.artifact_digest for item in evidence if item.item.kind == "proposal_evidence_set")
@@ -306,7 +350,7 @@ class ProposalExecutor:
         except Exception as error:
             failed = TerminalTaskError("CANDIDATE_VALIDATION_FAILED", str(error))
             if not any(item.item.kind == "proposal_evidence_set" for item in evidence):
-                failed_set = EvidenceSet(project_id=project.id, task_id=lease.task_id, proposal_id=proposal_id, base_revision=batch.base_revision, candidate_revision=candidate_revision, artifacts=tuple(item.item for item in evidence))
+                failed_set = EvidenceSet(project_id=project.id, task_id=lease.task_id, proposal_id=proposal_id, base_revision=batch.base_revision, candidate_revision=None, artifacts=tuple(item.item for item in evidence))
                 descriptor = add("proposal_evidence_set", canonical_json_bytes(failed_set.model_dump(mode="json")), "application/json", "fail")
                 evidence_set_digest = descriptor.digest
             else:

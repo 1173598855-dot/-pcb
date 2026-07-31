@@ -36,6 +36,11 @@ class FakeProposalKicad:
         return (RawValidationReport("erc", self.report, ("kicad-cli", "sch", "erc"), 0, "9.0.2"),)
 
 
+class UnavailableProposalKicad(FakeProposalKicad):
+    def probe(self) -> KicadCapability:
+        return KicadCapability(False, None, None, None, "kicad_cli_not_found")
+
+
 def test_container_exposes_the_injected_kicad_port(tmp_path: Path) -> None:
     fixtures = Path(__file__).resolve().parents[1] / "fixtures"
     fake = FakeProposalKicad()
@@ -51,6 +56,39 @@ def test_candidate_tree_limits_are_enforced_before_persistence(tmp_path: Path) -
     (tmp_path / "two").write_bytes(b"2")
     with pytest.raises(ProjectCopyLimitError, match="more than 1 files"):
         assert_project_tree_safe(tmp_path, max_files=1, max_bytes=100)
+
+
+def test_early_precondition_failure_persists_baseline_evidence(tmp_path: Path) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    container = build_container(_settings(tmp_path, fixtures / "modules"), kicad_override=FakeProposalKicad(), clock=lambda: NOW)
+    try:
+        _source, project, requirement_set = _prepare(container, tmp_path)
+        value = json.loads(_instantiate_batch(project, requirement_set))
+        value["commands"][0]["preconditions"][0]["revision"] = "git:" + "0" * 40
+        proposal = container.proposals.create(json.dumps(value, separators=(",", ":")).encode(), "execute-status-led")
+        assert container.worker.run_once()
+        failed = container.proposal_store.get(proposal.id)
+        kinds = {item.kind for item in container.evidence.list_for_project(project.id) if item.task_id == proposal.task_id}
+        assert failed.status is ProposalStatus.VALIDATION_FAILED
+        assert {"design_command_batch", "project_snapshot_before", "command_execution_log", "adapter_capability_report", "proposal_evidence_set"} <= kinds
+    finally:
+        container.dispose()
+
+
+def test_kicad_unavailable_persists_baseline_evidence(tmp_path: Path) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    container = build_container(_settings(tmp_path, fixtures / "modules"), kicad_override=UnavailableProposalKicad(), clock=lambda: NOW)
+    try:
+        _source, project, requirement_set = _prepare(container, tmp_path)
+        proposal = container.proposals.create(_instantiate_batch(project, requirement_set), "execute-status-led")
+        assert container.worker.run_once()
+        failed = container.proposal_store.get(proposal.id)
+        kinds = {item.kind for item in container.evidence.list_for_project(project.id) if item.task_id == proposal.task_id}
+        assert failed.status is ProposalStatus.VALIDATION_FAILED
+        assert failed.last_error_code == "KICAD_CLI_UNAVAILABLE"
+        assert {"design_command_batch", "project_snapshot_before", "command_execution_log", "adapter_capability_report", "proposal_evidence_set"} <= kinds
+    finally:
+        container.dispose()
 
 
 def _settings(tmp_path: Path, module_catalog: Path) -> Settings:
@@ -151,13 +189,19 @@ def test_fence_is_rechecked_after_execution_begins(tmp_path: Path) -> None:
     try:
         _source, project, requirement_set = _prepare(container, tmp_path)
         proposal = container.proposals.create(_instantiate_batch(project, requirement_set), "execute-status-led")
-        lease = container.tasks.claim_next("worker-a", NOW, 1)
-        assert lease is not None
-        container.tasks.start(lease.task_id, lease.lease_token, NOW)
-        container.proposal_executor.begin(lease, now=NOW)
-        with pytest.raises(StaleLeaseError):
-            container.tasks.assert_active(lease.task_id, lease.lease_token, NOW + timedelta(seconds=1))
+        original_assert_active = container.tasks.assert_active
+        calls = 0
+
+        def expiring_assert_active(task_id, lease_token, now):
+            nonlocal calls
+            calls += 1
+            return original_assert_active(task_id, lease_token, NOW + timedelta(seconds=61) if calls >= 3 else now)
+
+        container.tasks.assert_active = expiring_assert_active
+        assert container.worker.run_once()
         assert container.proposal_store.get(proposal.id).status is ProposalStatus.EXECUTING
+        assert container.revisions.resolve_proposal_ref(project.id, proposal.id) is None
+        assert container.proposal_store.get(proposal.id).candidate_revision is None
     finally:
         container.dispose()
 
