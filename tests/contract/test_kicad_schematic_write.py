@@ -14,7 +14,7 @@ from pcbflow.schematic.modules import FileModuleCatalog
 
 
 @pytest.mark.kicad
-def test_real_kicad9_validates_controlled_write_and_all_goldens(
+def test_real_kicad_validates_versioned_fixture(
     tmp_path: Path,
 ) -> None:
     executable = KicadCli.locate()
@@ -22,42 +22,51 @@ def test_real_kicad9_validates_controlled_write_and_all_goldens(
         pytest.skip("kicad-cli is not installed")
     kicad = KicadCli(ProcessRunner(2_000_000), executable, 120)
     capability = kicad.probe()
-    if (
-        not capability.available
-        or capability.version is None
-        or not capability.version.startswith("9.")
-    ):
-        pytest.skip("supported KiCad 9 CLI is not available")
+    if not capability.available or capability.major not in (9, 10):
+        pytest.skip("a verified KiCad 9 or 10 CLI is not available")
 
     fixtures = Path(__file__).resolve().parents[1] / "fixtures"
-    project = tmp_path / "KiCad 9 controlled candidate"
-    shutil.copytree(fixtures / "kicad" / "controlled-design", project)
-    adapter = CstSchematicAdapter(
-        FileModuleCatalog(fixtures / "modules", max_files=32, max_bytes=2_000_000)
+    project = tmp_path / f"KiCad {capability.major} validation"
+    shutil.copytree(
+        fixtures / "kicad" / "real" / str(capability.major) / "validation",
+        project,
     )
-    command = load_command_batch(json.dumps(_real_kicad_batch()).encode()).commands[0]
-    adapter.apply(project, (command,))
-    _assert_erc(kicad, project, tmp_path / "erc-controlled", False)
+    reports = kicad.validate(project, tmp_path / "validation-output")
+    assert {report.kind for report in reports} == {"erc", "drc"}
+    assert all(report.profile_id == capability.profile_id for report in reports)
+    assert all(report.profile_revision == capability.profile_revision for report in reports)
 
-    cases = (
-        ("blank", False),
-        ("simple", False),
-        ("hierarchical", False),
-        ("unicode", False),
-        ("multi-unit", False),
-        ("custom-properties", False),
-        ("erc-error", True),
+
+@pytest.mark.kicad
+def test_real_kicad10_controlled_write_uses_profile(tmp_path: Path) -> None:
+    executable = KicadCli.locate()
+    if executable is None:
+        pytest.skip("kicad-cli is not installed")
+    kicad = KicadCli(ProcessRunner(2_000_000), executable, 120)
+    capability = kicad.probe()
+    if not capability.available or capability.major != 10:
+        pytest.skip("verified KiCad 10 CLI is not available")
+
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    project = tmp_path / "KiCad 10 controlled candidate"
+    shutil.copytree(
+        fixtures / "kicad" / "real" / "10" / "controlled-write",
+        project,
     )
-    golden_root = fixtures / "kicad" / "golden"
-    for directory, expect_findings in cases:
-        golden = tmp_path / f"golden {directory}"
-        shutil.copytree(golden_root / directory, golden)
-        _assert_erc(
-            kicad,
-            golden,
-            tmp_path / f"erc-{directory}",
-            expect_findings,
-        )
+    adapter = CstSchematicAdapter(None)
+    before = adapter.inspect(project, kicad_major=10)
+    symbol = before.symbols[0]
+    command = load_command_batch(
+        json.dumps(_real_set_property_batch(symbol.ref)).encode()
+    ).commands[0]
+    result = adapter.apply(project, (command,), kicad_major=10)
+
+    assert result.after.kicad_major == 10
+    assert next(item for item in result.after.symbols if item.ref == symbol.ref).value == "KICAD10"
+    reports = kicad.validate(project, tmp_path / "erc-controlled")
+    erc = next(report for report in reports if report.kind == "erc")
+    assert parse_kicad_report("erc", erc.data)
+    assert erc.profile_id == "kicad-10-v1"
 
 
 def _assert_erc(
@@ -71,6 +80,49 @@ def _assert_erc(
     assert len(erc) == 1
     findings = parse_kicad_report("erc", erc[0].data).findings
     assert bool(findings) is expect_findings
+
+
+def _real_set_property_batch(symbol_ref) -> dict[str, object]:
+    actor = {"type": "human", "id": "contract-test"}
+    command = {
+        "schema_version": "1.0",
+        "command_id": "cmd_real_kicad_set_property",
+        "batch_id": "bat_real_kicad_set_property",
+        "project_id": "prj_real_kicad",
+        "base_revision": "git:" + "1" * 40,
+        "idempotency_key": "real-kicad-set-property:1",
+        "actor": actor,
+        "intent": "Set a verified schematic property",
+        "risk": "low",
+        "preconditions": [],
+        "operation": {
+            "type": "schematic.set_property",
+            "payload": {
+                "subject_ref": symbol_ref.model_dump(mode="json"),
+                "property_name": "Value",
+                "value": "KICAD10",
+                "expected_old_value": None,
+            },
+        },
+        "required_validations": ["semantic_diff", "kicad_erc"],
+        "provenance": {
+            "requirement_ids": ["REQ-FUNC-001"],
+            "evidence_ids": [],
+            "module_revision_ids": [],
+        },
+    }
+    return {
+        "schema_version": "1.0",
+        "batch_id": "bat_real_kicad_set_property",
+        "project_id": "prj_real_kicad",
+        "base_revision": "git:" + "1" * 40,
+        "requirement_set_id": "reqset_real_kicad",
+        "idempotency_key": "real-kicad-set-property",
+        "actor": actor,
+        "intent": "Set a verified schematic property",
+        "risk": "low",
+        "commands": [command],
+    }
 
 
 def _real_kicad_batch() -> dict[str, object]:
