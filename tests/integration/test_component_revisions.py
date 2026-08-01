@@ -139,6 +139,15 @@ def test_component_import_enforces_cumulative_byte_limit(
     assert container.component_store.list_for_component("Acme:LED-0603-RED") == ()
 
 
+def test_component_import_rejects_nonpositive_byte_limit(container) -> None:
+    with pytest.raises(ValueError, match="byte limit must be positive"):
+        type(container.components)(
+            container.component_store,
+            container.artifacts,
+            max_bytes=0,
+        )
+
+
 def test_component_import_replays_identical_import(
     container, component_directory: Path
 ) -> None:
@@ -294,4 +303,36 @@ def test_component_revision_store_rejects_replay_with_conflicting_artifact_metad
             canonical_digest=component_manifest_digest(manifest),
             idempotency_key="component-led-metadata-1",
             artifacts=conflicting,
+        )
+
+
+def test_component_revision_store_rejects_empty_idempotency_key(
+    session_factory, artifact_store
+) -> None:
+    from pcbflow.component_store import ComponentRevisionStore
+
+    manifest = _component_manifest(artifact_store)
+    store = ComponentRevisionStore(session_factory)
+    with pytest.raises(ValueError, match="idempotency key must not be empty"):
+        store.create(
+            manifest=manifest,
+            canonical_digest=component_manifest_digest(manifest),
+            idempotency_key="",
+            artifacts=_component_artifacts(artifact_store, manifest),
+        )
+
+
+def test_component_revision_store_rejects_wrong_canonical_digest(
+    session_factory, artifact_store
+) -> None:
+    from pcbflow.component_store import ComponentRevisionStore
+
+    manifest = _component_manifest(artifact_store)
+    store = ComponentRevisionStore(session_factory)
+    with pytest.raises(IdempotencyConflictError):
+        store.create(
+            manifest=manifest,
+            canonical_digest="sha256:" + "0" * 64,
+            idempotency_key="component-led-wrong-digest",
+            artifacts=_component_artifacts(artifact_store, manifest),
         )
