@@ -81,7 +81,25 @@ class ComponentRevisionStore:
         return tuple(expected)
 
     @staticmethod
-    def _matches(row: ComponentRevisionRow, manifest: ComponentManifest, digest: str, artifacts: tuple[ArtifactDescriptor, ...]) -> bool:
+    def _descriptor_matches(
+        session: Session, descriptor: ArtifactDescriptor
+    ) -> bool:
+        row = session.get(ArtifactRow, descriptor.digest)
+        return row is not None and (
+            row.size == descriptor.size
+            and row.media_type == descriptor.media_type
+            and Path(row.storage_path) == descriptor.path
+        )
+
+    @classmethod
+    def _matches(
+        cls,
+        session: Session,
+        row: ComponentRevisionRow,
+        manifest: ComponentManifest,
+        digest: str,
+        artifacts: tuple[ArtifactDescriptor, ...],
+    ) -> bool:
         expected = ComponentRevisionStore._expected_digests(manifest, artifacts)
         return (
             row.component_key == manifest.component_key
@@ -93,6 +111,7 @@ class ComponentRevisionStore:
             and row.symbol_artifact_digest == expected[3]
             and row.footprint_artifact_digest == expected[4]
             and row.model_3d_artifact_digest == (expected[5] if len(expected) == 6 else None)
+            and all(cls._descriptor_matches(session, descriptor) for descriptor in artifacts)
         )
 
     def create(self, *, manifest: ComponentManifest, canonical_digest: str, idempotency_key: str, artifacts: tuple[ArtifactDescriptor, ...]) -> ComponentRevision:
@@ -105,12 +124,12 @@ class ComponentRevisionStore:
             with self._sessions.begin() as session:
                 keyed = session.scalar(select(ComponentRevisionRow).where(ComponentRevisionRow.idempotency_key == idempotency_key))
                 if keyed is not None:
-                    if not self._matches(keyed, manifest, canonical_digest, artifacts):
+                    if not self._matches(session, keyed, manifest, canonical_digest, artifacts):
                         raise IdempotencyConflictError(idempotency_key)
                     return _revision(keyed)
                 identity = session.scalar(select(ComponentRevisionRow).where(ComponentRevisionRow.component_key == manifest.component_key, ComponentRevisionRow.revision == manifest.revision))
                 if identity is not None:
-                    if not self._matches(identity, manifest, canonical_digest, artifacts):
+                    if not self._matches(session, identity, manifest, canonical_digest, artifacts):
                         raise IdempotencyConflictError(idempotency_key)
                     return _revision(identity)
                 for descriptor in artifacts:
@@ -139,7 +158,7 @@ class ComponentRevisionStore:
                 row = session.scalar(select(ComponentRevisionRow).where(ComponentRevisionRow.idempotency_key == idempotency_key))
                 if row is None:
                     row = session.scalar(select(ComponentRevisionRow).where(ComponentRevisionRow.component_key == manifest.component_key, ComponentRevisionRow.revision == manifest.revision))
-                if row is None or not self._matches(row, manifest, canonical_digest, artifacts):
+                if row is None or not self._matches(session, row, manifest, canonical_digest, artifacts):
                     raise IdempotencyConflictError(idempotency_key)
                 return _revision(row)
 

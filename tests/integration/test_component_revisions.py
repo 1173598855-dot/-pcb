@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
+
 from pcbflow.artifacts import ArtifactDescriptor
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.components import component_manifest_digest, load_component_manifest
@@ -118,3 +122,32 @@ def test_component_revision_store_replays_same_identity_with_new_key(
     assert second == first
     assert store.find_by_idempotency_key("component-led-identity-2") is None
     assert store.find_by_identity(manifest.component_key, manifest.revision) == first
+
+
+def test_component_revision_store_rejects_replay_with_conflicting_artifact_metadata(
+    session_factory, artifact_store
+) -> None:
+    from pcbflow.component_store import ComponentRevisionStore
+
+    manifest = _component_manifest(artifact_store)
+    store = ComponentRevisionStore(session_factory)
+    artifacts = _component_artifacts(artifact_store, manifest)
+    store.create(
+        manifest=manifest,
+        canonical_digest=component_manifest_digest(manifest),
+        idempotency_key="component-led-metadata-1",
+        artifacts=artifacts,
+    )
+
+    conflicting = (
+        artifacts[0],
+        replace(artifacts[1], size=artifacts[1].size + 1),
+        *artifacts[2:],
+    )
+    with pytest.raises(IdempotencyConflictError):
+        store.create(
+            manifest=manifest,
+            canonical_digest=component_manifest_digest(manifest),
+            idempotency_key="component-led-metadata-1",
+            artifacts=conflicting,
+        )
