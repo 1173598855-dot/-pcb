@@ -24,6 +24,12 @@ class ComponentAsset(StrictModel):
     media_type: str
     digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
+    @model_validator(mode="after")
+    def reject_dot_paths(self) -> Self:
+        if self.path in {".", ".."}:
+            raise ValueError("component asset path cannot be dot")
+        return self
+
 
 class ComponentManifest(StrictModel):
     schema_version: Literal["1.0"]
@@ -89,12 +95,49 @@ class ComponentRevision:
     idempotency_key: str
     created_at: datetime
 
+    def __post_init__(self) -> None:
+        if self.status != "verified":
+            raise ValueError("component revision status must be verified")
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeySafeLoader,
+    node: yaml.MappingNode,
+    deep: bool = False,
+) -> dict[object, object]:
+    loader.flatten_mapping(node)
+    value: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            if key in value:
+                raise ValueError(f"duplicate YAML key: {key}")
+            value[key] = loader.construct_object(value_node, deep=deep)
+        except TypeError as error:
+            raise ValueError("unhashable YAML key") from error
+    return value
+
+
+_UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
 
 def load_component_manifest(data: bytes) -> ComponentManifest:
-    value = yaml.safe_load(data)
-    if not isinstance(value, dict):
-        raise ValueError("component manifest must be a mapping")
-    return ComponentManifest.model_validate(value, strict=True)
+    try:
+        value = yaml.load(data, Loader=_UniqueKeySafeLoader)
+        if not isinstance(value, dict):
+            raise ValueError("component manifest must be a mapping")
+        return ComponentManifest.model_validate(value, strict=True)
+    except (yaml.YAMLError, TypeError, ValueError) as error:
+        if isinstance(error, ValueError) and str(error) == "component manifest must be a mapping":
+            raise
+        raise ValueError("invalid component manifest") from error
 
 
 def component_manifest_digest(manifest: ComponentManifest) -> str:

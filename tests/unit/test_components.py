@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
-from pcbflow.components import component_manifest_digest, load_component_manifest
+from pcbflow.components import (
+    ComponentRevision,
+    component_manifest_digest,
+    load_component_manifest,
+)
 from tests.component_fixtures import component_yaml
 
 
@@ -49,3 +55,43 @@ def test_manifest_rejects_duplicate_asset_paths_and_key_mismatch() -> None:
     )
     with pytest.raises(ValueError):
         load_component_manifest(mismatch)
+
+
+def test_manifest_rejects_duplicate_yaml_keys_and_parser_errors() -> None:
+    duplicate = component_yaml().replace(
+        b"schema_version: '1.0'\n", b"schema_version: '1.0'\nschema_version: '1.0'\n"
+    )
+    with pytest.raises(ValueError):
+        load_component_manifest(duplicate)
+    for malformed in (b"[", b"- one\n- two\n", b"schema_version: 1.0\n"):
+        with pytest.raises(ValueError):
+            load_component_manifest(malformed)
+
+
+@pytest.mark.parametrize("path", [b".", b".."])
+def test_manifest_rejects_dot_asset_paths(path: bytes) -> None:
+    data = component_yaml().replace(b"path: datasheet.pdf", b"path: " + path)
+    with pytest.raises(ValueError):
+        load_component_manifest(data)
+
+
+def test_component_revision_rejects_non_verified_status() -> None:
+    with pytest.raises(ValueError):
+        ComponentRevision(
+            id="comprev_test",
+            component_key="Acme:LED-0603-RED",
+            manufacturer="Acme",
+            part_number="LED-0603-RED",
+            name="LED",
+            revision="Rev-A",
+            status="draft",
+            canonical_digest="sha256:" + "a" * 64,
+            manifest_artifact_digest="sha256:" + "b" * 64,
+            datasheet_artifact_digest="sha256:" + "c" * 64,
+            pinout_artifact_digest="sha256:" + "d" * 64,
+            symbol_artifact_digest="sha256:" + "e" * 64,
+            footprint_artifact_digest="sha256:" + "f" * 64,
+            model_3d_artifact_digest=None,
+            idempotency_key="key",
+            created_at=datetime.now(),
+        )
