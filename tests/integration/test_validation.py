@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import shutil
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -9,11 +10,12 @@ from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.config import Settings
 from pcbflow.container import build_container
 from pcbflow.domain import TaskStatus
-from pcbflow.kicad import RawValidationReport
+from pcbflow.kicad import KicadReportFormatError, RawValidationReport
 from pcbflow.repositories import (
     EvidenceRepository,
     FindingRepository,
     ProjectRepository,
+    StaleLeaseError,
     TaskRepository,
 )
 from pcbflow.tasks import Worker
@@ -64,7 +66,8 @@ class FakeKicad:
 
 
 def test_validation_handler_persists_raw_evidence_and_findings(
-    session_factory: sessionmaker[Session], tmp_path: Path
+    session_factory: sessionmaker[Session], tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -81,8 +84,24 @@ def test_validation_handler_persists_raw_evidence_and_findings(
     fake_kicad = FakeKicad(fixture_dir, source)
     project = projects.create("Controller", source, "project-1")
     service = ValidationService(projects, tasks)
+    active_checks: list[tuple[str, str, datetime]] = []
+    original_assert_active = tasks.assert_active
+
+    def record_active(task_id: str, lease_token: str, now: datetime) -> None:
+        active_checks.append((task_id, lease_token, now))
+        original_assert_active(task_id, lease_token, now)
+
+    monkeypatch.setattr(tasks, "assert_active", record_active)
     handler = ValidationTaskHandler(
-        projects, evidence, findings, store, fake_kicad, max_files=100, max_bytes=1_000_000
+        projects,
+        evidence,
+        findings,
+        store,
+        fake_kicad,
+        max_files=100,
+        max_bytes=1_000_000,
+        tasks=tasks,
+        clock=lambda: NOW,
     )
     worker = Worker(
         tasks,
@@ -115,6 +134,7 @@ def test_validation_handler_persists_raw_evidence_and_findings(
     assert all(store.verify(item.artifact_digest) for item in stored_evidence)
     assert {path.name: path.read_bytes() for path in source.iterdir()} == original
     assert len(fake_kicad.calls) == 1
+    assert active_checks
 
 
 def test_same_task_report_write_is_idempotent(
@@ -149,6 +169,121 @@ def test_same_task_report_write_is_idempotent(
     assert first == second
     assert len(evidence.list_for_project(project.id)) == 2
     assert len(findings.list_for_project(project.id)) == 2
+
+
+def test_validation_report_write_is_fenced_after_lease_replacement(
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "board.kicad_sch").write_text("schematic", encoding="utf-8")
+    (source / "board.kicad_pcb").write_text("board", encoding="utf-8")
+    projects = ProjectRepository(session_factory)
+    tasks = TaskRepository(session_factory)
+    evidence = EvidenceRepository(session_factory)
+    findings = FindingRepository(session_factory)
+    store = ContentAddressedStore(tmp_path / "artifacts")
+    project = projects.create("Controller", source, "lease-fenced-project")
+    task = tasks.enqueue(
+        VALIDATION_TASK_KIND,
+        {"project_id": project.id},
+        "lease-fenced-task",
+        project.id,
+    )
+    lease = tasks.claim_next("worker-a", NOW, 30)
+    assert lease is not None and lease.task_id == task.id
+    tasks.start(task.id, lease.lease_token, NOW)
+
+    class OneReportKicad:
+        def validate(self, project_dir: Path, output_dir: Path):
+            return (
+                RawValidationReport(
+                    "erc",
+                    b'{"version":"1.0","source":"board.kicad_sch","violations":[]}',
+                    ("kicad-cli", "sch", "erc"),
+                    0,
+                    "9.0.2",
+                ),
+            )
+
+    original_put_bytes = store.put_bytes
+    replaced = False
+
+    def replace_lease_before_register(data: bytes, media_type: str):
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            replacement = tasks.claim_next(
+                "worker-b", NOW + timedelta(seconds=31), 30
+            )
+            assert replacement is not None and replacement.task_id == task.id
+        return original_put_bytes(data, media_type)
+
+    monkeypatch.setattr(store, "put_bytes", replace_lease_before_register)
+    handler = ValidationTaskHandler(
+        projects,
+        evidence,
+        findings,
+        store,
+        OneReportKicad(),
+        max_files=100,
+        max_bytes=1_000_000,
+        tasks=tasks,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(StaleLeaseError):
+        handler(lease)
+
+    assert evidence.list_for_project(project.id) == []
+
+
+def test_invalid_validation_report_is_parsed_before_artifact_write(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "board.kicad_sch").write_text("schematic", encoding="utf-8")
+    (source / "board.kicad_pcb").write_text("board", encoding="utf-8")
+    projects = ProjectRepository(session_factory)
+    tasks = TaskRepository(session_factory)
+    evidence = EvidenceRepository(session_factory)
+    findings = FindingRepository(session_factory)
+    store = ContentAddressedStore(tmp_path / "artifacts")
+    project = projects.create("Controller", source, "invalid-report-project")
+    task = tasks.enqueue(
+        VALIDATION_TASK_KIND,
+        {"project_id": project.id},
+        "invalid-report-task",
+        project.id,
+    )
+    lease = tasks.claim_next("worker-a", NOW, 30)
+    assert lease is not None and lease.task_id == task.id
+
+    class InvalidReportKicad:
+        def validate(self, project_dir: Path, output_dir: Path):
+            return (
+                RawValidationReport(
+                    "erc", b"not-json", ("kicad-cli", "sch", "erc"), 0, "9.0.2"
+                ),
+            )
+
+    handler = ValidationTaskHandler(
+        projects,
+        evidence,
+        findings,
+        store,
+        InvalidReportKicad(),
+        max_files=100,
+        max_bytes=1_000_000,
+    )
+
+    with pytest.raises(KicadReportFormatError):
+        handler(lease)
+
+    assert not list(store.root.joinpath("objects").rglob("*"))
 
 
 def test_validation_rejects_project_over_file_limit(
@@ -238,6 +373,7 @@ def test_managed_validation_reads_database_revision_not_changed_import_source(
         {
             "PCBFLOW_DATA_DIR": str(tmp_path / "data"),
             "PCBFLOW_TASK_LEASE_SECONDS": "30",
+            "PCBFLOW_PROCESS_TIMEOUT_SECONDS": "20",
         }
     )
 

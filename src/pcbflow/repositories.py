@@ -66,6 +66,22 @@ def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+def _assert_active_fence(
+    session: Session, task_id: str, lease_token: str, now: datetime
+) -> None:
+    active = session.scalar(
+        select(TaskRow.id).where(
+            TaskRow.id == task_id,
+            TaskRow.lease_token == lease_token,
+            TaskRow.status == TaskStatus.RUNNING.value,
+            TaskRow.lease_expires_at.is_not(None),
+            TaskRow.lease_expires_at > now,
+        )
+    )
+    if active is None:
+        raise StaleLeaseError(task_id)
+
+
 def _project(row: ProjectRow) -> Project:
     return Project(
         id=row.id,
@@ -143,23 +159,41 @@ class ProjectRepository:
         resolved = source_path.resolve(strict=True)
         if not resolved.is_dir():
             raise ValueError("project source must be a directory")
-        with self._sessions.begin() as session:
-            row = session.scalar(
-                select(ProjectRow).where(ProjectRow.idempotency_key == idempotency_key)
-            )
-            if row is not None:
+        try:
+            with self._sessions.begin() as session:
+                row = session.scalar(
+                    select(ProjectRow).where(
+                        ProjectRow.idempotency_key == idempotency_key
+                    )
+                )
+                if row is not None:
+                    if row.name != name or Path(row.source_path) != resolved:
+                        raise IdempotencyConflictError(idempotency_key)
+                    return _project(row), False
+                row = ProjectRow(
+                    id=new_id("prj"),
+                    name=name,
+                    source_path=str(resolved),
+                    idempotency_key=idempotency_key,
+                    created_at=utc_now(),
+                )
+                session.add(row)
+                session.flush()
+            return _project(row), True
+        except IntegrityError:
+            # A concurrent creator may win between the read and the insert.
+            # Re-read the durable row and apply the same idempotency contract.
+            with self._sessions() as session:
+                row = session.scalar(
+                    select(ProjectRow).where(
+                        ProjectRow.idempotency_key == idempotency_key
+                    )
+                )
+                if row is None:
+                    raise
                 if row.name != name or Path(row.source_path) != resolved:
                     raise IdempotencyConflictError(idempotency_key)
                 return _project(row), False
-            row = ProjectRow(
-                id=new_id("prj"),
-                name=name,
-                source_path=str(resolved),
-                idempotency_key=idempotency_key,
-                created_at=utc_now(),
-            )
-            session.add(row)
-        return _project(row), True
 
     def get(self, project_id: str) -> Project:
         with self._sessions() as session:
@@ -414,11 +448,46 @@ class TaskRepository:
         project_id: str | None,
     ) -> Task:
         json.dumps(payload, sort_keys=True, allow_nan=False)
-        with self._sessions.begin() as session:
-            row = session.scalar(
-                select(TaskRow).where(TaskRow.idempotency_key == idempotency_key)
-            )
-            if row is not None:
+        try:
+            with self._sessions.begin() as session:
+                row = session.scalar(
+                    select(TaskRow).where(TaskRow.idempotency_key == idempotency_key)
+                )
+                if row is not None:
+                    if (
+                        row.kind != kind
+                        or row.project_id != project_id
+                        or row.payload_json != payload
+                    ):
+                        raise IdempotencyConflictError(idempotency_key)
+                    return _task(row)
+                now = utc_now()
+                row = TaskRow(
+                    id=new_id("tsk"),
+                    project_id=project_id,
+                    kind=kind,
+                    payload_json=payload,
+                    result_json=None,
+                    status=TaskStatus.QUEUED.value,
+                    idempotency_key=idempotency_key,
+                    lease_owner=None,
+                    lease_token=None,
+                    lease_expires_at=None,
+                    last_error_code=None,
+                    attempt_count=0,
+                    created_at=now,
+                    updated_at=now,
+                    version=1,
+                )
+                session.add(row)
+            return _task(row)
+        except IntegrityError:
+            with self._sessions() as session:
+                row = session.scalar(
+                    select(TaskRow).where(TaskRow.idempotency_key == idempotency_key)
+                )
+                if row is None:
+                    raise
                 if (
                     row.kind != kind
                     or row.project_id != project_id
@@ -426,26 +495,6 @@ class TaskRepository:
                 ):
                     raise IdempotencyConflictError(idempotency_key)
                 return _task(row)
-            now = utc_now()
-            row = TaskRow(
-                id=new_id("tsk"),
-                project_id=project_id,
-                kind=kind,
-                payload_json=payload,
-                result_json=None,
-                status=TaskStatus.QUEUED.value,
-                idempotency_key=idempotency_key,
-                lease_owner=None,
-                lease_token=None,
-                lease_expires_at=None,
-                last_error_code=None,
-                attempt_count=0,
-                created_at=now,
-                updated_at=now,
-                version=1,
-            )
-            session.add(row)
-        return _task(row)
 
     def get(self, task_id: str) -> Task:
         with self._sessions() as session:
@@ -551,6 +600,39 @@ class TaskRepository:
             status=TaskStatus.RUNNING.value,
             updated_at=now,
         )
+
+    def renew(
+        self,
+        task_id: str,
+        lease_token: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> datetime:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        lease_expires_at = now + timedelta(seconds=lease_seconds)
+        with self._sessions.begin() as session:
+            changed = session.execute(
+                update(TaskRow)
+                .where(
+                    TaskRow.id == task_id,
+                    TaskRow.lease_token == lease_token,
+                    TaskRow.status.in_(
+                        [TaskStatus.LEASED.value, TaskStatus.RUNNING.value]
+                    ),
+                    TaskRow.lease_expires_at.is_not(None),
+                    TaskRow.lease_expires_at > now,
+                )
+                .values(
+                    lease_expires_at=lease_expires_at,
+                    updated_at=now,
+                    version=TaskRow.version + 1,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if changed.rowcount != 1:
+                raise StaleLeaseError(task_id)
+        return lease_expires_at
 
     def complete(
         self,
@@ -689,8 +771,15 @@ class EvidenceRepository:
         kind: str,
         subject: str,
         verdict: str,
+        *,
+        lease_token: str | None = None,
+        now: datetime | None = None,
     ) -> Evidence:
         with self._sessions.begin() as session:
+            if lease_token is not None:
+                _assert_active_fence(
+                    session, task_id, lease_token, now or utc_now()
+                )
             artifact = session.get(ArtifactRow, descriptor.digest)
             if artifact is None:
                 session.add(
@@ -762,9 +851,16 @@ class FindingRepository:
         task_id: str,
         evidence_id: str,
         findings: tuple[NormalizedFinding, ...],
+        *,
+        lease_token: str | None = None,
+        now: datetime | None = None,
     ) -> list[Finding]:
         result: list[Finding] = []
         with self._sessions.begin() as session:
+            if lease_token is not None:
+                _assert_active_fence(
+                    session, task_id, lease_token, now or utc_now()
+                )
             evidence = session.get(EvidenceRow, evidence_id)
             if (
                 evidence is None

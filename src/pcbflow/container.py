@@ -177,6 +177,8 @@ def build_container(
         monotonic=monotonic,
         revisions=revisions,
         copier=workspace_copier,
+        tasks=tasks,
+        clock=clock,
         max_files=settings.max_project_files,
         max_bytes=settings.max_project_bytes,
     )

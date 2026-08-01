@@ -357,3 +357,91 @@ def test_add_label_resolves_child_explicit_net_wire_endpoint(tmp_path: Path) -> 
     result = _adapter().apply(project, (command,))
 
     assert any(label.name == "CHILD_NET_LABEL" for label in result.after.labels)
+
+
+def test_add_label_resolves_a_second_level_sheet_file_from_project_root(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "sheets" / "deep").mkdir(parents=True)
+    (project / "root.kicad_sch").write_text(
+        """(kicad_sch
+  (version 20250114)
+  (uuid 00000000-0000-0000-0000-000000000010)
+  (sheet
+    (at 25 25)
+    (size 50 25)
+    (uuid 00000000-0000-0000-0000-000000000011)
+    (property "Sheetname" "Child")
+    (property "Sheetfile" "sheets/child.kicad_sch")))
+""",
+        encoding="utf-8",
+    )
+    fixtures = _fixtures() / "kicad" / "controlled-design" / "board.kicad_sch"
+    child = project / "sheets" / "child.kicad_sch"
+    grandchild = project / "sheets" / "deep" / "grand.kicad_sch"
+    shutil.copyfile(fixtures, child)
+    shutil.copyfile(fixtures, grandchild)
+
+    child_document = parse_cst(child.read_bytes())
+    grand_sheet_uuid = "00000000-0000-0000-0000-000000000012"
+    child_sheet = make_list(
+        make_atom("sheet"),
+        make_list(make_atom("at"), make_atom("25"), make_atom("25")),
+        make_list(make_atom("size"), make_atom("50"), make_atom("25")),
+        make_list(make_atom("uuid"), make_atom(grand_sheet_uuid)),
+        make_list(make_atom("property"), make_string("Sheetname"), make_string("Grand")),
+        make_list(
+            make_atom("property"),
+            make_string("Sheetfile"),
+            make_string("deep/grand.kicad_sch"),
+        ),
+    )
+    child.write_bytes(
+        apply_edits(
+            child_document,
+            (insert_before_close(child_document.root, (child_sheet,), indent=2),),
+        )
+    )
+
+    grand_document = parse_cst(grandchild.read_bytes())
+    wire_uuid = "00000000-0000-0000-0000-000000000113"
+    net_uuid = "00000000-0000-0000-0000-000000000114"
+    grand_wire = _wire(wire_uuid, ("123.19", "88.9"), ("120", "88.9"))
+    grand_net = make_list(
+        make_atom("net"),
+        make_string("GRANDCHILD_NET"),
+        make_list(
+            make_atom("members"),
+            make_atom(f"wire:{grand_sheet_uuid}:{wire_uuid}"),
+        ),
+        make_list(make_atom("uuid"), make_atom(net_uuid)),
+    )
+    grandchild.write_bytes(
+        apply_edits(
+            grand_document,
+            (insert_before_close(grand_document.root, (grand_wire, grand_net), indent=2),),
+        )
+    )
+
+    command = _command(
+        {
+            "type": "schematic.add_label",
+            "payload": {
+                "target_ref": {
+                    "kind": "net",
+                    "sheet_uuid": grand_sheet_uuid,
+                    "object_uuid": net_uuid,
+                    "pin_number": None,
+                },
+                "name": "GRANDCHILD_NET_LABEL",
+                "scope": "local",
+            },
+        },
+        "cmd_grandchild_net_label",
+    )
+
+    result = _adapter().apply(project, (command,))
+
+    assert any(label.name == "GRANDCHILD_NET_LABEL" for label in result.after.labels)

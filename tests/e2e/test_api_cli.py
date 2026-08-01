@@ -186,6 +186,21 @@ def test_remote_api_rejects_local_source_paths(tmp_path: Path) -> None:
     container.engine.dispose()
 
 
+def test_remote_api_disables_worker_execution_endpoint(tmp_path: Path) -> None:
+    container = build_container(
+        _settings(tmp_path, remote_mode=True), kicad_override=_fake_kicad()
+    )
+
+    async def exercise() -> httpx.Response:
+        async with _client(container, raise_app_exceptions=False) as client:
+            return await client.post("/api/v1/worker:run-once")
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "REMOTE_WORKER_DISABLED"
+    container.engine.dispose()
+
+
 def test_api_returns_stable_error_for_invalid_project_source(tmp_path: Path) -> None:
     container = build_container(_settings(tmp_path), kicad_override=_fake_kicad())
 

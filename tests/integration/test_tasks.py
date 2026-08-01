@@ -1,4 +1,7 @@
 from datetime import UTC, datetime, timedelta
+import time
+from threading import Barrier, Event, Lock
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
@@ -9,6 +12,7 @@ from pcbflow.repositories import (
     StaleLeaseError,
     TaskRepository,
 )
+from pcbflow.tables import TaskRow
 from pcbflow.tasks import RetryableTaskError, TerminalTaskError, Worker
 
 NOW = datetime(2026, 7, 29, 1, 0, tzinfo=UTC)
@@ -38,6 +42,51 @@ def test_enqueue_rejects_key_reuse_for_different_payload(
 
     with pytest.raises(IdempotencyConflictError):
         task_repository.enqueue("validate", {"revision": 2}, "same-key", None)
+
+
+def test_concurrent_enqueue_replays_the_winning_request(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    barrier = Barrier(2)
+    calls_lock = Lock()
+    read_calls = 0
+    original_add = Session.add
+
+    def synchronize_task_inserts(session, instance, _warn=True):
+        nonlocal read_calls
+        if isinstance(instance, TaskRow):
+            with calls_lock:
+                read_calls += 1
+                should_wait = read_calls <= 2
+            if should_wait:
+                barrier.wait(timeout=5)
+        return original_add(session, instance, _warn=_warn)
+
+    monkeypatch.setattr(Session, "add", synchronize_task_inserts)
+    first_repository = TaskRepository(session_factory)
+    second_repository = TaskRepository(session_factory)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            first_repository.enqueue,
+            "validate",
+            {"probe": True},
+            "concurrent-task",
+            None,
+        )
+        second = executor.submit(
+            second_repository.enqueue,
+            "validate",
+            {"probe": True},
+            "concurrent-task",
+            None,
+        )
+        first_result = first.result(timeout=10)
+        second_result = second.result(timeout=10)
+
+    assert read_calls >= 2
+    assert first_result.id == second_result.id
 
 
 def test_unexpired_lease_cannot_be_claimed_twice(
@@ -109,6 +158,36 @@ def test_expired_token_cannot_transition_or_remain_active(
         repository.assert_active(task.id, lease.lease_token, expired_at)
 
 
+def test_renew_extends_a_running_lease_and_preserves_its_fence(
+    task_repository: TaskRepository,
+) -> None:
+    task = task_repository.enqueue("validate", {}, "renew-running", None)
+    lease = task_repository.claim_next("worker-a", NOW, 2)
+    assert lease is not None
+    task_repository.start(task.id, lease.lease_token, NOW)
+
+    renewed_until = task_repository.renew(
+        task.id,
+        lease.lease_token,
+        NOW + timedelta(seconds=1),
+        2,
+    )
+
+    assert renewed_until == NOW + timedelta(seconds=3)
+    task_repository.assert_active(
+        task.id,
+        lease.lease_token,
+        NOW + timedelta(seconds=2),
+    )
+    with pytest.raises(StaleLeaseError):
+        task_repository.renew(
+            task.id,
+            "expired-token",
+            NOW + timedelta(seconds=2),
+            2,
+        )
+
+
 def test_worker_passes_its_clock_to_fenced_transitions(
     task_repository: TaskRepository,
     monkeypatch: pytest.MonkeyPatch,
@@ -147,6 +226,162 @@ def test_worker_passes_its_clock_to_fenced_transitions(
     assert worker.run_once()
     assert calls == [NOW + timedelta(seconds=1), NOW + timedelta(seconds=2)]
     assert task_repository.get(task.id).status is TaskStatus.SUCCEEDED
+
+
+def test_worker_survives_stale_lease_during_start(
+    task_repository: TaskRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = task_repository.enqueue("double", {}, "stale-start", None)
+    started = False
+
+    def stale_start(_task_id: str, _lease_token: str, _now: datetime) -> None:
+        raise StaleLeaseError(task.id)
+
+    def handler(_lease):
+        nonlocal started
+        started = True
+        return {"ok": True}
+
+    monkeypatch.setattr(task_repository, "start", stale_start)
+    worker = Worker(task_repository, "worker-a", {"double": handler}, lambda: NOW, 30)
+
+    assert worker.run_once()
+    assert not started
+    assert task_repository.get(task.id).status is TaskStatus.LEASED
+
+
+def test_worker_renews_its_lease_while_a_handler_is_running(
+    task_repository: TaskRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = task_repository.enqueue("slow", {}, "renew-worker", None)
+    renewed = Event()
+    original_renew = task_repository.renew
+
+    def record_renew(
+        task_id: str, lease_token: str, now: datetime, lease_seconds: int
+    ) -> datetime:
+        renewed.set()
+        return original_renew(task_id, lease_token, now, lease_seconds)
+
+    monkeypatch.setattr(task_repository, "renew", record_renew)
+
+    def slow_handler(_lease):
+        assert renewed.wait(timeout=2)
+        return {"ok": True}
+
+    worker = Worker(
+        task_repository,
+        "worker-a",
+        {"slow": slow_handler},
+        lambda: NOW,
+        1,
+    )
+
+    assert worker.run_once()
+    assert task_repository.get(task.id).status is TaskStatus.SUCCEEDED
+
+
+def test_worker_does_not_complete_after_heartbeat_loses_the_lease(
+    task_repository: TaskRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = task_repository.enqueue("stale", {}, "stale-heartbeat", None)
+    fenced = Event()
+    completed = False
+
+    def stale_renew(
+        _task_id: str, _lease_token: str, _now: datetime, _lease_seconds: int
+    ) -> datetime:
+        fenced.set()
+        raise StaleLeaseError(task.id)
+
+    original_complete = task_repository.complete
+
+    def record_complete(task_id, lease_token, result, now):
+        nonlocal completed
+        completed = True
+        return original_complete(task_id, lease_token, result, now)
+
+    monkeypatch.setattr(task_repository, "renew", stale_renew)
+    monkeypatch.setattr(task_repository, "complete", record_complete)
+
+    def handler(_lease):
+        assert fenced.wait(timeout=2)
+        return {"ok": True}
+
+    worker = Worker(task_repository, "worker-a", {"stale": handler}, lambda: NOW, 1)
+
+    assert worker.run_once()
+    assert not completed
+
+
+def test_worker_does_not_complete_after_heartbeat_database_failure(
+    task_repository: TaskRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = task_repository.enqueue("db-failure", {}, "db-heartbeat", None)
+    failed = Event()
+    completed = False
+
+    def failed_renew(
+        _task_id: str, _lease_token: str, _now: datetime, _lease_seconds: int
+    ) -> datetime:
+        failed.set()
+        raise RuntimeError("database unavailable")
+
+    original_complete = task_repository.complete
+
+    def record_complete(task_id, lease_token, result, now):
+        nonlocal completed
+        completed = True
+        return original_complete(task_id, lease_token, result, now)
+
+    monkeypatch.setattr(task_repository, "renew", failed_renew)
+    monkeypatch.setattr(task_repository, "complete", record_complete)
+
+    def handler(_lease):
+        assert failed.wait(timeout=2)
+        return {"ok": True}
+
+    worker = Worker(
+        task_repository, "worker-a", {"db-failure": handler}, lambda: NOW, 1
+    )
+
+    assert worker.run_once()
+    assert not completed
+
+
+def test_worker_does_not_wait_unboundedly_for_a_blocked_heartbeat(
+    task_repository: TaskRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = task_repository.enqueue("blocked", {}, "blocked-heartbeat", None)
+    entered = Event()
+    release = Event()
+    original_renew = task_repository.renew
+
+    def blocked_renew(
+        task_id: str, lease_token: str, now: datetime, lease_seconds: int
+    ) -> datetime:
+        entered.set()
+        release.wait(timeout=3)
+        return original_renew(task_id, lease_token, now, lease_seconds)
+
+    monkeypatch.setattr(task_repository, "renew", blocked_renew)
+
+    def handler(_lease):
+        assert entered.wait(timeout=2)
+        return {"ok": True}
+
+    worker = Worker(task_repository, "worker-a", {"blocked": handler}, lambda: NOW, 1)
+    started = time.monotonic()
+    assert worker.run_once()
+    elapsed = time.monotonic() - started
+    release.set()
+
+    assert elapsed < 2
 
 
 def test_worker_completes_registered_handler(
@@ -204,6 +439,28 @@ def test_worker_marks_unknown_kind_terminal(
     failed = task_repository.get(task.id)
     assert failed.status is TaskStatus.FAILED_TERMINAL
     assert failed.last_error_code == "UNKNOWN_TASK_KIND"
+
+
+def test_worker_survives_stale_lease_when_failing_unknown_kind(
+    task_repository: TaskRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = task_repository.enqueue("unknown-stale", {}, "unknown-stale", None)
+
+    def stale_fail(
+        _task_id: str,
+        _lease_token: str,
+        _error_code: str,
+        _retryable: bool,
+        _now: datetime,
+    ) -> None:
+        raise StaleLeaseError(task.id)
+
+    monkeypatch.setattr(task_repository, "fail", stale_fail)
+    worker = Worker(task_repository, "worker-a", {}, lambda: NOW, 30)
+
+    assert worker.run_once()
+    assert task_repository.get(task.id).status is TaskStatus.RUNNING
 
 
 def test_worker_preserves_declared_terminal_error_code(

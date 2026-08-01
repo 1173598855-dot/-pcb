@@ -1,4 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
@@ -38,6 +40,48 @@ def test_reusing_key_with_different_project_is_rejected(
 
     with pytest.raises(IdempotencyConflictError):
         repository.create("Second", second_source, "same-key")
+
+
+def test_concurrent_project_creation_replays_the_winning_request(
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "concurrent-board"
+    source.mkdir()
+    barrier = Barrier(2)
+    original_execute = Session.execute
+
+    def synchronize_idempotency_reads(session, statement, *args, **kwargs):
+        result = original_execute(session, statement, *args, **kwargs)
+        rendered = str(statement)
+        if "FROM projects" in rendered and "projects.idempotency_key" in rendered:
+            barrier.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(Session, "execute", synchronize_idempotency_reads)
+    first_repository = ProjectRepository(session_factory)
+    second_repository = ProjectRepository(session_factory)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            first_repository.create_with_status,
+            "Controller",
+            source,
+            "concurrent-create",
+        )
+        second = executor.submit(
+            second_repository.create_with_status,
+            "Controller",
+            source,
+            "concurrent-create",
+        )
+        first_result = first.result(timeout=10)
+        second_result = second.result(timeout=10)
+
+    projects = [first_result[0], second_result[0]]
+    assert projects[0].id == projects[1].id
+    assert sorted(created for _project, created in (first_result, second_result)) == [False, True]
 
 
 def test_missing_project_raises_stable_error(

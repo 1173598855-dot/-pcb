@@ -575,6 +575,13 @@ def create_app(container: Container | None = None) -> FastAPI:
 
     @app.post("/api/v1/worker:run-once")
     def run_worker_once() -> dict[str, bool]:
+        if services.settings.remote_mode:
+            raise ApiError(
+                403,
+                "REMOTE_WORKER_DISABLED",
+                "worker execution is disabled in remote mode",
+                actions=["run the worker in the local PCBFlow process"],
+            )
         return {"handled": services.worker.run_once()}
 
     @app.get("/api/v1/projects/{project_id}/evidence")

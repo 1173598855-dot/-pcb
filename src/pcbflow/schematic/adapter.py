@@ -680,9 +680,10 @@ def _sheet_file(parsed: ParsedSchematic, sheet_uuid: str) -> Path | None:
     for sheet in parsed.document.sheets:
         if sheet.ref.object_uuid != sheet_uuid:
             continue
+        path = parsed.sheet_files.get(object_ref_key(sheet.ref))
+        if path is not None:
+            return path.resolve()
         parent_location = parsed.location(sheet.ref)
-        if sheet.parent_sheet_uuid is None:
-            return parent_location.file_path.resolve()
         return (parent_location.file_path.parent / sheet.file_name).resolve()
     return None
 

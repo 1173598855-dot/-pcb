@@ -270,6 +270,17 @@ def test_candidate_refs_and_snapshot_integrity_use_exact_revisions(
             container.revisions.assert_clean(
                 project.id, managed.current_revision, workspace
             )
+        snapshot_digest = container.revisions.snapshot_digest(workspace)
+        with pytest.raises(ValueError, match="snapshot digest"):
+            container.revisions.commit_candidate(
+                managed,
+                workspace,
+                managed.current_revision,
+                "refs/pcbflow/proposals/invalid-digest",
+                "pcbflow: proposal invalid-digest",
+                managed.created_at,
+                snapshot_digest="invalid",
+            )
         candidate = container.revisions.commit_candidate(
             managed,
             workspace,
@@ -277,7 +288,10 @@ def test_candidate_refs_and_snapshot_integrity_use_exact_revisions(
             "refs/pcbflow/proposals/prp_test",
             "pcbflow: proposal prp_test",
             managed.created_at,
+            snapshot_digest=snapshot_digest,
         )
+
+    assert candidate.snapshot_digest == snapshot_digest
 
     assert container.revisions.resolve_proposal_ref(project.id, "prp_test") == (
         candidate.revision

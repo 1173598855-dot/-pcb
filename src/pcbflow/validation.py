@@ -3,12 +3,14 @@ from __future__ import annotations
 import time
 import os
 import stat
+from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from pcbflow.artifacts import ContentAddressedStore
-from pcbflow.domain import ProjectMode, Task, TaskLease
+from pcbflow.domain import ProjectMode, Task, TaskLease, utc_now
 from pcbflow.observability import MetricName, Metrics, ensure_trace_id
 from pcbflow.kicad import (
     KicadPort,
@@ -112,6 +114,8 @@ class ValidationTaskHandler:
         monotonic=time.monotonic,
         revisions: RevisionService | None = None,
         copier: WorkspaceCopier | None = None,
+        tasks: TaskRepository | None = None,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self._projects = projects
         self._evidence = evidence
@@ -123,6 +127,8 @@ class ValidationTaskHandler:
         self._metrics = metrics
         self._monotonic = monotonic
         self._revisions = revisions
+        self._tasks = tasks
+        self._clock = clock
         self._copier = copier or WorkspaceCopier(
             max_files=max_files, max_bytes=max_bytes
         )
@@ -130,6 +136,7 @@ class ValidationTaskHandler:
     def __call__(self, lease: TaskLease) -> dict[str, object]:
         project_id = str(lease.payload["project_id"])
         project = self._projects.get(project_id)
+        self._assert_active(lease)
         workspace_root = self._store.root.parent / "workspaces"
         workspace_root.mkdir(parents=True, exist_ok=True)
         with self._validation_workspace(project, lease.task_id, workspace_root) as (
@@ -155,8 +162,14 @@ class ValidationTaskHandler:
             evidence_ids: list[str] = []
             finding_count = 0
             for raw in reports:
-                descriptor = self._store.put_bytes(raw.data, "application/json")
+                self._assert_active(lease)
                 parsed = parse_kicad_report(raw.kind, raw.data)
+                descriptor = self._store.put_bytes(raw.data, "application/json")
+                fence = (
+                    {"lease_token": lease.lease_token, "now": self._clock()}
+                    if self._tasks is not None
+                    else {}
+                )
                 record = self._evidence.add_report(
                     project_id=project_id,
                     task_id=lease.task_id,
@@ -164,16 +177,22 @@ class ValidationTaskHandler:
                     kind=f"kicad_{raw.kind}",
                     subject=project_id,
                     verdict="fail" if parsed.findings else "pass",
+                    **fence,
                 )
                 self._findings.add_many(
                     project_id,
                     lease.task_id,
                     record.id,
                     parsed.findings,
+                    **fence,
                 )
                 evidence_ids.append(record.id)
                 finding_count += len(parsed.findings)
         return {"evidence_ids": evidence_ids, "finding_count": finding_count}
+
+    def _assert_active(self, lease: TaskLease) -> None:
+        if self._tasks is not None:
+            self._tasks.assert_active(lease.task_id, lease.lease_token, self._clock())
 
     @contextmanager
     def _validation_workspace(

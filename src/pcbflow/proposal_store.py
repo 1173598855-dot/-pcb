@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from pcbflow.artifacts import ArtifactDescriptor
@@ -195,6 +196,30 @@ class ProposalStore:
             return self._existing(session, batch, batch_json, digest)
 
     def create_queued(self, batch: CommandBatch) -> ChangeProposal:
+        try:
+            return self._create_queued(batch)
+        except IntegrityError:
+            # Unique-key races are expected at this boundary.  Re-read the
+            # winner and preserve the domain-level idempotency contract.
+            batch_json = batch.model_dump(mode="json")
+            digest = command_batch_digest(batch)
+            with self._sessions() as session:
+                existing = self._existing(session, batch, batch_json, digest)
+                if existing is not None:
+                    return existing
+                for command in batch.commands:
+                    command_row = session.scalar(
+                        select(DesignCommandRow).where(
+                            DesignCommandRow.project_id == batch.project_id,
+                            DesignCommandRow.idempotency_key
+                            == command.idempotency_key,
+                        )
+                    )
+                    if command_row is not None:
+                        raise IdempotencyConflictError(command.idempotency_key)
+            raise
+
+    def _create_queued(self, batch: CommandBatch) -> ChangeProposal:
         batch_json = batch.model_dump(mode="json")
         digest = command_batch_digest(batch)
         with self._sessions.begin() as session:
@@ -202,6 +227,22 @@ class ProposalStore:
             existing = self._existing(session, batch, batch_json, digest)
             if existing is not None:
                 return existing
+
+            for command in batch.commands:
+                existing_command = session.scalar(
+                    select(DesignCommandRow).where(
+                        DesignCommandRow.project_id == batch.project_id,
+                        DesignCommandRow.idempotency_key
+                        == command.idempotency_key,
+                    )
+                )
+                if existing_command is not None:
+                    raise IdempotencyConflictError(command.idempotency_key)
+                existing_command_id = session.get(
+                    DesignCommandRow, command.command_id
+                )
+                if existing_command_id is not None:
+                    raise IdempotencyConflictError(command.idempotency_key)
 
             now = self._clock()
             batch_row = DesignCommandBatchRow(

@@ -173,6 +173,30 @@ def test_create_replays_existing_proposal_after_project_revision_advances(
     assert repeated == first
 
 
+def test_create_rejects_reusing_a_command_key_in_a_different_batch(
+    container, frozen_requirement_set
+) -> None:
+    project = container.projects.get(frozen_requirement_set.project_id)
+    first = _batch(project, frozen_requirement_set)
+    container.proposals.create(
+        json.dumps(first).encode(), str(first["idempotency_key"])
+    )
+    second = json.loads(json.dumps(first))
+    second["batch_id"] = "bat_set_status_value_second"
+    second["idempotency_key"] = "proposal:set-status-value:second"
+    commands = second["commands"]
+    assert isinstance(commands, list)
+    command = commands[0]
+    assert isinstance(command, dict)
+    command["batch_id"] = second["batch_id"]
+    command["command_id"] = "cmd_set_status_value_second"
+
+    with pytest.raises(IdempotencyConflictError, match="proposal:set-status-value:1"):
+        container.proposals.create(
+            json.dumps(second).encode(), str(second["idempotency_key"])
+        )
+
+
 def test_command_batch_get_rejects_tampered_invalid_json_shape(
     container, frozen_requirement_set
 ) -> None:

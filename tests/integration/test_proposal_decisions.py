@@ -15,10 +15,11 @@ from pcbflow.proposals import (
     ProposalDecisionService,
     CandidateNotReviewableError,
     ProposalStatus,
+    READY_EVIDENCE_MEDIA_TYPES,
     proposal_review_digest,
 )
 from pcbflow.repositories import RevisionConflictError
-from pcbflow.design_tables import OutboxEventRow
+from pcbflow.design_tables import ChangeProposalRow, OutboxEventRow
 from pcbflow.tables import ArtifactRow, EvidenceRow
 from pcbflow.revisions import RevisionReconciler
 from pcbflow.observability import MetricName
@@ -153,11 +154,11 @@ def _ready(container, frozen_requirement_set, suffix: str):
     evidence_inputs = {
         "design_command_batch": (
             batch_bytes,
-            "application/vnd.pcbflow.design-command-batch+json",
+            READY_EVIDENCE_MEDIA_TYPES["design_command_batch"],
         ),
         "project_snapshot_before": (
             canonical_json_bytes({"schema_version": "1.0", "files": []}),
-            "application/vnd.pcbflow.project-snapshot+json",
+            READY_EVIDENCE_MEDIA_TYPES["project_snapshot_before"],
         ),
         "project_snapshot_after": (
             canonical_json_bytes(
@@ -167,11 +168,11 @@ def _ready(container, frozen_requirement_set, suffix: str):
                     "digest": candidate_snapshot_digest,
                 }
             ),
-            "application/vnd.pcbflow.project-snapshot+json",
+            READY_EVIDENCE_MEDIA_TYPES["project_snapshot_after"],
         ),
         "git_text_diff": (
             b"diff --git a/board.kicad_sch b/board.kicad_sch\n",
-            "text/x-diff",
+            READY_EVIDENCE_MEDIA_TYPES["git_text_diff"],
         ),
         "schematic_semantic_diff": (
             canonical_json_bytes(
@@ -196,7 +197,7 @@ def _ready(container, frozen_requirement_set, suffix: str):
                     ],
                 }
             ),
-            "application/vnd.pcbflow.semantic-diff+json",
+            READY_EVIDENCE_MEDIA_TYPES["schematic_semantic_diff"],
         ),
         "kicad_erc": (
             b'{"version":"1.0","source":"board.kicad_sch","violations":[]}',
@@ -206,7 +207,7 @@ def _ready(container, frozen_requirement_set, suffix: str):
             canonical_json_bytes(
                 {"schema_version": "1.0", "commands": [], "result": "pass"}
             ),
-            "application/vnd.pcbflow.command-log+json",
+            READY_EVIDENCE_MEDIA_TYPES["command_execution_log"],
         ),
         "adapter_capability_report": (
             canonical_json_bytes(
@@ -216,7 +217,7 @@ def _ready(container, frozen_requirement_set, suffix: str):
                     "supported_operations": ["schematic.set_property"],
                 }
             ),
-            "application/vnd.pcbflow.adapter-capability+json",
+            READY_EVIDENCE_MEDIA_TYPES["adapter_capability_report"],
         ),
     }
     registrations: list[EvidenceRegistration] = []
@@ -405,6 +406,85 @@ def test_accept_with_changed_base_marks_proposal_stale(
     }
 
 
+def _supersede_requirement_set(container, project, requirement_yaml: bytes):
+    requirements_reconciler = container.requirements._reconciler
+    approvals_reconciler = container.approvals._reconciler
+    container.requirements._reconciler = None
+    container.approvals._reconciler = None
+    try:
+        draft = container.requirements.import_draft(
+            project.id,
+            requirement_yaml,
+            "decision-superseding-requirements",
+        )
+        pending = container.requirements.submit(
+            draft.id,
+            "decision-superseding-requirements-submit",
+        )
+        return container.approvals.decide_g1(
+            requirement_set_id=pending.id,
+            subject_digest=pending.subject_digest(),
+            decision="approve",
+            actor_type="human",
+            actor_id="local-user",
+            comment="updated requirements approved",
+            idempotency_key="decision-superseding-g1",
+        )
+    finally:
+        container.requirements._reconciler = requirements_reconciler
+        container.approvals._reconciler = approvals_reconciler
+
+
+def test_accept_after_a_new_g1_transition_marks_old_ready_proposal_stale(
+    container, frozen_requirement_set, requirement_yaml: bytes
+) -> None:
+    revisions = FakeDecisionRevisions()
+    project, proposal = _ready(container, frozen_requirement_set, "stale")
+    revisions.proposal_revision = proposal.candidate_revision
+    revisions.design_revision = project.current_revision
+
+    _supersede_requirement_set(container, project, requirement_yaml)
+    current = container.projects.get(project.id)
+    revisions.design_revision = current.current_revision
+
+    with pytest.raises(RevisionConflictError):
+        _decision_service(container, revisions).accept(
+            proposal_id=proposal.id,
+            candidate_digest=proposal.review_digest,
+            actor_type="human",
+            actor_id="local-user",
+            comment="approval after updated G1",
+            idempotency_key="accept-after-superseding-g1",
+        )
+
+    assert container.requirement_store.get(frozen_requirement_set.id).status.value == "superseded"
+    assert container.proposal_store.get(proposal.id).status is ProposalStatus.STALE
+
+
+def test_reject_after_a_new_g1_transition_records_the_old_decision(
+    container, frozen_requirement_set, requirement_yaml: bytes
+) -> None:
+    revisions = FakeDecisionRevisions()
+    project, proposal = _ready(container, frozen_requirement_set, "reject")
+    revisions.proposal_revision = proposal.candidate_revision
+    revisions.design_revision = project.current_revision
+
+    _supersede_requirement_set(container, project, requirement_yaml)
+    current = container.projects.get(project.id)
+    revisions.design_revision = current.current_revision
+
+    rejected = _decision_service(container, revisions).reject(
+        proposal_id=proposal.id,
+        reason="withdraw after updated G1",
+        actor_type="human",
+        actor_id="local-user",
+        idempotency_key="reject-after-superseding-g1",
+    )
+
+    assert rejected.status is ProposalStatus.REJECTED
+    assert container.requirement_store.get(frozen_requirement_set.id).status.value == "superseded"
+
+
 def test_digest_mismatch_cannot_reuse_acceptance_key(
     container, frozen_requirement_set
 ) -> None:
@@ -543,4 +623,86 @@ def test_accept_rejects_evidence_with_mismatched_registered_media_type(
             actor_id="local-user",
             comment="accept tampered media",
             idempotency_key="tampered-media",
+        )
+
+
+def test_accept_rejects_evidence_with_noncanonical_media_type(
+    container, frozen_requirement_set
+) -> None:
+    revisions = FakeDecisionRevisions()
+    project, proposal = _ready(container, frozen_requirement_set, "accept")
+    revisions.proposal_revision = proposal.candidate_revision
+    revisions.design_revision = project.current_revision
+
+    evidence_set = EvidenceSet.model_validate_json(
+        container.artifacts.open(proposal.evidence_set_digest or "").read(),
+        strict=True,
+    )
+    value = evidence_set.model_dump(mode="json")
+    tampered_kind = "design_command_batch"
+    tampered_item = next(
+        item for item in value["artifacts"] if item["kind"] == tampered_kind
+    )
+    original_digest = tampered_item["artifact_digest"]
+    tampered_item["media_type"] = "text/plain"
+    replacement = container.artifacts.put_bytes(
+        canonical_json_bytes(value), "application/vnd.pcbflow.evidence-set+json"
+    )
+    review_digest = proposal_review_digest(
+        proposal_id=proposal.id,
+        project_id=project.id,
+        base_revision=project.current_revision,
+        candidate_revision=proposal.candidate_revision or "",
+        candidate_snapshot_digest=proposal.candidate_snapshot_digest or "",
+        requirement_set_digest=frozen_requirement_set.canonical_digest,
+        semantic_diff_digest=proposal.semantic_diff_digest or "",
+        evidence_set_digest=replacement.digest,
+        adapter_capability_digest=(proposal.result or {})[
+            "adapter_capability_digest"
+        ],
+    )
+    result = dict(proposal.result or {})
+    result["evidence_set_digest"] = replacement.digest
+    result["review_digest"] = review_digest
+    with container.sessions.begin() as session:
+        session.add(
+            ArtifactRow(
+                digest=replacement.digest,
+                size=replacement.size,
+                media_type=replacement.media_type,
+                storage_path=str(replacement.path),
+                created_at=NOW,
+            )
+        )
+        session.execute(
+            update(ArtifactRow)
+            .where(ArtifactRow.digest == original_digest)
+            .values(media_type="text/plain")
+        )
+        session.execute(
+            update(EvidenceRow)
+            .where(
+                EvidenceRow.task_id == proposal.task_id,
+                EvidenceRow.kind == "proposal_evidence_set",
+            )
+            .values(artifact_digest=replacement.digest)
+        )
+        session.execute(
+            update(ChangeProposalRow)
+            .where(ChangeProposalRow.id == proposal.id)
+            .values(
+                evidence_set_digest=replacement.digest,
+                review_digest=review_digest,
+                result_json=result,
+            )
+        )
+
+    with pytest.raises(CandidateNotReviewableError):
+        _decision_service(container, revisions).accept(
+            proposal_id=proposal.id,
+            candidate_digest=review_digest,
+            actor_type="human",
+            actor_id="local-user",
+            comment="accept noncanonical media",
+            idempotency_key="noncanonical-media",
         )

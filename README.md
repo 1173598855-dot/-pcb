@@ -163,6 +163,9 @@ $env:PCBFLOW_REMOTE_MODE = "true"
 .\.venv\Scripts\pcbflow.exe serve --host 127.0.0.1 --port 8765
 ```
 
+In remote mode, local source registration and the REST worker execution
+endpoint are disabled; run the worker in a trusted local process instead.
+
 ## 持久化数据与制品
 
 默认目录布局：

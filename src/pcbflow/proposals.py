@@ -3,9 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import json
-import os
-import stat
-import tempfile
 import hashlib
 import time
 from contextvars import ContextVar
@@ -274,10 +271,7 @@ class ProposalExecutor:
 
     @staticmethod
     def _manifest(root: Path, revisions: RevisionService) -> bytes:
-        files = []
-        for path, relative, metadata in revisions_module_snapshot_files(root):
-            files.append({"path": relative, "type": "file", "size": metadata.st_size, "digest": f"sha256:{__import__('hashlib').sha256(path.read_bytes()).hexdigest()}"})
-        return canonical_json_bytes({"schema_version": "1.0", "snapshot_policy_version": 1, "files": files})
+        return revisions.snapshot_manifest(root)
 
     def _put(self, data: bytes, media_type: str):
         return self._artifacts.put_bytes(data, media_type)
@@ -405,18 +399,24 @@ class ProposalExecutor:
         self.begin(lease, now=now)
         evidence: list[EvidenceRegistration] = []
         capability: KicadCapability | None = None
+        capability_report: dict[str, object] | None = None
+        command_execution_data: bytes | None = None
         candidate_revision: str | None = None
         def add(kind, data, media="application/octet-stream", verdict="pass"):
             descriptor = self._put(data, media); evidence.append(EvidenceRegistration(descriptor, EvidenceItem(kind=kind, artifact_digest=descriptor.digest, media_type=media, verdict=verdict))); return descriptor
-        def replace(kind, descriptor, verdict="pass"):
-            registration = EvidenceRegistration(descriptor, EvidenceItem(kind=kind, artifact_digest=descriptor.digest, media_type=descriptor.media_type, verdict=verdict))
-            for index, item in enumerate(evidence):
-                if item.item.kind == kind:
-                    evidence[index] = registration
-                    return descriptor
-            evidence.append(registration)
-            return descriptor
         def add_failed_evidence_set():
+            if command_execution_data is not None and not any(
+                item.item.kind == "command_execution_log" for item in evidence
+            ):
+                add("command_execution_log", command_execution_data, "application/json")
+            if capability_report is not None and not any(
+                item.item.kind == "adapter_capability_report" for item in evidence
+            ):
+                add(
+                    "adapter_capability_report",
+                    canonical_json_bytes(capability_report),
+                    "application/json",
+                )
             evidence[:] = [
                 item for item in evidence
                 if item.item.kind != "proposal_evidence_set"
@@ -438,12 +438,20 @@ class ProposalExecutor:
         try:
             add("design_command_batch", canonical_json_bytes(batch.model_dump(mode="json")), "application/json")
             capability = self._kicad.probe()
-            capability_descriptor = add("adapter_capability_report", canonical_json_bytes({
-                "adapter_contract": "pcbflow.schematic.cst.v1", "kicad_major": 9,
-                "kicad": {"available": capability.available, "version": capability.version,
-                          "executable_digest": capability.executable_digest, "reason": capability.reason},
-            }), "application/json")
-            add("command_execution_log", canonical_json_bytes({"stage": "preflight", "preconditions": []}), "application/json")
+            kicad_identity = {
+                "available": capability.available,
+                "version": capability.version,
+                "executable_digest": capability.executable_digest,
+                "reason": capability.reason,
+            }
+            capability_report = {
+                "adapter_contract": "pcbflow.schematic.cst.v1",
+                "kicad_major": 9,
+                "kicad": kicad_identity,
+            }
+            command_execution_data = canonical_json_bytes(
+                {"stage": "preflight", "preconditions": []}
+            )
             with self._revisions.materialize(project.id, batch.base_revision, "proposal") as workspace:
                 self._revisions.assert_clean(project.id, batch.base_revision, workspace)
                 before_manifest = add("project_snapshot_before", self._manifest(workspace, self._revisions), "application/json")
@@ -451,8 +459,13 @@ class ProposalExecutor:
                 assert capability is not None
                 context = _PreconditionContext(before, batch.base_revision, requirements.canonical_digest, capability)
                 results = [evaluate_precondition(precondition, context) for command in batch.commands for precondition in command.preconditions]
-                execution_descriptor = self._put(canonical_json_bytes({"preconditions": [result.model_dump(mode="json") for result in results]}), "application/json")
-                replace("command_execution_log", execution_descriptor)
+                command_execution_data = canonical_json_bytes(
+                    {
+                        "preconditions": [
+                            result.model_dump(mode="json") for result in results
+                        ]
+                    }
+                )
                 if not capability.available or not capability.version or int(capability.version.split(".", 1)[0]) != 9:
                     raise TerminalTaskError("KICAD_CLI_UNAVAILABLE", capability.reason or "KiCad 9 is required")
                 if project.mode is not ProjectMode.MANAGED or project.current_revision != batch.base_revision or requirements.status is not RequirementSetStatus.FROZEN or project.active_requirement_set_id != requirements.id:
@@ -463,9 +476,13 @@ class ProposalExecutor:
                     raise TerminalTaskError("DESIGN_COMMAND_PRECONDITION_FAILED", "a design command precondition failed")
                 applied = self._adapter.apply(workspace, batch.commands)
                 after = applied.after
-                applied_capability_descriptor = self._put(canonical_json_bytes({"adapter_contract": applied.capability_report.adapter_contract, "kicad_major": applied.capability_report.kicad_major, "supported_operations": applied.capability_report.supported_operations, "module_digests": applied.capability_report.module_digests}), "application/json")
-                replace("adapter_capability_report", applied_capability_descriptor)
-                capability_descriptor = applied_capability_descriptor
+                capability_report = {
+                    "adapter_contract": applied.capability_report.adapter_contract,
+                    "kicad_major": applied.capability_report.kicad_major,
+                    "supported_operations": applied.capability_report.supported_operations,
+                    "module_digests": applied.capability_report.module_digests,
+                    "kicad": kicad_identity,
+                }
                 for modified_path in applied.modified_files:
                     candidate_path = workspace / modified_path
                     try:
@@ -487,13 +504,34 @@ class ProposalExecutor:
                             MetricName.KICAD_ERC_SECONDS,
                             max(0.0, self._monotonic() - erc_started),
                         )
+                capability_report["validation_runs"] = [
+                    {
+                        "kind": report.kind,
+                        "argv": report.argv,
+                        "returncode": report.returncode,
+                        "tool_version": report.tool_version,
+                    }
+                    for report in reports
+                ]
+                add(
+                    "command_execution_log", command_execution_data, "application/json"
+                )
+                capability_descriptor = add(
+                    "adapter_capability_report",
+                    canonical_json_bytes(capability_report),
+                    "application/json",
+                )
                 ercs = [report for report in reports if report.kind == "erc"]
                 if len(ercs) != 1: raise TerminalTaskError("CANDIDATE_VALIDATION_FAILED", "exactly one ERC report is required")
                 erc_descriptor = add("kicad_erc", ercs[0].data, "application/json", "pass")
                 parsed = parse_kicad_report("erc", ercs[0].data)
                 if parsed.findings:
                     evidence[-1] = EvidenceRegistration(erc_descriptor, EvidenceItem(kind="kicad_erc", artifact_digest=erc_descriptor.digest, media_type="application/json", verdict="fail"))
-                after_descriptor = add("project_snapshot_after", self._manifest(workspace, self._revisions), "application/json")
+                after_manifest = self._manifest(workspace, self._revisions)
+                after_descriptor = add(
+                    "project_snapshot_after", after_manifest, "application/json"
+                )
+                after_snapshot_digest = json.loads(after_manifest)["snapshot_digest"]
                 diff_bytes = self._revisions.git.diff_worktree(workspace)
                 self._hit_fault(FaultPoint.DURING_DIFF_ARTIFACT_SAVE)
                 diff_descriptor = add("git_text_diff", diff_bytes, "application/octet-stream")
@@ -503,7 +541,18 @@ class ProposalExecutor:
                 actor_name = f"PCBFlow {batch.actor.type}:{batch.actor.id}".replace("\r", "_").replace("\n", "_")
                 actor_email = f"pcbflow+{hashlib.sha256(f'{batch.actor.type}:{batch.actor.id}'.encode()).hexdigest()[:24]}@local.invalid"
                 self._hit_fault(FaultPoint.BEFORE_CANDIDATE_COMMIT)
-                candidate = self._revisions.commit_candidate(project, workspace, batch.base_revision, f"refs/pcbflow/proposals/{proposal_id}", f"pcbflow: proposal {proposal_id}", self._command_batches.created_at(batch.batch_id), publish_ref=False, author_name=actor_name, author_email=actor_email)
+                candidate = self._revisions.commit_candidate(
+                    project,
+                    workspace,
+                    batch.base_revision,
+                    f"refs/pcbflow/proposals/{proposal_id}",
+                    f"pcbflow: proposal {proposal_id}",
+                    self._command_batches.created_at(batch.batch_id),
+                    snapshot_digest=after_snapshot_digest,
+                    publish_ref=False,
+                    author_name=actor_name,
+                    author_email=actor_email,
+                )
                 candidate_revision = candidate.revision
                 artifacts = tuple(item.item for item in evidence)
                 evidence_set = EvidenceSet(project_id=project.id, task_id=lease.task_id, proposal_id=proposal_id, base_revision=batch.base_revision, candidate_revision=candidate.revision, artifacts=artifacts)
@@ -558,15 +607,6 @@ class ProposalExecutor:
             digest_map = {item.item.kind: item.item.artifact_digest for item in evidence}
             self._proposal_store.mark_validation_failed(proposal_id, lease.task_id, lease.lease_token, self._clock(), failed.code, digest_map.get("schematic_semantic_diff"), evidence_set_digest, {"error_code": failed.code, "artifact_digests": digest_map}, tuple(evidence))
             raise failed from error
-
-
-def revisions_module_snapshot_files(root: Path):
-    for directory, directories, files in os.walk(root, followlinks=False):
-        directories.sort(); files.sort()
-        for name in files:
-            path = Path(directory) / name
-            relative = path.relative_to(root).as_posix()
-            yield path, relative, path.stat()
 
 
 class ProposalDecisionService:
@@ -641,8 +681,13 @@ class ProposalDecisionService:
         requirements = self._requirements.get(batch.requirement_set_id)
         if project.mode is not ProjectMode.MANAGED:
             raise CandidateNotReviewableError("project is not managed")
-        if requirements.status is not RequirementSetStatus.FROZEN or project.active_requirement_set_id != requirements.id:
-            raise CandidateNotReviewableError("requirement set is not the active frozen set")
+        if requirements.status not in {
+            RequirementSetStatus.FROZEN,
+            RequirementSetStatus.SUPERSEDED,
+        }:
+            raise CandidateNotReviewableError(
+                "requirement set is not a frozen or superseded set"
+            )
         if proposal.candidate_revision is None or proposal.candidate_snapshot_digest is None:
             raise CandidateNotReviewableError("candidate revision is missing")
         try:
@@ -731,6 +776,7 @@ class ProposalDecisionService:
                 record is None
                 or record.artifact_digest != item.artifact_digest
                 or not item.media_type
+                or item.media_type != READY_EVIDENCE_MEDIA_TYPES[kind]
                 or item.verdict != "pass"
                 or (
                     media_type_lookup is not None

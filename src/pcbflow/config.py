@@ -12,7 +12,7 @@ class Settings:
     database_url: str
     artifact_dir: Path
     kicad_cli: Path | None
-    task_lease_seconds: int = 60
+    task_lease_seconds: int = 180
     process_timeout_seconds: int = 120
     max_process_output_bytes: int = 2_000_000
     max_project_files: int = 10_000
@@ -24,6 +24,20 @@ class Settings:
         scheme = self.database_url.split(":", 1)[0]
         if scheme.split("+", 1)[0] != "sqlite":
             raise ValueError("database_url must use SQLite")
+        limits = {
+            "task_lease_seconds": self.task_lease_seconds,
+            "process_timeout_seconds": self.process_timeout_seconds,
+            "max_process_output_bytes": self.max_process_output_bytes,
+            "max_project_files": self.max_project_files,
+            "max_project_bytes": self.max_project_bytes,
+        }
+        for name, value in limits.items():
+            if value <= 0:
+                raise ValueError(f"{name} must be positive")
+        if self.task_lease_seconds < self.process_timeout_seconds:
+            raise ValueError(
+                "task lease must be at least as long as process timeout"
+            )
 
     @property
     def projects_dir(self) -> Path:
@@ -58,7 +72,7 @@ class Settings:
             module_catalog_dir=(
                 Path(configured_catalog).resolve() if configured_catalog else None
             ),
-            task_lease_seconds=int(values.get("PCBFLOW_TASK_LEASE_SECONDS", "60")),
+            task_lease_seconds=int(values.get("PCBFLOW_TASK_LEASE_SECONDS", "180")),
             process_timeout_seconds=int(
                 values.get("PCBFLOW_PROCESS_TIMEOUT_SECONDS", "120")
             ),

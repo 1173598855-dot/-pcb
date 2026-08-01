@@ -55,6 +55,41 @@ def test_settings_parse_validation_limits_and_remote_mode(tmp_path: Path) -> Non
     assert settings.remote_mode is True
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("PCBFLOW_TASK_LEASE_SECONDS", "0"),
+        ("PCBFLOW_PROCESS_TIMEOUT_SECONDS", "0"),
+        ("PCBFLOW_MAX_PROCESS_OUTPUT_BYTES", "0"),
+        ("PCBFLOW_MAX_PROJECT_FILES", "0"),
+        ("PCBFLOW_MAX_PROJECT_BYTES", "0"),
+    ],
+)
+def test_settings_reject_non_positive_runtime_limits(
+    tmp_path: Path, name: str, value: str
+) -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        Settings.from_env(
+            {
+                "PCBFLOW_DATA_DIR": str(tmp_path),
+                name: value,
+            }
+        )
+
+
+def test_settings_rejects_a_lease_shorter_than_process_timeout(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="task lease"):
+        Settings.from_env(
+            {
+                "PCBFLOW_DATA_DIR": str(tmp_path),
+                "PCBFLOW_TASK_LEASE_SECONDS": "30",
+                "PCBFLOW_PROCESS_TIMEOUT_SECONDS": "60",
+            }
+        )
+
+
 def test_settings_derive_managed_paths_and_optional_module_catalog(
     tmp_path: Path,
 ) -> None:

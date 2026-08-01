@@ -105,6 +105,7 @@ class CstLocation:
 class ParsedSchematic:
     document: SchematicDocument
     locations: dict[str, CstLocation]
+    sheet_files: dict[str, Path]
     aliases: dict[str, tuple[SchematicObjectRef, ...]]
     property_aliases: dict[str, tuple[SchematicObjectRef, ...]]
 
@@ -211,6 +212,7 @@ def parse_schematic(project: Path) -> ParsedSchematic:
     instances = _sheet_instances(root_path, records, links)
 
     locations: dict[str, CstLocation] = {}
+    sheet_files: dict[str, Path] = {}
     sheets: list[Sheet] = []
     symbols: list[Symbol] = []
     labels: list[Label] = []
@@ -236,6 +238,7 @@ def parse_schematic(project: Path) -> ParsedSchematic:
             document=instance.location_record.cst,
             node=sheet_node,
         )
+        sheet_files[object_ref_key(sheet_ref)] = record.path
         sheets.append(
             Sheet(
                 ref=sheet_ref,
@@ -270,6 +273,7 @@ def parse_schematic(project: Path) -> ParsedSchematic:
     return ParsedSchematic(
         document=document,
         locations=locations,
+        sheet_files=sheet_files,
         aliases=_build_aliases(document, locations),
         property_aliases=_build_property_aliases(document, locations),
     )

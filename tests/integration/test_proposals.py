@@ -14,7 +14,7 @@ from pcbflow.domain import TaskLease, TaskStatus
 from pcbflow.kicad import KicadCapability, RawValidationReport
 from pcbflow.observability import MetricName
 from pcbflow.design_tables import ChangeProposalRow
-from pcbflow.proposals import EvidenceSet, ProposalStatus
+from pcbflow.proposals import EvidenceSet, ProposalExecutor, ProposalStatus
 from pcbflow.repositories import StaleLeaseError
 from pcbflow.validation import ProjectCopyLimitError, assert_project_tree_safe
 from pcbflow.tables import ArtifactRow, EvidenceRow, TaskRow
@@ -127,6 +127,11 @@ def test_worker_builds_one_reviewable_candidate_and_complete_evidence(tmp_path: 
     try:
         source, project, requirement_set = _prepare(container, tmp_path)
         source_before = _snapshot(source)
+        object_digests_before = {
+            f"sha256:{path.name}"
+            for path in container.settings.artifact_dir.joinpath("objects").rglob("*")
+            if path.is_file() and len(path.name) == 64
+        }
         proposal = container.proposals.create(_instantiate_batch(project, requirement_set), "execute-status-led")
         assert container.worker.run_once()
         ready = container.proposal_store.get(proposal.id)
@@ -144,6 +149,14 @@ def test_worker_builds_one_reviewable_candidate_and_complete_evidence(tmp_path: 
         evidence = container.evidence.list_for_project(project.id)
         assert {"design_command_batch", "project_snapshot_before", "project_snapshot_after", "git_text_diff", "schematic_semantic_diff", "kicad_erc", "command_execution_log", "adapter_capability_report", "proposal_evidence_set"} <= {item.kind for item in evidence}
         assert all(container.artifacts.verify(item.artifact_digest) for item in evidence)
+        object_digests = {
+            f"sha256:{path.name}"
+            for path in container.settings.artifact_dir.joinpath("objects").rglob("*")
+            if path.is_file() and len(path.name) == 64
+        }
+        assert object_digests - object_digests_before <= {
+            item.artifact_digest for item in evidence
+        }
         metric_names = {point.name for point in container.metrics.snapshot()}
         assert {
             MetricName.PROPOSAL_EXECUTION_SECONDS,
@@ -153,6 +166,102 @@ def test_worker_builds_one_reviewable_candidate_and_complete_evidence(tmp_path: 
             MetricName.ADAPTER_EXECUTION_TOTAL,
         } <= metric_names
         assert _snapshot(source) == source_before
+    finally:
+        container.dispose()
+
+
+def test_proposal_snapshot_manifest_uses_the_revision_snapshot_policy(
+    tmp_path: Path,
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    container = build_container(
+        _settings(tmp_path, fixtures / "modules"),
+        kicad_override=FakeProposalKicad(),
+        clock=lambda: NOW,
+    )
+    try:
+        _source, project, _requirement_set = _prepare(container, tmp_path)
+        with container.revisions.materialize(
+            project.id, project.current_revision, "manifest-policy"
+        ) as workspace:
+            (workspace / "generated").mkdir()
+            (workspace / "generated" / "cache.bin").write_bytes(b"volatile")
+            (workspace / "~board.kicad_sch.lck").write_bytes(b"lock")
+            (workspace / "pcbflow.yaml").write_text(
+                "snapshot_policy_version: 1\nsnapshot_excludes:\n  - generated\n",
+                encoding="utf-8",
+            )
+
+            manifest = json.loads(
+                ProposalExecutor._manifest(workspace, container.revisions)
+            )
+
+        paths = {entry["path"] for entry in manifest["files"]}
+        assert ".git" not in paths
+        assert "~board.kicad_sch.lck" not in paths
+        assert "generated/cache.bin" not in paths
+        assert "board.kicad_sch" in paths
+    finally:
+        container.dispose()
+
+
+def test_capability_evidence_preserves_kicad_identity_and_validation_execution(
+    tmp_path: Path,
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    container = build_container(
+        _settings(tmp_path, fixtures / "modules"),
+        kicad_override=FakeProposalKicad(),
+        clock=lambda: NOW,
+    )
+    try:
+        _source, project, requirement_set = _prepare(container, tmp_path)
+        batch = json.loads(_instantiate_batch(project, requirement_set))
+        command = batch["commands"][0]
+        command["operation"] = {
+            "type": "schematic.set_property",
+            "payload": {
+                "subject_ref": {
+                    "kind": "symbol",
+                    "sheet_uuid": "00000000-0000-0000-0000-000000000001",
+                    "object_uuid": "00000000-0000-0000-0000-000000000002",
+                    "pin_number": None,
+                },
+                "property_name": "Value",
+                "value": "GREEN",
+                "expected_old_value": "\u72b6\u6001LED",
+            },
+        }
+        command["provenance"]["module_revision_ids"] = []
+        proposal = container.proposals.create(
+            json.dumps(batch, separators=(",", ":")).encode(),
+            "execute-status-led",
+        )
+        assert container.worker.run_once()
+        ready = container.proposal_store.get(proposal.id)
+        evidence = next(
+            item
+            for item in container.evidence.list_for_project(project.id)
+            if item.task_id == proposal.task_id
+            and item.kind == "adapter_capability_report"
+        )
+        report = json.loads(container.artifacts.open(evidence.artifact_digest).read())
+
+        assert ready.status is ProposalStatus.READY_FOR_REVIEW
+        assert report["kicad"] == {
+            "available": True,
+            "version": "9.0.2",
+            "executable_digest": "sha256:" + "9" * 64,
+            "reason": None,
+        }
+        assert report["validation_runs"] == [
+            {
+                "kind": "erc",
+                "argv": ["kicad-cli", "sch", "erc"],
+                "returncode": 0,
+                "tool_version": "9.0.2",
+            }
+        ]
     finally:
         container.dispose()
 
@@ -239,7 +348,14 @@ def test_fence_is_rechecked_after_execution_begins(tmp_path: Path) -> None:
         def expiring_assert_active(task_id, lease_token, now):
             nonlocal calls
             calls += 1
-            return original_assert_active(task_id, lease_token, NOW + timedelta(seconds=61) if calls >= 3 else now)
+            return original_assert_active(
+                task_id,
+                lease_token,
+                NOW
+                + timedelta(seconds=container.settings.task_lease_seconds + 1)
+                if calls >= 3
+                else now,
+            )
 
         container.tasks.assert_active = expiring_assert_active
         assert container.worker.run_once()

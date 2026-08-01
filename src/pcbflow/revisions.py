@@ -20,7 +20,7 @@ from typing import BinaryIO
 import yaml
 from sqlalchemy import select, text
 
-from pcbflow.canonical import canonical_digest
+from pcbflow.canonical import canonical_digest, canonical_json_bytes
 from pcbflow.design_tables import (
     ChangeProposalRow,
     DesignCommandBatchRow,
@@ -43,6 +43,7 @@ from pcbflow.workspaces import (
 
 
 _OBJECT_ID = re.compile(r"[0-9a-f]{40,64}")
+_SNAPSHOT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ADOPTION_LOCKS_GUARD = Lock()
 _ADOPTION_LOCKS: dict[Path, Lock] = {}
 _WINDOWS_LOCK_CONTENTION_WINERRORS = frozenset({32, 33})
@@ -571,6 +572,46 @@ class RevisionService:
             )
         return canonical_digest({"snapshot_policy_version": 1, "files": files})
 
+    def snapshot_manifest(self, root: Path) -> bytes:
+        """Return evidence using the same file policy as revision snapshots."""
+        excludes = self._load_snapshot_excludes(root)
+        normalized = normalize_snapshot_excludes(excludes)
+        files: list[dict[str, object]] = []
+        for path, relative, metadata in _snapshot_files(root, normalized):
+            files.append(
+                {
+                    "path": relative.as_posix(),
+                    "type": "file",
+                    "mode": "100755"
+                    if metadata.st_mode & stat.S_IXUSR
+                    else "100644",
+                    "size": metadata.st_size,
+                    "digest": f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+                }
+            )
+        return canonical_json_bytes(
+            {
+                "schema_version": "1.0",
+                "snapshot_policy_version": 1,
+                "snapshot_excludes": sorted(
+                    value.as_posix() for value in normalized
+                ),
+                "snapshot_digest": canonical_digest(
+                    {
+                        "snapshot_policy_version": 1,
+                        "files": [
+                            {
+                                key: entry[key]
+                                for key in ("path", "mode", "size", "digest")
+                            }
+                            for entry in files
+                        ],
+                    }
+                ),
+                "files": files,
+            }
+        )
+
     def adopt(self, project_id: str, idempotency_key: str) -> Project:
         if not idempotency_key:
             raise ValueError("idempotency key must not be empty")
@@ -679,12 +720,21 @@ class RevisionService:
         message: str,
         timestamp: datetime,
         *,
+        snapshot_digest: str | None = None,
         publish_ref: bool = True,
         author_name: str = "PCBFlow",
         author_email: str = "pcbflow@local.invalid",
     ) -> CandidateRevision:
+        if snapshot_digest is not None and not _SNAPSHOT_DIGEST.fullmatch(
+            snapshot_digest
+        ):
+            raise ValueError("snapshot digest must be a sha256 digest")
         excludes = self._load_snapshot_excludes(workspace)
-        snapshot = self.snapshot_digest(workspace, excludes)
+        snapshot = (
+            snapshot_digest
+            if snapshot_digest is not None
+            else self.snapshot_digest(workspace, excludes)
+        )
         revision = self._git.commit_snapshot(
             self._repo(project.id),
             workspace,
