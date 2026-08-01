@@ -53,9 +53,15 @@ def test_real_kicad10_controlled_write_uses_profile(tmp_path: Path) -> None:
         fixtures / "kicad" / "real" / "10" / "controlled-write",
         project,
     )
-    adapter = CstSchematicAdapter(None)
+    adapter = CstSchematicAdapter(
+        FileModuleCatalog(
+            fixtures / "modules",
+            max_files=32,
+            max_bytes=2_000_000,
+        )
+    )
     before = adapter.inspect(project, kicad_major=10)
-    symbol = before.symbols[0]
+    symbol = next(item for item in before.symbols if item.reference == "U1")
     command = load_command_batch(
         json.dumps(_real_set_property_batch(symbol.ref)).encode()
     ).commands[0]

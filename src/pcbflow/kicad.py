@@ -99,9 +99,24 @@ def parse_kicad_report(
         raise KicadReportFormatError("report is not valid UTF-8 JSON") from error
     if not isinstance(document, dict):
         raise KicadReportFormatError("report JSON must be an object")
-    violations = document.get("violations")
-    if not isinstance(violations, list):
-        raise KicadReportFormatError("report violations must be an array")
+    if "violations" in document:
+        violations = document["violations"]
+        if not isinstance(violations, list):
+            raise KicadReportFormatError("report violations must be an array")
+    else:
+        sheets = document.get("sheets")
+        if not isinstance(sheets, list):
+            raise KicadReportFormatError("report violations must be an array")
+        violations = []
+        for sheet in sheets:
+            if not isinstance(sheet, dict):
+                raise KicadReportFormatError("report sheet must be an object")
+            sheet_violations = sheet.get("violations")
+            if not isinstance(sheet_violations, list):
+                raise KicadReportFormatError(
+                    "report sheet violations must be an array"
+                )
+            violations.extend(sheet_violations)
 
     source = document.get("source", "unknown")
     if not isinstance(source, str):

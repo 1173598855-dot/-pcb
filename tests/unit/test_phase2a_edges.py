@@ -321,6 +321,9 @@ def test_kicad_validate_rejects_missing_and_ambiguous_projects(tmp_path: Path) -
     [
         b"[]",
         b'{"violations":{}}',
+        b'{"sheets":{}}',
+        b'{"sheets":[1]}',
+        b'{"sheets":[{"violations":{}}]}',
         b'{"violations":[1]}',
         b'{"violations":[{"type":"x","severity":"error","description":""}]}',
     ],

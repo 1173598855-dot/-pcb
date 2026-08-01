@@ -282,6 +282,44 @@ def test_parse_kicad_report_normalizes_findings() -> None:
     )
 
 
+def test_parse_kicad_report_normalizes_sheet_scoped_erc_findings() -> None:
+    payload = json.dumps(
+        {
+            "source": "board.kicad_sch",
+            "sheets": [
+                {
+                    "path": "/",
+                    "uuid_path": "/fixture-sheet",
+                    "violations": [
+                        {
+                            "type": "pin not connected",
+                            "severity": "warning",
+                            "description": "Pin is not connected",
+                            "items": [
+                                {
+                                    "uuid": "fixture-pin",
+                                    "description": "U1 pin 1",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    ).encode()
+
+    report = parse_kicad_report("erc", payload)
+
+    assert report.findings == (
+        NormalizedFinding(
+            rule_id="KICAD.ERC.PIN_NOT_CONNECTED",
+            severity="warning",
+            subject="fixture-pin",
+            message="Pin is not connected: U1 pin 1",
+        ),
+    )
+
+
 def test_parse_kicad_report_rejects_unknown_severity() -> None:
     payload = json.dumps(
         {
