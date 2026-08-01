@@ -9,7 +9,9 @@ from pcbflow.kicad import (
     AmbiguousKicadProjectError,
     KicadCli,
     KicadDesignFormatError,
+    KicadProjectNotFoundError,
     KicadReportFormatError,
+    KicadToolError,
     parse_kicad_report,
 )
 from pcbflow.process import ProcessResult
@@ -175,6 +177,7 @@ def test_install_version_parser_handles_numeric_and_invalid_paths(tmp_path: Path
         b"(other (version 20250114))",
         b"(kicad_sch (version))",
         b"(kicad_sch (version bad))",
+        b"(kicad_sch (version 20250114) (version 20250114))",
     ],
 )
 def test_validate_rejects_malformed_design_format(tmp_path: Path, payload: bytes) -> None:
@@ -187,6 +190,80 @@ def test_validate_rejects_malformed_design_format(tmp_path: Path, payload: bytes
         )
 
     assert getattr(caught.value, "code", None) == "KICAD_FILE_FORMAT_UNSUPPORTED"
+
+
+def test_validate_rejects_file_as_project(tmp_path: Path) -> None:
+    executable = tmp_path / "kicad-cli.exe"
+    executable.write_bytes(b"fixture")
+    project = tmp_path / "not-a-directory"
+    project.write_text("file", encoding="utf-8")
+
+    with pytest.raises(KicadProjectNotFoundError, match="directory"):
+        KicadCli(VersionRunner(), executable, 5).validate(
+            project, tmp_path / "output"
+        )
+
+
+def test_validate_rejects_multiple_root_boards(tmp_path: Path) -> None:
+    executable = tmp_path / "kicad-cli.exe"
+    executable.write_bytes(b"fixture")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "one.kicad_pcb").write_text(
+        "(kicad_pcb (version 20241229))", encoding="utf-8"
+    )
+    (project / "two.kicad_pcb").write_text(
+        "(kicad_pcb (version 20241229))", encoding="utf-8"
+    )
+
+    with pytest.raises(AmbiguousKicadProjectError):
+        KicadCli(VersionRunner(), executable, 5).validate(
+            project, tmp_path / "output"
+        )
+
+
+def test_validate_reports_tool_failure_and_missing_report(tmp_path: Path) -> None:
+    executable = tmp_path / "kicad-cli.exe"
+    executable.write_bytes(b"fixture")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.kicad_pcb").write_text(
+        "(kicad_pcb (version 20241229))", encoding="utf-8"
+    )
+
+    class FailingRunner(ReportRunner):
+        def run(self, argv, cwd, timeout_seconds):
+            call = tuple(str(value) for value in argv)
+            self.calls.append(call)
+            if call[-1] == "--version":
+                return ProcessResult(call, 0, "10.0.4\n", "", False)
+            return ProcessResult(call, 2, "", "failed", False)
+
+    with pytest.raises(KicadToolError) as failed:
+        KicadCli(FailingRunner({}), executable, 5).validate(
+            project, tmp_path / "output"
+        )
+    assert failed.value.returncode == 2
+    assert failed.value.stderr == "failed"
+
+    class MissingReportRunner(ReportRunner):
+        def run(self, argv, cwd, timeout_seconds):
+            call = tuple(str(value) for value in argv)
+            self.calls.append(call)
+            if call[-1] == "--version":
+                return ProcessResult(call, 0, "10.0.4\n", "", False)
+            return ProcessResult(call, 0, "", "", False)
+
+    missing_output = tmp_path / "output-missing"
+    missing_output.mkdir()
+    stale_report = missing_output / "drc.json"
+    stale_report.write_text("stale report", encoding="utf-8")
+    with pytest.raises(KicadToolError) as caught:
+        KicadCli(MissingReportRunner({}), executable, 5).validate(
+            project, missing_output
+        )
+    assert caught.value.stderr == "report file was not created"
+    assert not stale_report.exists()
 
 
 def test_parse_kicad_report_normalizes_findings() -> None:
