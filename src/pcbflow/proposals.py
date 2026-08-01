@@ -34,7 +34,17 @@ from pcbflow.revisions import RevisionService
 from pcbflow.schematic.adapter import CstSchematicAdapter, CommandResult
 from pcbflow.schematic.diff import CommandAttribution, build_semantic_diff, semantic_diff_bytes
 from pcbflow.schematic.semantic import SchematicDocument, object_ref_key
-from pcbflow.kicad import KicadPort, KicadCapability, parse_kicad_report, KicadUnavailableError, KicadProjectNotFoundError, KicadToolError
+from pcbflow.kicad import (
+    KicadPort,
+    KicadCapability,
+    KicadDesignFormatError,
+    KicadOperationUnsupportedError,
+    parse_kicad_report,
+    KicadUnavailableError,
+    KicadProjectNotFoundError,
+    KicadToolError,
+)
+from pcbflow.kicad_compatibility import profile_for_major
 from pcbflow.repositories import ProjectRepository
 from pcbflow.validation import assert_project_tree_safe
 from pcbflow.design_tables import GateDecisionRow, OutboxEventRow, ProjectRevisionRow, ChangeProposalRow, DesignCommandBatchRow, RequirementSetRow
@@ -443,10 +453,13 @@ class ProposalExecutor:
                 "version": capability.version,
                 "executable_digest": capability.executable_digest,
                 "reason": capability.reason,
+                "profile_id": capability.profile_id,
+                "profile_revision": capability.profile_revision,
             }
+            profile = profile_for_major(capability.major or -1)
             capability_report = {
                 "adapter_contract": "pcbflow.schematic.cst.v1",
-                "kicad_major": 9,
+                "kicad_major": capability.major,
                 "kicad": kicad_identity,
             }
             command_execution_data = canonical_json_bytes(
@@ -455,7 +468,29 @@ class ProposalExecutor:
             with self._revisions.materialize(project.id, batch.base_revision, "proposal") as workspace:
                 self._revisions.assert_clean(project.id, batch.base_revision, workspace)
                 before_manifest = add("project_snapshot_before", self._manifest(workspace, self._revisions), "application/json")
-                before = self._adapter.inspect(workspace)
+                if (
+                    not capability.available
+                    or capability.version is None
+                    or capability.major is None
+                    or capability.profile_id is None
+                    or capability.profile_revision is None
+                    or profile is None
+                ):
+                    add(
+                        "command_execution_log",
+                        canonical_json_bytes({"stage": "preflight", "preconditions": []}),
+                        "application/json",
+                    )
+                    add(
+                        "adapter_capability_report",
+                        canonical_json_bytes(capability_report),
+                        "application/json",
+                    )
+                    raise TerminalTaskError(
+                        "KICAD_CLI_UNAVAILABLE",
+                        capability.reason or "KiCad compatibility profile is unavailable",
+                    )
+                before = self._adapter.inspect(workspace, kicad_major=capability.major)
                 assert capability is not None
                 context = _PreconditionContext(before, batch.base_revision, requirements.canonical_digest, capability)
                 results = [evaluate_precondition(precondition, context) for command in batch.commands for precondition in command.preconditions]
@@ -466,15 +501,17 @@ class ProposalExecutor:
                         ]
                     }
                 )
-                if not capability.available or not capability.version or int(capability.version.split(".", 1)[0]) != 9:
-                    raise TerminalTaskError("KICAD_CLI_UNAVAILABLE", capability.reason or "KiCad 9 is required")
                 if project.mode is not ProjectMode.MANAGED or project.current_revision != batch.base_revision or requirements.status is not RequirementSetStatus.FROZEN or project.active_requirement_set_id != requirements.id:
                     raise TerminalTaskError("DESIGN_COMMAND_PRECONDITION_FAILED", "proposal base is no longer current")
                 if requirements.frozen_revision is None or not self._revisions.is_ancestor(project.id, requirements.frozen_revision, batch.base_revision):
                     raise TerminalTaskError("DESIGN_COMMAND_PRECONDITION_FAILED", "requirement revision is not an ancestor")
                 if any(result.state.value != "true" for result in results):
                     raise TerminalTaskError("DESIGN_COMMAND_PRECONDITION_FAILED", "a design command precondition failed")
-                applied = self._adapter.apply(workspace, batch.commands)
+                applied = self._adapter.apply(
+                    workspace,
+                    batch.commands,
+                    kicad_major=capability.major,
+                )
                 after = applied.after
                 capability_report = {
                     "adapter_contract": applied.capability_report.adapter_contract,
@@ -510,9 +547,25 @@ class ProposalExecutor:
                         "argv": report.argv,
                         "returncode": report.returncode,
                         "tool_version": report.tool_version,
+                        "executable_digest": report.executable_digest,
+                        "profile_id": report.profile_id,
+                        "profile_revision": report.profile_revision,
                     }
                     for report in reports
                 ]
+                if any(
+                    (
+                        report.tool_version != capability.version
+                        or report.executable_digest != capability.executable_digest
+                        or report.profile_id != capability.profile_id
+                        or report.profile_revision != capability.profile_revision
+                    )
+                    for report in reports
+                ):
+                    raise TerminalTaskError(
+                        "KICAD_TOOL_IDENTITY_MISMATCH",
+                        "validation reports do not match the probed KiCad profile",
+                    )
                 add(
                     "command_execution_log", command_execution_data, "application/json"
                 )
@@ -594,6 +647,22 @@ class ProposalExecutor:
             semantic_digest = digest_map.get("schematic_semantic_diff")
             self._proposal_store.mark_validation_failed(proposal_id, lease.task_id, lease.lease_token, self._clock(), error.code, semantic_digest, evidence_set_digest, {"error_code": error.code, "artifact_digests": digest_map}, tuple(evidence))
             raise
+        except (KicadDesignFormatError, KicadOperationUnsupportedError) as error:
+            failed = TerminalTaskError(error.code, str(error))
+            evidence_set_digest = add_failed_evidence_set().digest
+            digest_map = {item.item.kind: item.item.artifact_digest for item in evidence}
+            self._proposal_store.mark_validation_failed(
+                proposal_id,
+                lease.task_id,
+                lease.lease_token,
+                self._clock(),
+                failed.code,
+                digest_map.get("schematic_semantic_diff"),
+                evidence_set_digest,
+                {"error_code": failed.code, "artifact_digests": digest_map},
+                tuple(evidence),
+            )
+            raise failed from error
         except StaleLeaseError:
             if _fault_active.get():
                 _fault_active.set(False)

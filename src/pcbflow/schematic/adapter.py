@@ -286,7 +286,7 @@ class CstSchematicAdapter:
         payload = operation.payload
         before_document = before.document
         manifest = revision.manifest
-        if manifest.kicad_major != 9 or manifest.adapter_contract != self._ADAPTER_CONTRACT:
+        if kicad_major not in manifest.kicad_majors or manifest.adapter_contract != self._ADAPTER_CONTRACT:
             raise ValueError("module adapter contract is unsupported")
         if payload.placement_slot != "auto":
             raise DesignCommandUnsupportedError("placement_slot")

@@ -132,6 +132,51 @@ def test_module_catalog_uses_literal_raw_template_digest() -> None:
     assert f"digest: {TEMPLATE_DIGEST}" in manifest
 
 
+def test_module_manifest_declares_verified_kicad_majors() -> None:
+    revision = FileModuleCatalog(
+        _fixture_root() / "modules", max_files=32, max_bytes=2_000_000
+    ).get("modrev_status_led_v1")
+
+    assert revision.manifest.kicad_majors == (9, 10)
+
+
+def test_legacy_v1_manifest_normalizes_to_one_major(tmp_path: Path) -> None:
+    source = _fixture_root() / "modules" / "status-led-v1"
+    destination = tmp_path / "modules" / "status-led-v1"
+    shutil.copytree(source, destination)
+    manifest = destination / "module.yaml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        .replace('schema_version: "1.1"', 'schema_version: "1.0"')
+        .replace("kicad_majors: [9, 10]", "kicad_major: 9"),
+        encoding="utf-8",
+    )
+
+    revision = FileModuleCatalog(
+        tmp_path / "modules", max_files=32, max_bytes=2_000_000
+    ).get("modrev_status_led_v1")
+
+    assert revision.manifest.kicad_majors == (9,)
+
+
+def test_v1_1_manifest_rejects_unsorted_duplicate_majors(tmp_path: Path) -> None:
+    source = _fixture_root() / "modules" / "status-led-v1"
+    destination = tmp_path / "modules" / "status-led-v1"
+    shutil.copytree(source, destination)
+    manifest = destination / "module.yaml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "kicad_majors: [9, 10]", "kicad_majors: [10, 9, 10]"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ModuleIntegrityError, match="invalid module manifest"):
+        FileModuleCatalog(
+            tmp_path / "modules", max_files=32, max_bytes=2_000_000
+        ).get("modrev_status_led_v1")
+
+
 def test_module_catalog_rejects_template_digest_mismatch(tmp_path: Path) -> None:
     source = _fixture_root() / "modules" / "status-led-v1"
     catalog_root = tmp_path / "modules"

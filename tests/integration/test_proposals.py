@@ -31,7 +31,16 @@ class FakeProposalKicad:
         self.report = report
 
     def probe(self) -> KicadCapability:
-        return KicadCapability(True, Path("kicad-cli"), "9.0.2", "sha256:" + "9" * 64, None)
+        return KicadCapability(
+            True,
+            Path("kicad-cli"),
+            "9.0.2",
+            "sha256:" + "9" * 64,
+            None,
+            9,
+            "kicad-9-v1",
+            1,
+        )
 
     def validate(self, project_dir: Path, output_dir: Path) -> tuple[RawValidationReport, ...]:
         assert project_dir.is_dir()
@@ -264,6 +273,8 @@ def test_capability_evidence_preserves_kicad_identity_and_validation_execution(
             "version": "9.0.2",
             "executable_digest": "sha256:" + "9" * 64,
             "reason": None,
+            "profile_id": "kicad-9-v1",
+            "profile_revision": 1,
         }
         assert report["validation_runs"] == [
             {
@@ -271,6 +282,9 @@ def test_capability_evidence_preserves_kicad_identity_and_validation_execution(
                 "argv": ["kicad-cli", "sch", "erc"],
                 "returncode": 0,
                 "tool_version": "9.0.2",
+                "executable_digest": "sha256:" + "9" * 64,
+                "profile_id": "kicad-9-v1",
+                "profile_revision": 1,
             }
         ]
     finally:

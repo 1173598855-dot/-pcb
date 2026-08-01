@@ -323,6 +323,9 @@ class FakeCliKicad:
             "9.0.2",
             "sha256:" + "9" * 64,
             None,
+            9,
+            "kicad-9-v1",
+            1,
         )
 
     def validate(self, project_dir: Path, output_dir: Path):

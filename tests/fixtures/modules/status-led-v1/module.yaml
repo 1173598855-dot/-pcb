@@ -1,8 +1,8 @@
-schema_version: "1.0"
+schema_version: "1.1"
 module_revision_id: modrev_status_led_v1
 status: verified
 name: Status LED
-kicad_major: 9
+kicad_majors: [9, 10]
 adapter_contract: pcbflow.schematic.cst.v1
 template:
   path: status-led.kicad_sch

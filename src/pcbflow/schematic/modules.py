@@ -53,12 +53,10 @@ class FootprintEntry(_StrictManifest):
     digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
-class _ManifestModel(_StrictManifest):
-    schema_version: str = Field(pattern=r"^1\.0$")
+class _ManifestBase(_StrictManifest):
     module_revision_id: str = Field(pattern=r"^modrev_[A-Za-z0-9_-]+$")
     status: str = Field(pattern=r"^verified$")
     name: str = Field(min_length=1)
-    kicad_major: int
     adapter_contract: str = Field(pattern=r"^pcbflow\.schematic\.cst\.v1$")
     template: TemplateEntry
     uuid_bindings: dict[str, str]
@@ -87,19 +85,41 @@ class _ManifestModel(_StrictManifest):
         return values
 
 
+class _ManifestModelV1(_ManifestBase):
+    schema_version: str = Field(pattern=r"^1\.0$")
+    kicad_major: int = Field(ge=1)
+
+
+class _ManifestModelV1_1(_ManifestBase):
+    schema_version: str = Field(pattern=r"^1\.1$")
+    kicad_majors: list[int] = Field(min_length=1)
+
+    @field_validator("kicad_majors")
+    @classmethod
+    def canonical_kicad_majors(cls, values: list[int]) -> list[int]:
+        if values != sorted(set(values)) or any(value < 1 for value in values):
+            raise ValueError("kicad_majors must be sorted unique positive integers")
+        return values
+
+
 @dataclass(frozen=True, slots=True)
 class ModuleManifest:
     schema_version: str
     module_revision_id: str
     status: str
     name: str
-    kicad_major: int
+    kicad_majors: tuple[int, ...]
     adapter_contract: str
     template: TemplateEntry
     uuid_bindings: Mapping[str, str]
     parameters: Mapping[str, ParameterEntry]
     ports: Mapping[str, str]
     footprints: Mapping[str, FootprintEntry]
+
+    @property
+    def kicad_major(self) -> int:
+        """Legacy accessor for callers that only support one major."""
+        return self.kicad_majors[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,7 +246,11 @@ class FileModuleCatalog:
             module_revision_id=wire_manifest.module_revision_id,
             status=wire_manifest.status,
             name=wire_manifest.name,
-            kicad_major=wire_manifest.kicad_major,
+            kicad_majors=(
+                (wire_manifest.kicad_major,)
+                if isinstance(wire_manifest, _ManifestModelV1)
+                else tuple(wire_manifest.kicad_majors)
+            ),
             adapter_contract=wire_manifest.adapter_contract,
             template=wire_manifest.template,
             uuid_bindings=MappingProxyType(dict(wire_manifest.uuid_bindings)),
@@ -241,11 +265,22 @@ class FileModuleCatalog:
             template_bytes=template_bytes,
         )
 
-    def _read_manifest(self, path: Path) -> _ManifestModel:
+    def _read_manifest(
+        self, path: Path
+    ) -> _ManifestModelV1 | _ManifestModelV1_1:
         self._checked_file(path)
         try:
             value = yaml.safe_load(path.read_bytes())
-            return _ManifestModel.model_validate(value, strict=True)
+            if not isinstance(value, dict):
+                raise ValueError("manifest must be a mapping")
+            schema_version = value.get("schema_version")
+            model = {
+                "1.0": _ManifestModelV1,
+                "1.1": _ManifestModelV1_1,
+            }.get(schema_version)
+            if model is None:
+                raise ValueError("unsupported manifest schema version")
+            return model.model_validate(value, strict=True)
         except (OSError, yaml.YAMLError, ValidationError, TypeError, ValueError) as error:
             raise ModuleIntegrityError("invalid module manifest") from error
 
