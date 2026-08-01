@@ -261,6 +261,28 @@ pcbflow proposal accept <proposal-id> --candidate-digest <sha256:...> --actor-id
 pcbflow proposal reject <proposal-id> --reason <text> --actor-id <id> --idempotency-key <key> --json
 ```
 
+## Verified component revision catalog
+
+A local `component.yaml` can declare one verified manufacturer part revision
+and the SHA-256 digests of its sibling datasheet, pinout, KiCad symbol,
+footprint, and optional STEP model. Importing copies the canonical manifest and
+all declared evidence into PCBFlow's content-addressed data directory; command
+and API responses expose only metadata and artifact digests, never source
+paths or asset bytes.
+
+```powershell
+pcbflow component import C:\components\LED-0603-RED\component.yaml `
+  --idempotency-key acme-led-red-rev-a --json
+pcbflow component show <component-revision-id> --json
+pcbflow component list --component-key Acme:LED-0603-RED --json
+```
+
+The REST equivalents are `POST /api/v1/component-revisions`,
+`GET /api/v1/component-revisions/{id}`, and
+`GET /api/v1/component-revisions?component_key=...`. Local-path imports are
+disabled in remote mode. This catalog does not contact suppliers, generate a
+BOM, select replacements, or modify KiCad projects.
+
 ## Phase 2A controlled design change kernel
 
 Phase 2A is the implemented write-capable slice. It adopts an external KiCad

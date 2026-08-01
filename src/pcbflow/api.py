@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pcbflow.approvals import ApprovalDigestMismatchError
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.commands import DesignCommandSchemaError, load_command_batch
+from pcbflow.component_store import ComponentRevisionNotFoundError
 from pcbflow.config import Settings
 from pcbflow.container import Container, build_container
 from pcbflow.domain import new_id
@@ -49,6 +50,10 @@ class StrictRequest(BaseModel):
 class CreateProjectRequest(StrictRequest):
     name: str = Field(min_length=1)
     source_path: str = Field(min_length=1)
+
+
+class CreateComponentRevisionRequest(StrictRequest):
+    manifest_path: str = Field(min_length=1)
 
 
 class ActorRequest(StrictRequest):
@@ -329,6 +334,17 @@ def create_app(container: Container | None = None) -> FastAPI:
     ) -> JSONResponse:
         return _error_response(request, 404, "PROPOSAL_NOT_FOUND", "proposal not found")
 
+    @app.exception_handler(ComponentRevisionNotFoundError)
+    async def handle_component_revision_not_found(
+        request: Request, error: ComponentRevisionNotFoundError
+    ) -> JSONResponse:
+        return _error_response(
+            request,
+            404,
+            "COMPONENT_REVISION_NOT_FOUND",
+            "component revision not found",
+        )
+
     @app.exception_handler(IdempotencyConflictError)
     async def handle_idempotency_conflict(
         request: Request, error: IdempotencyConflictError
@@ -380,6 +396,45 @@ def create_app(container: Container | None = None) -> FastAPI:
     @app.get("/api/v1/projects")
     def list_projects():
         return jsonable_encoder(services.projects.list())
+
+    @app.post("/api/v1/component-revisions", status_code=201)
+    def import_component_revision(
+        payload: CreateComponentRevisionRequest,
+        response: Response,
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", min_length=1)
+        ],
+    ):
+        if services.settings.remote_mode:
+            raise ApiError(
+                403,
+                "LOCAL_SOURCE_PATHS_DISABLED",
+                "local source paths are disabled in remote mode",
+            )
+        existing = services.component_store.find_by_idempotency_key(idempotency_key)
+        try:
+            revision = services.components.import_revision(
+                Path(payload.manifest_path), idempotency_key
+            )
+        except ValueError as error:
+            raise ApiError(
+                422,
+                "COMPONENT_MANIFEST_INVALID",
+                "component manifest or evidence is invalid",
+                actions=["provide a verified local component manifest"],
+            ) from error
+        response.status_code = 200 if existing is not None else 201
+        return jsonable_encoder(revision)
+
+    @app.get("/api/v1/component-revisions/{component_revision_id}")
+    def get_component_revision(component_revision_id: str):
+        return jsonable_encoder(services.component_store.get(component_revision_id))
+
+    @app.get("/api/v1/component-revisions")
+    def list_component_revisions(component_key: str):
+        return jsonable_encoder(
+            services.component_store.list_for_component(component_key)
+        )
 
     @app.post("/api/v1/projects/{project_id}:adopt")
     def adopt_project(

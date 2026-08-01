@@ -12,6 +12,7 @@ from fastapi.encoders import jsonable_encoder
 from pcbflow.api import _mapped_domain_error, create_app
 from pcbflow.approvals import ApprovalDigestMismatchError
 from pcbflow.commands import DesignCommandSchemaError, load_command_batch
+from pcbflow.component_store import ComponentRevisionNotFoundError
 from pcbflow.config import Settings
 from pcbflow.container import Container, build_container
 from pcbflow.observability import ensure_trace_id
@@ -39,11 +40,13 @@ task_app = typer.Typer(no_args_is_help=True)
 requirements_app = typer.Typer(no_args_is_help=True)
 approval_app = typer.Typer(no_args_is_help=True)
 proposal_app = typer.Typer(no_args_is_help=True)
+component_app = typer.Typer(no_args_is_help=True)
 app.add_typer(project_app, name="project")
 app.add_typer(task_app, name="task")
 app.add_typer(requirements_app, name="requirements")
 app.add_typer(approval_app, name="approval")
 app.add_typer(proposal_app, name="proposal")
+app.add_typer(component_app, name="component")
 
 
 class CliInputError(ValueError):
@@ -76,6 +79,8 @@ def _cli_error(error: BaseException) -> tuple[str, str]:
         return "CANDIDATE_NOT_REVIEWABLE", "the proposal candidate is not reviewable"
     if isinstance(error, DesignCommandSchemaError):
         return "DESIGN_COMMAND_SCHEMA_INVALID", "the design command batch is invalid"
+    if isinstance(error, ComponentRevisionNotFoundError):
+        return "COMPONENT_REVISION_NOT_FOUND", "component revision not found"
     if isinstance(
         error, (ProjectNotFoundError, RequirementSetNotFoundError, ProposalNotFoundError)
     ):
@@ -214,6 +219,59 @@ def project_adopt(
         except Exception as error:
             _abort(error)
         _emit(project, json_output, project.id)
+    finally:
+        container.dispose()
+
+
+@component_app.command("import")
+def component_import(
+    manifest_path: Path,
+    idempotency_key: Annotated[str, typer.Option("--idempotency-key")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    container = _build()
+    try:
+        try:
+            if container.settings.remote_mode:
+                raise CliInputError(
+                    "LOCAL_SOURCE_PATHS_DISABLED",
+                    "local source paths are disabled in remote mode",
+                )
+            revision = container.components.import_revision(
+                manifest_path, idempotency_key
+            )
+        except Exception as error:
+            _abort(error)
+        _emit(revision, json_output, revision.id)
+    finally:
+        container.dispose()
+
+
+@component_app.command("show")
+def component_show(
+    component_revision_id: str,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    container = _build()
+    try:
+        try:
+            revision = container.component_store.get(component_revision_id)
+        except Exception as error:
+            _abort(error)
+        _emit(revision, json_output, revision.id)
+    finally:
+        container.dispose()
+
+
+@component_app.command("list")
+def component_list(
+    component_key: Annotated[str, typer.Option("--component-key")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    container = _build()
+    try:
+        revisions = container.component_store.list_for_component(component_key)
+        _emit(revisions, json_output, f"{len(revisions)} component revision(s)")
     finally:
         container.dispose()
 
