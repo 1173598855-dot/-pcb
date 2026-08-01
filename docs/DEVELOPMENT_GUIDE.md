@@ -188,7 +188,7 @@ AI 不直接成为数据库事实，不直接改文件，不降低规则严重�
 - Windows PowerShell。
 - Python 3.12 或 3.13。
 - Git。
-- 可选：KiCad 9.x。
+- 可选：KiCad 9.x 或 10.x。
 - 可选：Node.js，开始 Web UI 后才需要。
 
 ### 7.2 创建虚拟环境
@@ -1002,7 +1002,7 @@ test_bottom_side_cpl_rotation_matches_golden_fixture
 $env:PCBFLOW_KICAD_CLI
 ```
 
-确认路径指向受支持 KiCad 9.x `kicad-cli.exe`。
+确认路径指向受支持 KiCad 9.x 或 10.x `kicad-cli.exe`。
 
 ### 29.2 `INVALID_KICAD_PROJECT`
 
@@ -1039,7 +1039,7 @@ Phase 2A 的启动协调器以数据库 current revision 为准。若候选对�
 
 ### Phase 2A：受控设计变更内核
 
-状态：已实现。Task 1-20 完成；本机无 KiCad 9 CLI 时，真实 KiCad 契约测试会明确跳过。
+状态：已实现。Task 1-20 完成；本机无 KiCad 9/10 CLI 时，真实 KiCad 契约测试会明确跳过。
 
 ### Phase 2B：器件与模块库
 
@@ -1150,7 +1150,7 @@ external `source_path` is import provenance and is never written.
 
 ### 34.2 Windows/Linux setup and environment
 
-Use Python 3.12 or 3.13, Git, and optionally KiCad 9.x. Create a virtual
+Use Python 3.12 or 3.13, Git, and optionally KiCad 9.x or 10.x. Create a virtual
 environment and install the editable package with `.[dev]`. `PCBFLOW_DATA_DIR`
 defaults to `.pcbflow-data`; `PCBFLOW_DATABASE_URL` and
 `PCBFLOW_ARTIFACT_DIR` override its database and artifact locations.
@@ -1256,7 +1256,7 @@ Stable error examples include `DESIGN_COMMAND_SCHEMA_INVALID`,
 Run unit, property, golden, integration, contract, and E2E tests with
 `python -m pytest -q`. Run the KiCad contract marker with
 `python -m pytest -m kicad -v`; the locator contract is optional and the single
-real-KiCad write/ERC test skips only when KiCad 9 is absent. Golden fixtures are
+real-KiCad write/ERC tests skip only when a verified KiCad 9 or 10 profile is absent. Golden fixtures are
 parsed and byte-round-tripped, copied into paths with spaces, and checked for
 stable UUID identity, hierarchy, Unicode, units, custom properties, and ERC
 findings. Fault tests use constructor-injected `FaultInjector` instances and
@@ -1291,3 +1291,27 @@ tokens, and unbounded output are fenced. AI generation, arbitrary component or
 wire editing, PCB layout, manufacturing output, supplier access, Web UI,
 PostgreSQL, and resident Workers are outside Phase 2A and remain Phase 2B+ or
 later non-goals.
+
+### 34.14 KiCad compatibility profiles and future-major gate
+
+KiCad 9.x and 10.x are separate explicit profiles: kicad-9-v1 and
+kicad-10-v1. A successful capability, validation report, adapter result, and
+proposal evidence set carries the selected major, profile id, profile revision,
+tool version, and executable digest. Unknown majors and unsupported schematic or
+PCB format dates fail before the external tool runs with
+KICAD_FILE_FORMAT_UNSUPPORTED or KICAD_OPERATION_UNSUPPORTED.
+
+Parser goldens are handcrafted CST compatibility inputs and are not real CLI
+fixtures. Real-tool contracts copy repository-owned versioned fixtures into a
+temporary directory and never read an installation directory.
+
+Enabling a future KiCad major requires five gates:
+
+1. Add an immutable profile with an explicit version range, format versions,
+   operations, and stable profile revision.
+2. Freeze native schematic and PCB fixtures with provenance and generator
+   metadata.
+3. Add real ERC/DRC and controlled-write contracts for the new profile.
+4. Add selection, boundary, adapter, evidence, and rejection tests.
+5. Update the compatibility matrix, doctor output contract, and this guide
+   only after all gates pass.

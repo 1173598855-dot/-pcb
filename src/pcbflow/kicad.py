@@ -180,20 +180,47 @@ class KicadCli:
         from_path = shutil.which("kicad-cli")
         if from_path:
             candidate = Path(from_path).resolve()
-            if candidate.is_file():
+            install_version = KicadCli._install_version(candidate)
+            path_profile_known = (
+                install_version is None
+                or select_kicad_profile(
+                    f"{install_version[0]}.{install_version[1]}"
+                )
+                is not None
+            )
+            if candidate.is_file() and path_profile_known:
                 return candidate
 
         if os.name == "nt":
-            program_files = Path(os.environ.get("ProgramFiles", "C:/Program Files"))
-            candidates = sorted(
-                program_files.glob("KiCad/*/bin/kicad-cli.exe"),
-                key=lambda path: path.parts[-3],
-                reverse=True,
+            roots = (
+                Path(os.environ.get("ProgramFiles", "C:/Program Files")),
+                Path(os.environ.get("LocalAppData", "C:/Users/Default/AppData/Local"))
+                / "Programs",
             )
-            for candidate in candidates:
-                if candidate.is_file():
-                    return candidate.resolve()
+            candidates: list[tuple[tuple[int, int], Path]] = []
+            for root in roots:
+                for candidate in root.glob("KiCad/*/bin/kicad-cli.exe"):
+                    if not candidate.is_file():
+                        continue
+                    version_parts = KicadCli._install_version(candidate)
+                    if version_parts is None:
+                        continue
+                    if select_kicad_profile(f"{version_parts[0]}.{version_parts[1]}") is None:
+                        continue
+                    candidates.append((version_parts, candidate))
+            for _, candidate in sorted(candidates, key=lambda item: item[0], reverse=True):
+                return candidate.resolve()
         return None
+
+    @staticmethod
+    def _install_version(path: Path) -> tuple[int, int] | None:
+        name = path.parent.parent.name
+        parts = name.split(".")
+        if not parts or any(not part.isdecimal() for part in parts):
+            return None
+        if len(parts) == 1:
+            return int(parts[0]), 0
+        return int(parts[0]), int(parts[1])
 
     def probe(self) -> KicadCapability:
         if self._executable is None or not self._executable.is_file():

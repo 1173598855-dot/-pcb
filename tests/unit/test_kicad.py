@@ -13,6 +13,7 @@ from pcbflow.kicad import (
     parse_kicad_report,
 )
 from pcbflow.process import ProcessResult
+from pcbflow.process import ProcessTimeoutError
 
 
 class VersionRunner:
@@ -80,6 +81,25 @@ def test_probe_reports_nonzero_version_command(tmp_path: Path) -> None:
     assert report.reason == "version_command_failed"
 
 
+def test_probe_reports_timeout_and_runner_oserror(tmp_path: Path) -> None:
+    executable = tmp_path / "kicad-cli.exe"
+    executable.write_bytes(b"fixture executable")
+
+    class TimeoutRunner:
+        def run(self, argv, cwd, timeout_seconds):
+            raise ProcessTimeoutError(argv, timeout_seconds)
+
+    timeout = KicadCli(TimeoutRunner(), executable, 5).probe()
+    assert timeout.reason == "version_command_timeout"
+
+    class OSErrorRunner:
+        def run(self, argv, cwd, timeout_seconds):
+            raise OSError("cannot execute")
+
+    failed = KicadCli(OSErrorRunner(), executable, 5).probe()
+    assert failed.reason == "executable_read_failed"
+
+
 def test_probe_rejects_unsupported_major_version(tmp_path: Path) -> None:
     executable = tmp_path / "kicad-cli.exe"
     executable.write_bytes(b"fixture executable")
@@ -99,6 +119,74 @@ def test_locate_prefers_explicit_existing_path(tmp_path: Path) -> None:
     executable.write_bytes(b"fixture")
 
     assert KicadCli.locate(executable) == executable.resolve()
+
+
+def test_locate_selects_highest_registered_numeric_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    program_files = tmp_path / "Program Files"
+    local_app_data = tmp_path / "Local"
+    for root, versions in ((program_files, ("9.0", "11.0")), (local_app_data / "Programs", ("10.0",))):
+        for version in versions:
+            executable = root / "KiCad" / version / "bin" / "kicad-cli.exe"
+            executable.parent.mkdir(parents=True, exist_ok=True)
+            executable.write_bytes(version.encode())
+    monkeypatch.setattr("pcbflow.kicad.os.name", "nt")
+    monkeypatch.setenv("ProgramFiles", str(program_files))
+    monkeypatch.setenv("LocalAppData", str(local_app_data))
+    monkeypatch.setattr("pcbflow.kicad.shutil.which", lambda _: None)
+
+    selected = KicadCli.locate()
+
+    assert selected == (local_app_data / "Programs" / "KiCad" / "10.0" / "bin" / "kicad-cli.exe").resolve()
+
+
+def test_locate_skips_unknown_numeric_path_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unknown = tmp_path / "path" / "KiCad" / "11.0" / "bin" / "kicad-cli.exe"
+    unknown.parent.mkdir(parents=True)
+    unknown.write_bytes(b"unknown")
+    known_root = tmp_path / "Program Files"
+    known = known_root / "KiCad" / "10.0" / "bin" / "kicad-cli.exe"
+    known.parent.mkdir(parents=True)
+    known.write_bytes(b"known")
+    monkeypatch.setattr("pcbflow.kicad.os.name", "nt")
+    monkeypatch.setenv("ProgramFiles", str(known_root))
+    monkeypatch.setenv("LocalAppData", str(tmp_path / "Local"))
+    monkeypatch.setattr("pcbflow.kicad.shutil.which", lambda _: str(unknown))
+
+    assert KicadCli.locate() == known.resolve()
+
+
+def test_install_version_parser_handles_numeric_and_invalid_paths(tmp_path: Path) -> None:
+    assert KicadCli._install_version(
+        tmp_path / "KiCad" / "10" / "bin" / "kicad-cli.exe"
+    ) == (10, 0)
+    assert KicadCli._install_version(
+        tmp_path / "KiCad" / "bad" / "bin" / "kicad-cli.exe"
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"not-cst",
+        b"(other (version 20250114))",
+        b"(kicad_sch (version))",
+        b"(kicad_sch (version bad))",
+    ],
+)
+def test_validate_rejects_malformed_design_format(tmp_path: Path, payload: bytes) -> None:
+    path = tmp_path / "board.kicad_sch"
+    path.write_bytes(payload)
+
+    with pytest.raises(Exception) as caught:
+        KicadCli._validate_design_format(
+            path, frozenset((20250114,)), "kicad_sch", "kicad-9-v1"
+        )
+
+    assert getattr(caught.value, "code", None) == "KICAD_FILE_FORMAT_UNSUPPORTED"
 
 
 def test_parse_kicad_report_normalizes_findings() -> None:

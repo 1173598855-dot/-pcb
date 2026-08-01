@@ -1,5 +1,16 @@
 # PCBFlow
 
+## KiCad compatibility matrix
+
+| KiCad major | Profile | CLI validation | Controlled schematic writes |
+| --- | --- | --- | --- |
+| 9.x | kicad-9-v1 | Supported | Supported |
+| 10.x | kicad-10-v1 | Supported | Supported |
+| Other | none | Rejected | Rejected |
+
+PCBFLOW_KICAD_CLI selects one active executable. doctor --json reports its
+exact version, executable digest, major, profile id, and profile revision.
+
 PCBFlow 是一个本地优先、以证据为中心的自动化 PCB 开发工作流。当前仓库已实现 Phase 0/1 的只读验证切片和 Phase 2A 的受控设计变更内核：注册本地 KiCad 工程，探测 `kicad-cli`，在隔离副本中运行 ERC/DRC，持久化任务、原始证据和规范化 Finding，并将项目采纳到受管 Git，冻结 G1 需求，在隔离 worktree 中执行受控原理图命令，记录语义 Diff 与 ERC 证据后接受或拒绝候选。
 
 Phase 2A 不会修改注册的外部 `source_path`；制造资料、PCB 自动布局布线、AI 设计、Web UI、常驻 Worker 和嘉立创导出不在当前范围内。
@@ -9,7 +20,7 @@ Phase 2A 不会修改注册的外部 `source_path`；制造资料、PCB 自动�
 - Windows PowerShell。
 - Python 3.12 或 3.13。
 - Git；仅开发验证和查看差异时需要。
-- 可选：KiCad 9.x 的 `kicad-cli`。可将其加入 `PATH`，或通过 `PCBFLOW_KICAD_CLI` 指定完整路径。
+- 可选：KiCad 9.x 或 10.x 的 `kicad-cli`。可将其加入 `PATH`，或通过 `PCBFLOW_KICAD_CLI` 指定完整路径。
 
 未安装 KiCad 时，项目注册、受管采纳、G1 和查询功能仍可使用；真实验证任务与候选 ERC 会以稳定错误码 `KICAD_CLI_UNAVAILABLE` 终止，不会伪造成功结果。
 
@@ -65,11 +76,14 @@ $env:PCBFLOW_DATA_DIR = "C:\pcbflow-data"
   "path": null,
   "version": null,
   "executable_digest": null,
-  "reason": "kicad_cli_not_found"
+  "reason": "kicad_cli_not_found",
+  "major": null,
+  "profile_id": null,
+  "profile_revision": null
 }
 ```
 
-只有检测到受支持的 KiCad 9.x 时，`available` 才为 `true`。
+只有检测到受支持的 KiCad 9.x 或 10.x profile 时，`available` 才为 `true`。
 
 ## 完整 CLI 工作流
 
@@ -203,7 +217,7 @@ endpoint are disabled; run the worker in a trusted local process instead.
 
 ## 当前限制
 
-- 仅支持 SQLite 与 KiCad 9.x 写入契约。
+- 仅支持 SQLite 与显式验证的 KiCad 9.x/10.x 写入契约。
 - 每种设计文件在工程根目录中最多一个；多个根原理图或 PCB 会被判定为歧义工程。
 - Phase 2A 支持四种受控操作：模块实例化、属性设置、封装指派和标签添加。
 - Worker 当前只提供 `--once` 单任务模式。
@@ -257,7 +271,7 @@ decision. The registered `source_path` is never written after adoption.
 
 ### Initialize and configure
 
-Use Python 3.12 or 3.13, Git, and KiCad 9.x when proposal ERC or the real-KiCad
+Use Python 3.12 or 3.13, Git, and KiCad 9.x or 10.x when proposal ERC or the real-KiCad
 contract is required. The first CLI invocation runs the Alembic migrations;
 they can also be run explicitly:
 
@@ -267,7 +281,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m alembic -c alembic.ini upgrade head
 ```
 
-Set `PCBFLOW_KICAD_CLI` to the KiCad 9 `kicad-cli` executable when it is not on
+Set `PCBFLOW_KICAD_CLI` to the selected KiCad 9 or 10 `kicad-cli` executable when it is not on
 `PATH`. `PCBFLOW_MODULE_CATALOG_DIR` points at verified module revisions used by
 the instantiate operation.
 
@@ -326,7 +340,7 @@ settings are `PCBFLOW_TASK_LEASE_SECONDS`, `PCBFLOW_PROCESS_TIMEOUT_SECONDS`,
 
 ### Phase 2A limits
 
-Only SQLite and KiCad 9.x are supported. The Worker is an explicit `--once`
+Only SQLite and explicitly verified KiCad 9.x/10.x profiles are supported. The Worker is an explicit `--once`
 runner, not a resident service. Phase 2A does not include AI generation,
 arbitrary component or wire editing, PCB layout, manufacturing outputs such as
 Gerber/BOM/CPL, supplier access, a Web UI, PostgreSQL, or a resident Worker.
