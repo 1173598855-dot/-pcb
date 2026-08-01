@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 
 from pcbflow import cli
 from pcbflow.api import _mapped_domain_error, _validation_code, _validation_details
-from pcbflow.approvals import ApprovalDigestMismatchError
+from pcbflow.approvals import ApprovalDigestMismatchError, ApprovalService
 from pcbflow.commands import DesignCommandSchemaError
 from pcbflow.kicad import (
     AmbiguousKicadProjectError,
@@ -102,6 +102,56 @@ def test_api_validation_error_helpers_choose_stable_codes_and_fields() -> None:
             return [{"loc": ("body", "name")}, {"loc": ()}]
 
     assert _validation_details(ErrorDetails()) == {"fields": ["body.name", ""]}
+
+
+@pytest.mark.parametrize(
+    ("requirement_set", "error"),
+    [
+        (
+            SimpleNamespace(
+                subject_digest=lambda: "sha256:actual",
+                candidate_revision="git:revision",
+                candidate_snapshot_digest="sha256:snapshot",
+            ),
+            ApprovalDigestMismatchError,
+        ),
+        (
+            SimpleNamespace(
+                subject_digest=lambda: "sha256:expected",
+                candidate_revision=None,
+                candidate_snapshot_digest="sha256:snapshot",
+            ),
+            ValueError,
+        ),
+        (
+            SimpleNamespace(
+                subject_digest=lambda: "sha256:expected",
+                candidate_revision="git:revision",
+                candidate_snapshot_digest=None,
+            ),
+            ValueError,
+        ),
+    ],
+)
+def test_approval_service_rejects_invalid_candidate_metadata(
+    requirement_set: SimpleNamespace, error: type[BaseException]
+) -> None:
+    service = ApprovalService(
+        requirements=SimpleNamespace(get=lambda _identifier: requirement_set),
+        projects=SimpleNamespace(),
+        decisions=SimpleNamespace(),
+    )
+
+    with pytest.raises(error):
+        service.decide_g1(
+            requirement_set_id="reqset",
+            subject_digest="sha256:expected",
+            decision="approve",
+            actor_type="human",
+            actor_id="local-user",
+            comment="candidate validation",
+            idempotency_key="candidate-validation",
+        )
 
 
 @pytest.mark.parametrize(

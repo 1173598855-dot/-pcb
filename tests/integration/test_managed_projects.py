@@ -6,8 +6,6 @@ from threading import Event, Lock, Thread, current_thread
 import pytest
 from sqlalchemy import select
 
-from pcbflow.config import Settings
-from pcbflow.container import build_container
 from pcbflow.design_tables import OutboxEventRow
 from pcbflow.domain import ProjectMode
 from pcbflow.revisions import ProjectWorktreeDirtyError
@@ -20,10 +18,6 @@ from pcbflow.repositories import (
     ProjectRepository,
     RevisionConflictError,
 )
-
-
-def _settings(tmp_path: Path) -> Settings:
-    return Settings.from_env({"PCBFLOW_DATA_DIR": str(tmp_path / "data")})
 
 
 def test_project_can_be_marked_managed_and_revision_compared(
@@ -172,7 +166,7 @@ def test_adoption_key_and_content_are_fully_idempotent(
 
 
 def test_adopt_copies_snapshot_without_mutating_source_or_importing_git_metadata(
-    tmp_path: Path,
+    tmp_path: Path, container
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -185,7 +179,6 @@ def test_adopt_copies_snapshot_without_mutating_source_or_importing_git_metadata
         for path in source.rglob("*")
         if path.is_file()
     }
-    container = build_container(_settings(tmp_path))
     project = container.projects.create("Controller", source, "create-project")
 
     adopted = container.revisions.adopt(project.id, "adopt-project")
@@ -207,12 +200,11 @@ def test_adopt_copies_snapshot_without_mutating_source_or_importing_git_metadata
 
 
 def test_adopt_replay_and_rekey_return_original_for_unchanged_import(
-    tmp_path: Path,
+    tmp_path: Path, container
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "board.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
-    container = build_container(_settings(tmp_path))
     project = container.projects.create("Controller", source, "create-replay")
 
     first = container.revisions.adopt(project.id, "adopt-replay")
@@ -230,14 +222,13 @@ def test_adopt_replay_and_rekey_return_original_for_unchanged_import(
         container.revisions.adopt(project.id, "adopt-after-source-change")
 
 
-def test_adopt_rejects_cross_project_key_reuse(tmp_path: Path) -> None:
+def test_adopt_rejects_cross_project_key_reuse(tmp_path: Path, container) -> None:
     first_source = tmp_path / "first"
     second_source = tmp_path / "second"
     first_source.mkdir()
     second_source.mkdir()
     (first_source / "board.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
     (second_source / "board.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
-    container = build_container(_settings(tmp_path))
     first = container.projects.create("First", first_source, "create-first")
     second = container.projects.create("Second", second_source, "create-second")
 
@@ -248,12 +239,11 @@ def test_adopt_rejects_cross_project_key_reuse(tmp_path: Path) -> None:
 
 
 def test_candidate_refs_and_snapshot_integrity_use_exact_revisions(
-    tmp_path: Path,
+    tmp_path: Path, container
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "board.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
-    container = build_container(_settings(tmp_path))
     project = container.projects.create("Controller", source, "create-candidate")
     managed = container.revisions.adopt(project.id, "adopt-candidate")
 
@@ -313,11 +303,11 @@ def test_candidate_refs_and_snapshot_integrity_use_exact_revisions(
 def test_adopt_removes_new_repo_after_proof_failure_when_project_dir_exists(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    container,
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "board.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
-    container = build_container(_settings(tmp_path))
     project = container.projects.create("Controller", source, "create-cleanup")
     repo_root = container.revisions._repo(project.id).parent
     repo_root.mkdir(parents=True)
@@ -344,11 +334,11 @@ def test_adopt_removes_new_repo_after_proof_failure_when_project_dir_exists(
 def test_adopt_serializes_concurrent_attempts_before_repository_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    container,
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "board.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
-    container = build_container(_settings(tmp_path))
     project = container.projects.create("Controller", source, "create-race")
     repo = container.revisions._repo(project.id)
     original_commit = container.revisions._git.commit_snapshot

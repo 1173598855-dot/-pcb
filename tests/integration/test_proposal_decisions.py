@@ -634,10 +634,9 @@ def test_accept_rejects_evidence_with_noncanonical_media_type(
     revisions.proposal_revision = proposal.candidate_revision
     revisions.design_revision = project.current_revision
 
-    evidence_set = EvidenceSet.model_validate_json(
-        container.artifacts.open(proposal.evidence_set_digest or "").read(),
-        strict=True,
-    )
+    with container.artifacts.open(proposal.evidence_set_digest or "") as artifact:
+        raw_evidence_set = artifact.read()
+    evidence_set = EvidenceSet.model_validate_json(raw_evidence_set, strict=True)
     value = evidence_set.model_dump(mode="json")
     tampered_kind = "design_command_batch"
     tampered_item = next(

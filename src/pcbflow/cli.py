@@ -451,10 +451,10 @@ def proposal_diff(
                 raise CandidateNotReviewableError("semantic diff is not available")
             if not container.artifacts.verify(proposal.semantic_diff_digest):
                 raise ValueError("semantic diff artifact failed verification")
+            with container.artifacts.open(proposal.semantic_diff_digest) as artifact:
+                raw = artifact.read()
             value = json.loads(
-                container.artifacts.open(proposal.semantic_diff_digest).read().decode(
-                    "utf-8"
-                )
+                raw.decode("utf-8")
             )
         except Exception as error:
             _abort(error)

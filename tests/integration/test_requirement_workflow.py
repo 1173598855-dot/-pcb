@@ -11,16 +11,18 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from pcbflow.approvals import ApprovalDigestMismatchError, GateDecisionStore
+from pcbflow.artifacts import ArtifactDescriptor
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.container import build_container
 from pcbflow.design_tables import GateDecisionRow, OutboxEventRow, RequirementSetRow
-from pcbflow.repositories import IdempotencyConflictError
-from pcbflow.requirement_store import RequirementStore
+from pcbflow.repositories import IdempotencyConflictError, RevisionConflictError
+from pcbflow.requirement_store import RequirementSetNotFoundError, RequirementStore
 from pcbflow.requirements import (
     RequirementSetStatus,
     RequirementsBlockedError,
     load_requirement_payload,
 )
+from pcbflow.revisions import ProjectNotManagedError
 from pcbflow.tables import ArtifactRow
 
 
@@ -185,6 +187,259 @@ def test_requirement_store_persists_basic_reject_and_freeze_transitions(
         rejected_pending.id: RequirementSetStatus.REJECTED.value,
         frozen_pending.id: RequirementSetStatus.FROZEN.value,
     }
+
+
+def test_requirement_store_validates_keys_and_missing_ids(
+    session_factory, artifact_store, managed_project, requirement_yaml: bytes
+) -> None:
+    store = RequirementStore(session_factory, artifact_store)
+    payload = load_requirement_payload(requirement_yaml)
+
+    assert store.list_for_project("missing-project") == ()
+    assert store.find_by_import_key(managed_project.id, "missing-import") is None
+    assert store.find_by_submission_key(managed_project.id, "missing-submit") is None
+    with pytest.raises(RequirementSetNotFoundError):
+        store.get("missing-requirement-set")
+    with pytest.raises(ValueError, match="idempotency key"):
+        store.create_draft(
+            managed_project.id,
+            managed_project.current_revision,
+            payload,
+            "",
+        )
+    with pytest.raises(ValueError, match="idempotency key"):
+        store.mark_submitted(
+            "missing-requirement-set",
+            "",
+            candidate_revision="git:" + "1" * 40,
+            candidate_snapshot_digest="sha256:" + "a" * 64,
+        )
+    with pytest.raises(RequirementSetNotFoundError):
+        store.reject("missing-requirement-set")
+    with pytest.raises(RequirementSetNotFoundError):
+        store.approve_and_freeze(
+            "missing-requirement-set", frozen_revision="git:" + "1" * 40
+        )
+
+
+def test_requirement_store_replaces_and_lists_mutable_draft(
+    session_factory, artifact_store, managed_project, requirement_yaml: bytes
+) -> None:
+    store = RequirementStore(session_factory, artifact_store)
+    original = load_requirement_payload(requirement_yaml)
+    changed = load_requirement_payload(
+        requirement_yaml.replace(b"Local diagnostics.", b"Visible diagnostics.")
+    )
+    draft = store.create_draft(
+        managed_project.id,
+        managed_project.current_revision,
+        original,
+        "replace-draft",
+    )
+
+    replaced = store.replace_payload(draft.id, changed)
+
+    assert replaced.payload == changed
+    assert replaced.canonical_digest != draft.canonical_digest
+    assert store.list_for_project(managed_project.id) == (replaced,)
+
+
+def test_requirement_store_enforces_reject_and_freeze_state_guards(
+    session_factory, artifact_store, managed_project, requirement_yaml: bytes
+) -> None:
+    store = RequirementStore(session_factory, artifact_store)
+    payload = load_requirement_payload(requirement_yaml)
+    draft = store.create_draft(
+        managed_project.id,
+        managed_project.current_revision,
+        payload,
+        "guarded-draft",
+    )
+
+    with pytest.raises(ValueError, match="cannot be rejected"):
+        store.reject(draft.id)
+    with pytest.raises(ValueError, match="cannot be frozen"):
+        store.approve_and_freeze(
+            draft.id, frozen_revision="git:" + "1" * 40
+        )
+
+    pending = store.mark_submitted(
+        draft.id,
+        "guarded-submit",
+        candidate_revision="git:" + "2" * 40,
+        candidate_snapshot_digest="sha256:" + "b" * 64,
+    )
+    with pytest.raises(ValueError, match="must match"):
+        store.approve_and_freeze(
+            pending.id, frozen_revision="git:" + "3" * 40
+        )
+
+    frozen = store.approve_and_freeze(
+        pending.id, frozen_revision="git:" + "2" * 40
+    )
+    assert store.approve_and_freeze(
+        frozen.id, frozen_revision="git:" + "2" * 40
+    ) == frozen
+    with pytest.raises(IdempotencyConflictError):
+        store.approve_and_freeze(
+            frozen.id, frozen_revision="git:" + "3" * 40
+        )
+    with pytest.raises(ValueError, match="cannot be rejected"):
+        store.reject(frozen.id)
+
+    rejected_draft = store.create_draft(
+        managed_project.id,
+        managed_project.current_revision,
+        payload,
+        "guarded-reject-draft",
+    )
+    rejected_pending = store.mark_submitted(
+        rejected_draft.id,
+        "guarded-reject-submit",
+        candidate_revision="git:" + "4" * 40,
+        candidate_snapshot_digest="sha256:" + "d" * 64,
+    )
+    rejected = store.reject(rejected_pending.id)
+    assert store.reject(rejected.id) == rejected
+
+
+def test_requirement_service_rejects_unmanaged_and_conflicting_state(
+    container, managed_project, requirement_yaml: bytes, tmp_path: Path
+) -> None:
+    payload = load_requirement_payload(requirement_yaml)
+    unmanaged_source = tmp_path / "registered-source"
+    unmanaged_source.mkdir()
+    (unmanaged_source / "board.kicad_sch").write_bytes(b"(kicad_sch)\n")
+    unmanaged = container.projects.create(
+        "Registered", unmanaged_source, "registered-project"
+    )
+
+    with pytest.raises(ProjectNotManagedError):
+        container.requirements.import_draft(
+            unmanaged.id, requirement_yaml, "unmanaged-import"
+        )
+    unmanaged_draft = container.requirement_store.create_draft(
+        unmanaged.id,
+        "git:" + "0" * 40,
+        payload,
+        "unmanaged-draft",
+    )
+    with pytest.raises(ProjectNotManagedError):
+        container.requirements.submit(unmanaged_draft.id, "unmanaged-submit")
+
+    stale = container.requirement_store.create_draft(
+        managed_project.id,
+        "git:" + "f" * 40,
+        payload,
+        "stale-base-draft",
+    )
+    with pytest.raises(RevisionConflictError):
+        container.requirements.submit(stale.id, "stale-base-submit")
+
+    first = container.requirement_store.create_draft(
+        managed_project.id,
+        managed_project.current_revision,
+        payload,
+        "service-conflict-first",
+    )
+    second = container.requirement_store.create_draft(
+        managed_project.id,
+        managed_project.current_revision,
+        payload,
+        "service-conflict-second",
+    )
+    container.requirement_store.mark_submitted(
+        first.id,
+        "shared-submission",
+        candidate_revision="git:" + "5" * 40,
+        candidate_snapshot_digest="sha256:" + "e" * 64,
+    )
+    with pytest.raises(IdempotencyConflictError):
+        container.requirements.submit(second.id, "shared-submission")
+    with pytest.raises(IdempotencyConflictError):
+        container.requirements.submit(first.id, "different-submission")
+
+
+def test_gate_decision_validates_requests_and_requires_artifact_evidence(
+    session_factory, artifact_store, managed_project, requirement_yaml: bytes
+) -> None:
+    store = GateDecisionStore(session_factory)
+    add_request = {
+        "project_id": managed_project.id,
+        "gate": "G1",
+        "subject_type": "requirement_set",
+        "subject_id": "reqset-validation",
+        "subject_digest": "sha256:" + "a" * 64,
+        "base_revision": managed_project.current_revision,
+        "idempotency_key": "validation-key",
+        "decision": "approve",
+        "actor_type": "human",
+        "actor_id": "local-user",
+        "comment": "validated",
+    }
+    with pytest.raises(ValueError, match="idempotency key"):
+        store.add(**(add_request | {"idempotency_key": ""}))
+    with pytest.raises(ValueError, match="unsupported"):
+        store.add(**(add_request | {"decision": "abstain"}))
+
+    payload = load_requirement_payload(requirement_yaml)
+    requirements = RequirementStore(session_factory, artifact_store)
+    draft = requirements.create_draft(
+        managed_project.id,
+        managed_project.current_revision,
+        payload,
+        "artifact-required-draft",
+    )
+    pending = requirements.mark_submitted(
+        draft.id,
+        "artifact-required-submit",
+        candidate_revision="git:" + "6" * 40,
+        candidate_snapshot_digest="sha256:" + "f" * 64,
+    )
+    decision_request = {
+        "project_id": managed_project.id,
+        "requirement_set_id": pending.id,
+        "subject_digest": pending.subject_digest(),
+        "base_revision": pending.base_revision,
+        "candidate_revision": pending.candidate_revision,
+        "candidate_snapshot_digest": pending.candidate_snapshot_digest,
+        "expected_project_version": managed_project.version,
+        "idempotency_key": "artifact-required-decision",
+        "decision": "approve",
+        "actor_type": "human",
+        "actor_id": "local-user",
+        "comment": "requires evidence",
+    }
+    with pytest.raises(ValueError, match="idempotency key"):
+        store.decide_g1(**(decision_request | {"idempotency_key": ""}))
+    with pytest.raises(ValueError, match="unsupported"):
+        store.decide_g1(**(decision_request | {"decision": "abstain"}))
+    with pytest.raises(RuntimeError, match="content-addressed store"):
+        store.decide_g1(**decision_request)
+
+
+def test_gate_decision_store_rejects_conflicting_artifact_metadata(
+    session_factory, artifact_store, managed_project
+) -> None:
+    descriptor = artifact_store.put_bytes(
+        b"approval evidence", "application/vnd.pcbflow.g1-approval+json"
+    )
+    with session_factory.begin() as session:
+        GateDecisionStore._register_artifact(
+            session, descriptor, managed_project.created_at
+        )
+
+    conflicting = ArtifactDescriptor(
+        digest=descriptor.digest,
+        size=descriptor.size + 1,
+        media_type=descriptor.media_type,
+        path=descriptor.path,
+    )
+    with session_factory.begin() as session:
+        with pytest.raises(RuntimeError, match="artifact descriptor conflict"):
+            GateDecisionStore._register_artifact(
+                session, conflicting, managed_project.created_at
+            )
 
 
 def test_gate_decision_rejects_digest_reuse_with_different_subject(

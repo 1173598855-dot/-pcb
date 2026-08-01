@@ -265,7 +265,8 @@ def test_capability_evidence_preserves_kicad_identity_and_validation_execution(
             if item.task_id == proposal.task_id
             and item.kind == "adapter_capability_report"
         )
-        report = json.loads(container.artifacts.open(evidence.artifact_digest).read())
+        with container.artifacts.open(evidence.artifact_digest) as artifact:
+            report = json.loads(artifact.read())
 
         assert ready.status is ProposalStatus.READY_FOR_REVIEW
         assert report["kicad"] == {
@@ -324,8 +325,10 @@ def test_post_commit_integrity_failure_rebuilds_failed_evidence_set(
 
         def fail_evidence_set_verification(digest: str) -> bool:
             try:
+                with container.artifacts.open(digest) as artifact:
+                    raw_evidence_set = artifact.read()
                 EvidenceSet.model_validate_json(
-                    container.artifacts.open(digest).read(), strict=True
+                    raw_evidence_set, strict=True
                 )
             except Exception:
                 return original_verify(digest)
@@ -337,8 +340,10 @@ def test_post_commit_integrity_failure_rebuilds_failed_evidence_set(
         assert failed.status is ProposalStatus.VALIDATION_FAILED
         assert failed.candidate_revision is None
         assert failed.evidence_set_digest is not None
+        with container.artifacts.open(failed.evidence_set_digest) as artifact:
+            raw_evidence_set = artifact.read()
         evidence_set = EvidenceSet.model_validate_json(
-            container.artifacts.open(failed.evidence_set_digest).read(), strict=True
+            raw_evidence_set, strict=True
         )
         assert evidence_set.candidate_revision is None
     finally:
@@ -425,8 +430,10 @@ def test_ready_replay_rejects_invalid_evidence_set_contract(
         assert container.worker.run_once()
         ready = container.proposal_store.get(proposal.id)
         assert ready.evidence_set_digest is not None
+        with container.artifacts.open(ready.evidence_set_digest) as artifact:
+            raw_evidence_set = artifact.read()
         evidence_set = EvidenceSet.model_validate_json(
-            container.artifacts.open(ready.evidence_set_digest).read(), strict=True
+            raw_evidence_set, strict=True
         )
         value = evidence_set.model_dump(mode="json")
         if corruption == "duplicate_kind":

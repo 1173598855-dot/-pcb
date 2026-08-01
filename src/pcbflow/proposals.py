@@ -358,8 +358,10 @@ class ProposalExecutor:
             if evidence_row is None or evidence_row.artifact_digest != proposal.evidence_set_digest:
                 valid_contract = False
             try:
+                with self._artifacts.open(proposal.evidence_set_digest or "") as artifact:
+                    raw_evidence_set = artifact.read()
                 evidence_set = EvidenceSet.model_validate_json(
-                    self._artifacts.open(proposal.evidence_set_digest or "").read(), strict=True
+                    raw_evidence_set, strict=True
                 )
                 evidence_items = {item.kind: item for item in evidence_set.artifacts}
                 valid_contract = valid_contract and all((
@@ -817,8 +819,10 @@ class ProposalDecisionService:
             raise CandidateNotReviewableError("candidate evidence object is corrupted")
         media_type_lookup = getattr(self._evidence, "artifact_media_type", None)
         try:
+            with self._artifacts.open(proposal.evidence_set_digest or "") as artifact:
+                raw_evidence_set = artifact.read()
             evidence_set = EvidenceSet.model_validate_json(
-                self._artifacts.open(proposal.evidence_set_digest or "").read(), strict=True
+                raw_evidence_set, strict=True
             )
         except Exception as error:
             raise CandidateNotReviewableError("candidate evidence set is invalid") from error

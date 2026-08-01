@@ -566,7 +566,8 @@ def create_app(container: Container | None = None) -> FastAPI:
         try:
             if not services.artifacts.verify(proposal.semantic_diff_digest):
                 raise ValueError("artifact verification failed")
-            raw = services.artifacts.open(proposal.semantic_diff_digest).read()
+            with services.artifacts.open(proposal.semantic_diff_digest) as artifact:
+                raw = artifact.read()
             return json.loads(raw.decode("utf-8"))
         except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
             raise ApiError(

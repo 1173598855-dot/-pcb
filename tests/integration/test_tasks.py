@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
-from pcbflow.domain import TaskStatus
+from pcbflow.domain import TaskLease, TaskStatus
 from pcbflow.repositories import (
     IdempotencyConflictError,
     StaleLeaseError,
@@ -16,6 +16,51 @@ from pcbflow.tables import TaskRow
 from pcbflow.tasks import RetryableTaskError, TerminalTaskError, Worker
 
 NOW = datetime(2026, 7, 29, 1, 0, tzinfo=UTC)
+
+
+class _WorkerRepositoryProbe:
+    def __init__(
+        self,
+        *,
+        stale_fail: bool = False,
+        stale_complete: bool = False,
+    ) -> None:
+        self.lease = TaskLease(
+            task_id="task-edge",
+            kind="edge",
+            payload={},
+            lease_token="lease-edge",
+            lease_expires_at=NOW + timedelta(seconds=30),
+            attempt_number=1,
+        )
+        self.stale_fail = stale_fail
+        self.stale_complete = stale_complete
+        self.failures: list[tuple[str, bool]] = []
+        self.fail_calls: list[tuple[str, str, bool]] = []
+        self.complete_calls: list[tuple[str, object]] = []
+
+    def claim_next(self, _worker_id, _now, _lease_seconds):
+        lease, self.lease = self.lease, None
+        return lease
+
+    @staticmethod
+    def start(_task_id, _lease_token, _now) -> None:
+        return None
+
+    @staticmethod
+    def renew(_task_id, _lease_token, now, lease_seconds):
+        return now + timedelta(seconds=lease_seconds)
+
+    def fail(self, task_id, _lease_token, error_code, retryable, _now) -> None:
+        self.fail_calls.append((task_id, error_code, retryable))
+        if self.stale_fail:
+            raise StaleLeaseError(task_id)
+        self.failures.append((error_code, retryable))
+
+    def complete(self, task_id, _lease_token, result, _now) -> None:
+        self.complete_calls.append((task_id, result))
+        if self.stale_complete:
+            raise StaleLeaseError(task_id)
 
 
 @pytest.fixture
@@ -483,3 +528,84 @@ def test_worker_preserves_declared_terminal_error_code(
     failed = task_repository.get(task.id)
     assert failed.status is TaskStatus.FAILED_TERMINAL
     assert failed.last_error_code == "INVALID_PROJECT"
+
+
+@pytest.mark.parametrize(
+    "handler_error",
+    [
+        RetryableTaskError("TOOL_BUSY", "retry later"),
+        TerminalTaskError("INVALID_INPUT", "stop retrying"),
+    ],
+)
+def test_worker_tolerates_stale_lease_while_recording_declared_failure(
+    handler_error: RuntimeError,
+) -> None:
+    repository = _WorkerRepositoryProbe(stale_fail=True)
+
+    def fail(_lease):
+        raise handler_error
+
+    worker = Worker(repository, "worker-a", {"edge": fail}, lambda: NOW, 30)
+
+    assert worker.run_once()
+    assert repository.fail_calls == [
+        (
+            "task-edge",
+            handler_error.code,
+            isinstance(handler_error, RetryableTaskError),
+        )
+    ]
+    assert repository.failures == []
+
+
+@pytest.mark.parametrize(
+    (
+        "handler_error",
+        "stale_fail",
+        "stale_complete",
+        "expected_failures",
+        "expected_fail_call_count",
+        "expected_complete_call_count",
+    ),
+    [
+        (StaleLeaseError("task-edge"), False, False, [], 0, 0),
+        (
+            RuntimeError("unexpected"),
+            False,
+            False,
+            [("UNHANDLED_TASK_ERROR", False)],
+            1,
+            0,
+        ),
+        (RuntimeError("unexpected"), True, False, [], 1, 0),
+        (None, False, True, [], 0, 1),
+    ],
+)
+def test_worker_fences_unexpected_handler_and_completion_failures(
+    handler_error: BaseException | None,
+    stale_fail: bool,
+    stale_complete: bool,
+    expected_failures: list[tuple[str, bool]],
+    expected_fail_call_count: int,
+    expected_complete_call_count: int,
+) -> None:
+    repository = _WorkerRepositoryProbe(
+        stale_fail=stale_fail,
+        stale_complete=stale_complete,
+    )
+
+    def handle(_lease):
+        if handler_error is not None:
+            raise handler_error
+        return {"ok": True}
+
+    worker = Worker(repository, "worker-a", {"edge": handle}, lambda: NOW, 30)
+
+    assert worker.run_once()
+    assert repository.failures == expected_failures
+    assert len(repository.fail_calls) == expected_fail_call_count
+    assert len(repository.complete_calls) == expected_complete_call_count
+    if expected_complete_call_count:
+        assert repository.complete_calls == [("task-edge", {"ok": True})]
+    else:
+        assert repository.complete_calls == []
