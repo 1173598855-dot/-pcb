@@ -42,6 +42,22 @@ def test_probe_returns_version_and_digest(tmp_path: Path) -> None:
     assert runner.calls == [((str(executable.resolve()), "--version"), tmp_path, 5)]
 
 
+def test_probe_populates_kicad_10_compatibility_profile(tmp_path: Path) -> None:
+    executable = tmp_path / "kicad-cli.exe"
+    executable.write_bytes(b"fixture executable")
+    runner = VersionRunner(
+        ProcessResult((str(executable), "--version"), 0, "10.0.4\n", "", False)
+    )
+
+    report = KicadCli(runner, executable, 5).probe()
+
+    assert report.available
+    assert report.version == "10.0.4"
+    assert report.major == 10
+    assert report.profile_id == "kicad-10-v1"
+    assert report.profile_revision == 1
+
+
 def test_probe_reports_missing_executable() -> None:
     report = KicadCli(VersionRunner(), None, 5).probe()
 

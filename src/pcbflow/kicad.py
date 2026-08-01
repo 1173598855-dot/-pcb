@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from pcbflow.domain import NormalizedFinding, ValidationReport
+from pcbflow.kicad_compatibility import select_kicad_profile
 from pcbflow.process import ProcessPort, ProcessTimeoutError
 
-_VERSION = re.compile(r"(?<!\d)(\d+\.\d+(?:\.\d+)?)(?!\d)")
+_VERSION = re.compile(r"(?<!\d)(\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?)(?!\d)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +23,9 @@ class KicadCapability:
     version: str | None
     executable_digest: str | None
     reason: str | None
+    major: int | None = None
+    profile_id: str | None = None
+    profile_revision: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,12 +204,20 @@ class KicadCli:
                 False, self._executable, None, digest, "version_unparseable"
             )
         version = match.group(1)
-        if version.split(".", 1)[0] != "9":
+        profile = select_kicad_profile(version)
+        if profile is None:
             return KicadCapability(
                 False, self._executable, version, digest, "unsupported_version"
             )
         return KicadCapability(
-            True, self._executable, version, digest, None
+            True,
+            self._executable,
+            version,
+            digest,
+            None,
+            profile.major,
+            profile.profile_id,
+            profile.revision,
         )
 
     def validate(
