@@ -18,10 +18,10 @@ class Settings:
     max_project_files: int = 10_000
     max_project_bytes: int = 1_000_000_000
     remote_mode: bool = False
+    module_catalog_dir: Path | None = None
     api_token: str | None = None
     api_actor_id: str = "remote-api"
     max_api_body_bytes: int = 1_000_000
-    module_catalog_dir: Path | None = None
 
     def __post_init__(self) -> None:
         scheme = self.database_url.split(":", 1)[0]

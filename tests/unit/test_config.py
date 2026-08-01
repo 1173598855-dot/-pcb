@@ -71,6 +71,28 @@ def test_settings_require_a_token_in_remote_mode(tmp_path: Path) -> None:
         )
 
 
+def test_settings_preserve_legacy_positional_module_catalog_argument(
+    tmp_path: Path,
+) -> None:
+    catalog = tmp_path / "catalog"
+    settings = Settings(
+        tmp_path / "data",
+        "sqlite+pysqlite:///legacy.db",
+        tmp_path / "artifacts",
+        None,
+        180,
+        120,
+        2_000_000,
+        10_000,
+        1_000_000_000,
+        False,
+        catalog,
+    )
+
+    assert settings.module_catalog_dir == catalog
+    assert settings.api_token is None
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [

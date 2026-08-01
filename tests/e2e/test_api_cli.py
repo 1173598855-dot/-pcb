@@ -9,7 +9,8 @@ import httpx
 import yaml
 from typer.testing import CliRunner
 
-from pcbflow.api import create_app
+import pcbflow.api as api_module
+from pcbflow.api import RequestBodyLimitMiddleware, create_app
 from pcbflow.cli import app
 from pcbflow.config import Settings
 from pcbflow.container import build_container
@@ -367,6 +368,64 @@ def test_api_rejects_oversized_json_before_decoding_body(tmp_path: Path) -> None
         assert error["code"] == "REQUEST_BODY_TOO_LARGE"
         assert response.headers["X-Correlation-ID"] == error["correlation_id"]
     container.engine.dispose()
+
+
+def test_api_replaces_blank_correlation_id_on_body_limit(tmp_path: Path) -> None:
+    container = build_container(
+        _settings(tmp_path, max_api_body_bytes=1), kicad_override=_fake_kicad()
+    )
+
+    async def exercise() -> httpx.Response:
+        async with _client(container, raise_app_exceptions=False) as client:
+            return await client.post(
+                "/api/v1/projects/prj_missing/requirement-sets",
+                headers={
+                    "Content-Type": "application/json",
+                    "Idempotency-Key": "blank-correlation-id",
+                    "X-Correlation-ID": "",
+                },
+                content=b"{}",
+            )
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 413
+    assert response.headers["X-Correlation-ID"]
+    assert response.headers["X-Correlation-ID"] == response.json()["error"][
+        "correlation_id"
+    ]
+    container.engine.dispose()
+
+
+def test_request_body_limit_checks_chunk_size_before_buffering(monkeypatch) -> None:
+    class GuardedBuffer(bytearray):
+        def extend(self, values) -> None:
+            raise AssertionError("oversized chunk was buffered")
+
+    monkeypatch.setattr(api_module, "bytearray", GuardedBuffer, raising=False)
+    sent: list[dict[str, object]] = []
+    downstream_calls: list[object] = []
+    messages = iter(({"type": "http.request", "body": b"xx", "more_body": False},))
+
+    async def downstream(scope, receive, send) -> None:
+        downstream_calls.append(scope)
+
+    async def receive() -> dict[str, object]:
+        return next(messages)
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    middleware = RequestBodyLimitMiddleware(downstream, max_bytes=1)
+    asyncio.run(
+        middleware(
+            {"type": "http", "method": "POST", "headers": (), "state": {}},
+            receive,
+            send,
+        )
+    )
+
+    assert downstream_calls == []
+    assert sent[0]["status"] == 413
 
 
 def test_api_returns_schema_errors_for_non_finite_json_values(tmp_path: Path) -> None:

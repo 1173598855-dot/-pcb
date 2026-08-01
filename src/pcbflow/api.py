@@ -130,10 +130,11 @@ class RequestBodyLimitMiddleware:
             if message["type"] != "http.request":
                 await self.app(scope, receive, send)
                 return
-            body.extend(message.get("body", b""))
-            if len(body) > self._max_bytes:
+            chunk = message.get("body", b"")
+            if len(body) + len(chunk) > self._max_bytes:
                 await self._reject(scope, receive, send)
                 return
+            body.extend(chunk)
             if not message.get("more_body", False):
                 break
 
@@ -339,8 +340,8 @@ def create_app(container: Container | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def add_correlation_id(request: Request, call_next):
-        request.state.correlation_id = request.headers.get(
-            "X-Correlation-ID", new_id("cor")
+        request.state.correlation_id = request.headers.get("X-Correlation-ID") or new_id(
+            "cor"
         )
         if services.settings.remote_mode and request.url.path != "/health":
             authorization = request.headers.get("Authorization", "")
