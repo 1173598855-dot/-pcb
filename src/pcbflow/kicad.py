@@ -243,18 +243,36 @@ class KicadCli:
 
         try:
             digest = self._hash_executable(self._executable)
+        except OSError:
+            return KicadCapability(
+                False, self._executable, None, None, "executable_read_failed"
+            )
+        try:
             result = self._runner.run(
                 [str(self._executable), "--version"],
                 self._executable.parent,
                 self._timeout_seconds,
             )
         except ProcessTimeoutError:
+            if not self._executable_matches(self._executable, digest):
+                return KicadCapability(
+                    False, self._executable, None, None, "executable_changed"
+                )
             return KicadCapability(
                 False, self._executable, None, None, "version_command_timeout"
             )
         except OSError:
+            if not self._executable_matches(self._executable, digest):
+                return KicadCapability(
+                    False, self._executable, None, None, "executable_changed"
+                )
             return KicadCapability(
                 False, self._executable, None, None, "executable_read_failed"
+            )
+
+        if not self._executable_matches(self._executable, digest):
+            return KicadCapability(
+                False, self._executable, None, None, "executable_changed"
             )
 
         if result.returncode != 0:
@@ -345,6 +363,7 @@ class KicadCli:
         assert capability.profile_revision is not None
         if report_file.exists():
             report_file.unlink()
+        self._assert_executable_digest(capability.path, capability.executable_digest)
         profile = select_kicad_profile(capability.version)
         if profile is None:
             raise KicadUnavailableError("unsupported_version")
@@ -354,7 +373,12 @@ class KicadCli:
             design_file=design_file.resolve(),
             report_file=report_file,
         )
-        result = self._runner.run(argv, report_file.parent, self._timeout_seconds)
+        try:
+            result = self._runner.run(argv, report_file.parent, self._timeout_seconds)
+        finally:
+            self._assert_executable_digest(
+                capability.path, capability.executable_digest
+            )
         if result.returncode != 0:
             raise KicadToolError(kind, result.returncode, result.stderr)
         if not report_file.is_file():
@@ -423,3 +447,15 @@ class KicadCli:
             while chunk := stream.read(1024 * 1024):
                 digest.update(chunk)
         return f"sha256:{digest.hexdigest()}"
+
+    @staticmethod
+    def _executable_matches(executable: Path, expected_digest: str) -> bool:
+        try:
+            return KicadCli._hash_executable(executable) == expected_digest
+        except OSError:
+            return False
+
+    @staticmethod
+    def _assert_executable_digest(executable: Path, expected_digest: str) -> None:
+        if not KicadCli._executable_matches(executable, expected_digest):
+            raise KicadUnavailableError("executable_changed")

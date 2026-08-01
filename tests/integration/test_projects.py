@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
@@ -11,6 +12,7 @@ from pcbflow.repositories import (
     ProjectNotFoundError,
     ProjectRepository,
 )
+from pcbflow.workspaces import WorkspaceLinkError
 
 
 def test_create_project_is_idempotent(
@@ -102,6 +104,49 @@ def test_project_source_must_be_directory(
 
     with pytest.raises(ValueError, match="directory"):
         repository.create("Invalid", file_path, "invalid-source")
+
+
+def test_project_source_cannot_be_a_top_level_symbolic_link(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    repository = ProjectRepository(session_factory)
+    target = tmp_path / "project-target"
+    target.mkdir()
+    source_link = tmp_path / "project-link"
+    try:
+        source_link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("symbolic links are unavailable on this Windows host")
+
+    with pytest.raises(WorkspaceLinkError):
+        repository.create("Linked", source_link, "linked-project")
+
+
+def test_project_source_cannot_be_a_top_level_reparse_point(
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = ProjectRepository(session_factory)
+    source = tmp_path / "reparse-source"
+    source.mkdir()
+    metadata = source.lstat()
+    original_lstat = Path.lstat
+
+    def reparse_source(path: Path):
+        current = original_lstat(path)
+        if path == source:
+            return SimpleNamespace(
+                st_mode=current.st_mode,
+                st_file_attributes=0x400,
+            )
+        return current
+
+    monkeypatch.setattr(Path, "lstat", reparse_source)
+    monkeypatch.setattr("pcbflow.workspaces.stat.FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+    with pytest.raises(WorkspaceLinkError):
+        repository.create("Reparse", source, "reparse-project")
 
 
 def test_new_project_exposes_registered_phase_2a_defaults(

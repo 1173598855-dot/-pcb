@@ -255,6 +255,9 @@ $task = .\.venv\Scripts\pcbflow.exe validate $project.id `
 | `PCBFLOW_MAX_PROJECT_FILES` | 项目复制文件数上限 |
 | `PCBFLOW_MAX_PROJECT_BYTES` | 项目复制总字节上限 |
 | `PCBFLOW_REMOTE_MODE` | 禁止通过远程 API 注册本机路径 |
+| `PCBFLOW_API_TOKEN` | 远程模式必填的 Bearer token |
+| `PCBFLOW_API_ACTOR_ID` | 远程认证请求记录使用的服务 actor ID |
+| `PCBFLOW_MAX_API_BODY_BYTES` | JSON 请求体解码前的最大字节数 |
 
 Phase 2A 计划新增 `PCBFLOW_MODULE_CATALOG_DIR`，用于只读加载本地已审核模块目录；在实现落地前该变量不存在。
 
@@ -1158,9 +1161,12 @@ defaults to `.pcbflow-data`; `PCBFLOW_DATABASE_URL` and
 verified module files. Runtime limits are controlled by
 `PCBFLOW_TASK_LEASE_SECONDS`, `PCBFLOW_PROCESS_TIMEOUT_SECONDS`,
 `PCBFLOW_MAX_PROCESS_OUTPUT_BYTES`, `PCBFLOW_MAX_PROJECT_FILES`, and
-`PCBFLOW_MAX_PROJECT_BYTES`. `PCBFLOW_REMOTE_MODE` is an explicit deployment
-mode flag. Windows paths may be absolute; Linux uses the same variables with
-POSIX paths.
+`PCBFLOW_MAX_PROJECT_BYTES`, and `PCBFLOW_MAX_API_BODY_BYTES`.
+`PCBFLOW_REMOTE_MODE` is an explicit deployment mode flag and requires
+`PCBFLOW_API_TOKEN`; all remote API calls other than `/health` use a Bearer
+token. `PCBFLOW_API_ACTOR_ID` controls the service actor recorded for those
+calls. Windows paths may be absolute; Linux uses the same variables with POSIX
+paths.
 
 ### 34.3 Migration workflow and schema ownership
 

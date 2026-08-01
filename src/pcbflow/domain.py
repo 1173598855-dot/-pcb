@@ -21,6 +21,10 @@ class ProjectMode(StrEnum):
     MANAGED = "managed"
 
 
+class RequestInvalidError(ValueError):
+    """An expected request or state-transition rejection."""
+
+
 @dataclass(frozen=True, slots=True)
 class Project:
     id: str

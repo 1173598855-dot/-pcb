@@ -15,7 +15,7 @@ from pcbflow.design_tables import (
     ProjectRevisionRow,
     RequirementSetRow,
 )
-from pcbflow.domain import new_id, utc_now
+from pcbflow.domain import RequestInvalidError, new_id, utc_now
 from pcbflow.observability import audit_payload
 from pcbflow.observability import MetricName, Metrics
 from pcbflow.repositories import (
@@ -321,7 +321,9 @@ class GateDecisionStore:
                 ):
                     raise IdempotencyConflictError(idempotency_key)
                 if requirement_row.status != RequirementSetStatus.PENDING_APPROVAL.value:
-                    raise ValueError("requirement set is not pending approval")
+                    raise RequestInvalidError(
+                        "requirement set is not pending approval"
+                    )
 
                 project = session.get(ProjectRow, project_id)
                 if project is None:
@@ -520,9 +522,9 @@ class ApprovalService:
         if actual_digest != subject_digest:
             raise ApprovalDigestMismatchError(actual_digest, subject_digest)
         if requirement_set.candidate_revision is None:
-            raise ValueError("requirement set has no candidate revision")
+            raise RequestInvalidError("requirement set has no candidate revision")
         if requirement_set.candidate_snapshot_digest is None:
-            raise ValueError("requirement set has no candidate snapshot")
+            raise RequestInvalidError("requirement set has no candidate snapshot")
         project = self._projects.get(requirement_set.project_id)
         if (
             decision == "approve"

@@ -18,7 +18,7 @@ from pcbflow.design_tables import (
     OutboxEventRow,
     ProjectRevisionRow,
 )
-from pcbflow.domain import TaskStatus, new_id, utc_now
+from pcbflow.domain import RequestInvalidError, TaskStatus, new_id, utc_now
 from pcbflow.observability import audit_payload, ensure_trace_id
 from pcbflow.proposals import (
     DESIGN_PROPOSAL_TASK_KIND,
@@ -575,7 +575,7 @@ class ProposalStore:
                     raise IdempotencyConflictError(idempotency_key)
                 return _proposal(row)
             if row.status != ProposalStatus.READY_FOR_REVIEW.value:
-                raise ValueError("candidate is not reviewable")
+                raise RequestInvalidError("candidate is not reviewable")
             project = session.get(ProjectRow, row.project_id)
             batch = session.get(DesignCommandBatchRow, row.command_batch_id)
             if project is None or batch is None:
@@ -690,7 +690,7 @@ class ProposalStore:
                     raise IdempotencyConflictError(idempotency_key)
                 return _proposal(row)
             if row.status != ProposalStatus.READY_FOR_REVIEW.value:
-                raise ValueError("candidate is not reviewable")
+                raise RequestInvalidError("candidate is not reviewable")
             self._register_decision_artifact(session, rejection_artifact, now)
             session.add(GateDecisionRow(
                 id=new_id("gdec"), project_id=row.project_id,

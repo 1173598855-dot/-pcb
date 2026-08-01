@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from ipaddress import ip_address
 import stat
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -139,6 +140,18 @@ def _read_input_file(path: Path, max_bytes: int) -> bytes:
 def _build() -> Container:
     ensure_trace_id()
     return build_container(Settings.from_env())
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = host.strip()
+    if normalized.lower() == "localhost":
+        return True
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    try:
+        return ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def _emit(value: object, json_output: bool, human: str) -> None:
@@ -606,6 +619,11 @@ def serve(
     host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8765,
 ) -> None:
+    if not _is_loopback_host(host):
+        raise typer.BadParameter(
+            "serve may only bind to a loopback address or localhost",
+            param_hint="--host",
+        )
     container = _build()
     try:
         uvicorn.run(create_app(container), host=host, port=port)

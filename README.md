@@ -174,11 +174,15 @@ Invoke-RestMethod http://127.0.0.1:8765/api/v1/projects
 
 ```powershell
 $env:PCBFLOW_REMOTE_MODE = "true"
+$env:PCBFLOW_API_TOKEN = "replace-with-a-long-random-secret"
 .\.venv\Scripts\pcbflow.exe serve --host 127.0.0.1 --port 8765
 ```
 
-In remote mode, local source registration and the REST worker execution
-endpoint are disabled; run the worker in a trusted local process instead.
+In remote mode, every endpoint except `/health` requires an `Authorization:
+Bearer <PCBFLOW_API_TOKEN>` header. The server records authenticated remote
+actions as the configured service actor instead of trusting request-supplied
+actor IDs. Local source registration and the REST worker execution endpoint
+remain disabled; run the worker in a trusted local process instead.
 
 ## 持久化数据与制品
 
@@ -210,8 +214,11 @@ endpoint are disabled; run the worker in a trusted local process instead.
 - `PCBFLOW_MAX_PROCESS_OUTPUT_BYTES`
 - `PCBFLOW_MAX_PROJECT_FILES`
 - `PCBFLOW_MAX_PROJECT_BYTES`
+- `PCBFLOW_MAX_API_BODY_BYTES`
 - `PCBFLOW_MODULE_CATALOG_DIR`
 - `PCBFLOW_REMOTE_MODE`
+- `PCBFLOW_API_TOKEN`
+- `PCBFLOW_API_ACTOR_ID`
 
 `PCBFLOW_DATABASE_URL` 和 `PCBFLOW_ARTIFACT_DIR` 的显式值优先于根据 `PCBFLOW_DATA_DIR` 推导出的默认位置。
 
@@ -357,8 +364,9 @@ Set `PCBFLOW_DATA_DIR` to relocate the root, or set
 `PCBFLOW_DATABASE_URL`/`PCBFLOW_ARTIFACT_DIR` explicitly. Other supported
 settings are `PCBFLOW_TASK_LEASE_SECONDS`, `PCBFLOW_PROCESS_TIMEOUT_SECONDS`,
 `PCBFLOW_MAX_PROCESS_OUTPUT_BYTES`, `PCBFLOW_MAX_PROJECT_FILES`,
-`PCBFLOW_MAX_PROJECT_BYTES`, `PCBFLOW_MODULE_CATALOG_DIR`, and
-`PCBFLOW_REMOTE_MODE`.
+`PCBFLOW_MAX_PROJECT_BYTES`, `PCBFLOW_MAX_API_BODY_BYTES`,
+`PCBFLOW_MODULE_CATALOG_DIR`, `PCBFLOW_REMOTE_MODE`, `PCBFLOW_API_TOKEN`, and
+`PCBFLOW_API_ACTOR_ID`.
 
 ### Phase 2A limits
 

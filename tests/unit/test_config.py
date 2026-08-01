@@ -47,12 +47,28 @@ def test_settings_parse_validation_limits_and_remote_mode(tmp_path: Path) -> Non
             "PCBFLOW_MAX_PROJECT_FILES": "321",
             "PCBFLOW_MAX_PROJECT_BYTES": "654321",
             "PCBFLOW_REMOTE_MODE": "true",
+            "PCBFLOW_API_TOKEN": "remote-test-token",
+            "PCBFLOW_API_ACTOR_ID": "remote-service",
+            "PCBFLOW_MAX_API_BODY_BYTES": "12345",
         }
     )
 
     assert settings.max_project_files == 321
     assert settings.max_project_bytes == 654321
     assert settings.remote_mode is True
+    assert settings.api_token == "remote-test-token"
+    assert settings.api_actor_id == "remote-service"
+    assert settings.max_api_body_bytes == 12345
+
+
+def test_settings_require_a_token_in_remote_mode(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="remote_mode requires api_token"):
+        Settings.from_env(
+            {
+                "PCBFLOW_DATA_DIR": str(tmp_path / "runtime"),
+                "PCBFLOW_REMOTE_MODE": "true",
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -63,6 +79,7 @@ def test_settings_parse_validation_limits_and_remote_mode(tmp_path: Path) -> Non
         ("PCBFLOW_MAX_PROCESS_OUTPUT_BYTES", "0"),
         ("PCBFLOW_MAX_PROJECT_FILES", "0"),
         ("PCBFLOW_MAX_PROJECT_BYTES", "0"),
+        ("PCBFLOW_MAX_API_BODY_BYTES", "0"),
     ],
 )
 def test_settings_reject_non_positive_runtime_limits(

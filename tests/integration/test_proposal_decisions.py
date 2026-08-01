@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from threading import Barrier
 
 import pytest
 from sqlalchemy import select, update
 
 from pcbflow.approvals import ApprovalDigestMismatchError
 from pcbflow.canonical import canonical_json_bytes
+from pcbflow.domain import RequestInvalidError
 from pcbflow.proposals import (
     EvidenceItem,
     EvidenceRegistration,
@@ -374,6 +377,140 @@ def test_reject_records_decision_without_advancing_revision(
     assert rejected.status is ProposalStatus.REJECTED
     assert container.projects.get(project.id).current_revision == project.current_revision
     assert revisions.design_revision == project.current_revision
+
+
+def test_decision_store_maps_late_accept_and_reject_to_request_invalid(
+    container, frozen_requirement_set
+) -> None:
+    reject_revisions = FakeDecisionRevisions()
+    reject_project, reject_proposal = _ready(
+        container, frozen_requirement_set, "reject"
+    )
+    reject_revisions.proposal_revision = reject_proposal.candidate_revision
+    reject_revisions.design_revision = reject_project.current_revision
+    _decision_service(container, reject_revisions).reject(
+        proposal_id=reject_proposal.id,
+        reason="rejected",
+        actor_type="human",
+        actor_id="local-user",
+        idempotency_key="late-reject-first",
+    )
+    rejection_artifact = container.artifacts.put_bytes(
+        b"late rejection", "application/json"
+    )
+    with pytest.raises(RequestInvalidError, match="candidate is not reviewable"):
+        container.proposal_store.decide_reject(
+            proposal_id=reject_proposal.id,
+            base_revision=reject_project.current_revision,
+            subject_digest=reject_proposal.review_digest or "",
+            idempotency_key="late-reject-second",
+            actor_type="human",
+            actor_id="local-user",
+            comment="late rejection",
+            rejection_artifact=rejection_artifact,
+            now=NOW,
+        )
+    accept_revisions = FakeDecisionRevisions()
+    accept_project, accept_proposal = _ready(
+        container, frozen_requirement_set, "accept"
+    )
+    accept_revisions.proposal_revision = accept_proposal.candidate_revision
+    accept_revisions.design_revision = accept_project.current_revision
+    _decision_service(container, accept_revisions).accept(
+        proposal_id=accept_proposal.id,
+        candidate_digest=accept_proposal.review_digest,
+        actor_type="human",
+        actor_id="local-user",
+        comment="accepted",
+        idempotency_key="late-accept-first",
+    )
+    approval_artifact = container.artifacts.put_bytes(
+        b"late acceptance", "application/json"
+    )
+    with pytest.raises(RequestInvalidError, match="candidate is not reviewable"):
+        container.proposal_store.decide_accept(
+            proposal_id=accept_proposal.id,
+            candidate_revision=accept_proposal.candidate_revision or "",
+            base_revision=accept_project.current_revision,
+            expected_project_version=accept_project.version,
+            candidate_snapshot_digest=accept_proposal.candidate_snapshot_digest or "",
+            subject_digest=accept_proposal.review_digest or "",
+            idempotency_key="late-accept-second",
+            actor_type="human",
+            actor_id="local-user",
+            comment="late acceptance",
+            approval_artifact=approval_artifact,
+            now=NOW,
+        )
+
+
+def test_concurrent_reject_maps_late_transaction_state_to_request_invalid(
+    container, frozen_requirement_set, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    revisions = FakeDecisionRevisions()
+    project, proposal = _ready(container, frozen_requirement_set, "reject")
+    revisions.proposal_revision = proposal.candidate_revision
+    revisions.design_revision = project.current_revision
+    service = _decision_service(container, revisions)
+    barrier = Barrier(2)
+    original_validate = service._validate_candidate
+
+    def synchronize_validation(proposal_value, candidate_digest):
+        result = original_validate(proposal_value, candidate_digest)
+        barrier.wait(timeout=10)
+        return result
+
+    monkeypatch.setattr(service, "_validate_candidate", synchronize_validation)
+    requests = (
+        {"reason": "first rejection", "idempotency_key": "concurrent-reject-1"},
+        {"reason": "second rejection", "idempotency_key": "concurrent-reject-2"},
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                service.reject,
+                proposal_id=proposal.id,
+                actor_type="human",
+                actor_id="local-user",
+                **request,
+            )
+            for request in requests
+        ]
+        outcomes: list[object] = []
+        errors: list[BaseException] = []
+        for future in futures:
+            try:
+                outcomes.append(future.result(timeout=15))
+            except BaseException as error:
+                errors.append(error)
+
+    assert len(outcomes) == 1
+    assert outcomes[0].status is ProposalStatus.REJECTED
+    assert len(errors) == 1
+    assert isinstance(errors[0], RequestInvalidError)
+
+
+def test_reject_does_not_reconcile_or_mutate_design_ref(
+    container, frozen_requirement_set
+) -> None:
+    revisions = FakeDecisionRevisions()
+    project, proposal = _ready(container, frozen_requirement_set, "reject")
+    revisions.proposal_revision = proposal.candidate_revision
+    externally_advanced_ref = "git:" + "e" * 40
+    revisions.design_revision = externally_advanced_ref
+
+    rejected = _decision_service(container, revisions).reject(
+        proposal_id=proposal.id,
+        reason="withdraw without reconciling design state",
+        actor_type="human",
+        actor_id="local-user",
+        idempotency_key="reject-with-drifted-design-ref",
+    )
+
+    assert rejected.status is ProposalStatus.REJECTED
+    assert revisions.design_revision == externally_advanced_ref
+    assert container.projects.get(project.id).current_revision == project.current_revision
 
 
 def test_accept_with_changed_base_marks_proposal_stale(

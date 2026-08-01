@@ -18,6 +18,9 @@ class Settings:
     max_project_files: int = 10_000
     max_project_bytes: int = 1_000_000_000
     remote_mode: bool = False
+    api_token: str | None = None
+    api_actor_id: str = "remote-api"
+    max_api_body_bytes: int = 1_000_000
     module_catalog_dir: Path | None = None
 
     def __post_init__(self) -> None:
@@ -30,6 +33,7 @@ class Settings:
             "max_process_output_bytes": self.max_process_output_bytes,
             "max_project_files": self.max_project_files,
             "max_project_bytes": self.max_project_bytes,
+            "max_api_body_bytes": self.max_api_body_bytes,
         }
         for name, value in limits.items():
             if value <= 0:
@@ -38,6 +42,10 @@ class Settings:
             raise ValueError(
                 "task lease must be at least as long as process timeout"
             )
+        if self.remote_mode and not self.api_token:
+            raise ValueError("remote_mode requires api_token")
+        if not self.api_actor_id:
+            raise ValueError("api_actor_id must not be empty")
 
     @property
     def projects_dir(self) -> Path:
@@ -87,6 +95,11 @@ class Settings:
             ),
             remote_mode=values.get("PCBFLOW_REMOTE_MODE", "false").lower()
             in {"1", "true", "yes", "on"},
+            api_token=values.get("PCBFLOW_API_TOKEN") or None,
+            api_actor_id=values.get("PCBFLOW_API_ACTOR_ID", "remote-api"),
+            max_api_body_bytes=int(
+                values.get("PCBFLOW_MAX_API_BODY_BYTES", "1000000")
+            ),
         )
 
     def ensure_directories(self) -> None:

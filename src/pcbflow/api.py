@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from secrets import compare_digest
 from typing import Annotated, Literal
 
 from fastapi import FastAPI, Header, Request, Response
@@ -16,7 +17,7 @@ from pcbflow.commands import DesignCommandSchemaError, load_command_batch
 from pcbflow.component_store import ComponentRevisionNotFoundError
 from pcbflow.config import Settings
 from pcbflow.container import Container, build_container
-from pcbflow.domain import new_id
+from pcbflow.domain import RequestInvalidError, new_id
 from pcbflow.observability import bind_log_context
 from pcbflow.proposal_store import ProposalNotFoundError
 from pcbflow.proposals import (
@@ -100,6 +101,77 @@ class ApiError(RuntimeError):
         self.actions = actions or []
 
 
+class RequestBodyLimitMiddleware:
+    def __init__(self, app, *, max_bytes: int) -> None:
+        self.app = app
+        self._max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"}:
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", ()))
+        raw_length = headers.get(b"content-length")
+        if raw_length is not None:
+            try:
+                declared_length = int(raw_length)
+            except ValueError:
+                declared_length = None
+            if declared_length is not None and declared_length > self._max_bytes:
+                await self._reject(scope, receive, send)
+                return
+
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            if message["type"] != "http.request":
+                await self.app(scope, receive, send)
+                return
+            body.extend(message.get("body", b""))
+            if len(body) > self._max_bytes:
+                await self._reject(scope, receive, send)
+                return
+            if not message.get("more_body", False):
+                break
+
+        delivered = False
+
+        async def replay_receive():
+            nonlocal delivered
+            if delivered:
+                return {"type": "http.disconnect"}
+            delivered = True
+            return {"type": "http.request", "body": bytes(body), "more_body": False}
+
+        await self.app(scope, replay_receive, send)
+
+    async def _reject(self, scope, receive, send) -> None:
+        state = scope.get("state")
+        correlation_id = (
+            state.get("correlation_id") if isinstance(state, dict) else None
+        )
+        if not isinstance(correlation_id, str) or not correlation_id:
+            correlation_id = new_id("cor")
+        response = JSONResponse(
+            status_code=413,
+            content={
+                "error": {
+                    "code": "REQUEST_BODY_TOO_LARGE",
+                    "message": "request body exceeds the configured size limit",
+                    "retryable": False,
+                    "correlation_id": correlation_id,
+                    "details": {"max_bytes": self._max_bytes},
+                    "actions": ["reduce the request body size and retry"],
+                }
+            },
+            headers={"X-Correlation-ID": correlation_id},
+        )
+        await response(scope, receive, send)
+
+
 def _error_response(
     request: Request,
     status_code: int,
@@ -150,6 +222,23 @@ def _validation_details(error: RequestValidationError) -> dict[str, object]:
         location = item.get("loc", ())
         fields.append(".".join(str(part) for part in location))
     return {"fields": fields[:32]}
+
+
+def _request_actor(
+    request: Request, actor: ActorRequest
+) -> tuple[str, str]:
+    authenticated = getattr(request.state, "authenticated_actor", None)
+    if authenticated is not None:
+        return authenticated
+    return actor.type, actor.id
+
+
+def _with_authenticated_actor(batch, actor_type: str, actor_id: str):
+    actor = batch.actor.model_copy(update={"type": actor_type, "id": actor_id})
+    commands = tuple(
+        command.model_copy(update={"actor": actor}) for command in batch.commands
+    )
+    return batch.model_copy(update={"actor": actor, "commands": commands})
 
 
 def _mapped_domain_error(
@@ -243,12 +332,40 @@ def create_app(container: Container | None = None) -> FastAPI:
     services = container or build_container(Settings.from_env())
     app = FastAPI(title="pcbflow", version="0.1.0")
     app.state.container = services
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        max_bytes=services.settings.max_api_body_bytes,
+    )
 
     @app.middleware("http")
     async def add_correlation_id(request: Request, call_next):
         request.state.correlation_id = request.headers.get(
             "X-Correlation-ID", new_id("cor")
         )
+        if services.settings.remote_mode and request.url.path != "/health":
+            authorization = request.headers.get("Authorization", "")
+            scheme, separator, provided_token = authorization.partition(" ")
+            expected_token = services.settings.api_token
+            if (
+                scheme.lower() != "bearer"
+                or not separator
+                or not expected_token
+                or not compare_digest(provided_token, expected_token)
+            ):
+                response = _error_response(
+                    request,
+                    401,
+                    "REMOTE_AUTH_REQUIRED",
+                    "a valid bearer token is required in remote mode",
+                    actions=["provide the configured bearer token and retry"],
+                )
+                response.headers["WWW-Authenticate"] = "Bearer"
+                response.headers["X-Correlation-ID"] = request.state.correlation_id
+                return response
+            request.state.authenticated_actor = (
+                "service",
+                services.settings.api_actor_id,
+            )
         with bind_log_context(trace_id=request.state.correlation_id):
             response = await call_next(request)
         response.headers["X-Correlation-ID"] = request.state.correlation_id
@@ -294,6 +411,7 @@ def create_app(container: Container | None = None) -> FastAPI:
         )
 
     for exception_type in (
+        RequestInvalidError,
         RequirementsBlockedError,
         ApprovalDigestMismatchError,
         RevisionConflictError,
@@ -459,7 +577,7 @@ def create_app(container: Container | None = None) -> FastAPI:
             validated = RequirementSetPayload.model_validate_json(
                 canonical_json_bytes(payload), strict=True
             )
-        except ValidationError as error:
+        except (ValidationError, ValueError) as error:
             raise ApiError(
                 422,
                 "REQUIREMENTS_SCHEMA_INVALID",
@@ -500,17 +618,19 @@ def create_app(container: Container | None = None) -> FastAPI:
 
     @app.post("/api/v1/approvals")
     def decide_approval(
+        request: Request,
         payload: ApprovalRequest,
         idempotency_key: Annotated[
             str, Header(alias="Idempotency-Key", min_length=1)
         ],
     ):
+        actor_type, actor_id = _request_actor(request, payload.actor)
         result = services.approvals.decide_g1(
             requirement_set_id=payload.subject_id,
             subject_digest=payload.subject_digest,
             decision=payload.decision,
-            actor_type=payload.actor.type,
-            actor_id=payload.actor.id,
+            actor_type=actor_type,
+            actor_id=actor_id,
             comment=payload.comment,
             idempotency_key=idempotency_key,
         )
@@ -519,16 +639,17 @@ def create_app(container: Container | None = None) -> FastAPI:
     @app.post("/api/v1/projects/{project_id}/proposals", status_code=202)
     def create_proposal(
         project_id: str,
+        request: Request,
         payload: dict[str, object],
         response: Response,
         idempotency_key: Annotated[
             str, Header(alias="Idempotency-Key", min_length=1)
         ],
     ):
-        data = canonical_json_bytes(payload)
         try:
+            data = canonical_json_bytes(payload)
             batch = load_command_batch(data)
-        except DesignCommandSchemaError as error:
+        except (DesignCommandSchemaError, ValueError) as error:
             raise ApiError(
                 422,
                 "DESIGN_COMMAND_SCHEMA_INVALID",
@@ -544,6 +665,10 @@ def create_app(container: Container | None = None) -> FastAPI:
                 details={},
                 actions=["use the same project ID in the path and body"],
             )
+        actor_type, actor_id = _request_actor(request, batch.actor)
+        if actor_type != batch.actor.type or actor_id != batch.actor.id:
+            batch = _with_authenticated_actor(batch, actor_type, actor_id)
+            data = canonical_json_bytes(batch.model_dump(mode="json"))
         existing = services.proposal_store.find_existing(batch)
         result = services.proposals.create(data, idempotency_key)
         response.status_code = 200 if existing is not None else 202
@@ -580,17 +705,19 @@ def create_app(container: Container | None = None) -> FastAPI:
     @app.post("/api/v1/proposals/{proposal_id}:accept")
     def accept_proposal(
         proposal_id: str,
+        request: Request,
         payload: AcceptProposalRequest,
         idempotency_key: Annotated[
             str, Header(alias="Idempotency-Key", min_length=1)
         ],
     ):
+        actor_type, actor_id = _request_actor(request, payload.actor)
         return jsonable_encoder(
             services.proposal_decisions.accept(
                 proposal_id=proposal_id,
                 candidate_digest=payload.candidate_digest,
-                actor_type=payload.actor.type,
-                actor_id=payload.actor.id,
+                actor_type=actor_type,
+                actor_id=actor_id,
                 comment=payload.comment,
                 idempotency_key=idempotency_key,
             )
@@ -599,17 +726,19 @@ def create_app(container: Container | None = None) -> FastAPI:
     @app.post("/api/v1/proposals/{proposal_id}:reject")
     def reject_proposal(
         proposal_id: str,
+        request: Request,
         payload: RejectProposalRequest,
         idempotency_key: Annotated[
             str, Header(alias="Idempotency-Key", min_length=1)
         ],
     ):
+        actor_type, actor_id = _request_actor(request, payload.actor)
         return jsonable_encoder(
             services.proposal_decisions.reject(
                 proposal_id=proposal_id,
                 reason=payload.reason,
-                actor_type=payload.actor.type,
-                actor_id=payload.actor.id,
+                actor_type=actor_type,
+                actor_id=actor_id,
                 idempotency_key=idempotency_key,
             )
         )

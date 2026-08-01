@@ -141,6 +141,29 @@ def _instantiate_batch(project, requirement_set) -> bytes:
     return json.dumps(value, separators=(",", ":")).encode()
 
 
+def test_proposal_rejects_provenance_for_unknown_frozen_requirement(
+    tmp_path: Path,
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    container = build_container(
+        _settings(tmp_path, fixtures / "modules"),
+        kicad_override=FakeProposalKicad(),
+        clock=lambda: NOW,
+    )
+    try:
+        _source, project, requirement_set = _prepare(container, tmp_path)
+        value = json.loads(_instantiate_batch(project, requirement_set))
+        value["commands"][0]["provenance"]["requirement_ids"] = ["REQ-UNKNOWN-001"]
+
+        with pytest.raises(ValueError, match="unknown frozen requirement"):
+            container.proposals.create(
+                json.dumps(value, separators=(",", ":")).encode(),
+                "execute-status-led",
+            )
+    finally:
+        container.dispose()
+
+
 def test_worker_builds_one_reviewable_candidate_and_complete_evidence(tmp_path: Path) -> None:
     fixtures = Path(__file__).resolve().parents[1] / "fixtures"
     container = build_container(_settings(tmp_path, fixtures / "modules"), kicad_override=FakeProposalKicad(), clock=lambda: NOW)

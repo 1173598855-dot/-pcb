@@ -53,10 +53,20 @@ class FakeKicad:
         )
 
 
-def _settings(tmp_path: Path, *, remote_mode: bool = False) -> Settings:
+def _settings(
+    tmp_path: Path,
+    *,
+    remote_mode: bool = False,
+    api_token: str | None = None,
+    max_api_body_bytes: int | None = None,
+) -> Settings:
     environ = {"PCBFLOW_DATA_DIR": str(tmp_path / "data")}
     if remote_mode:
         environ["PCBFLOW_REMOTE_MODE"] = "true"
+    if api_token is not None:
+        environ["PCBFLOW_API_TOKEN"] = api_token
+    if max_api_body_bytes is not None:
+        environ["PCBFLOW_MAX_API_BODY_BYTES"] = str(max_api_body_bytes)
     return Settings.from_env(environ)
 
 
@@ -175,14 +185,18 @@ def test_api_rejects_unknown_fields_and_returns_stable_not_found_error(
 
 def test_remote_api_rejects_local_source_paths(tmp_path: Path) -> None:
     container = build_container(
-        _settings(tmp_path, remote_mode=True), kicad_override=_fake_kicad()
+        _settings(tmp_path, remote_mode=True, api_token="remote-test-token"),
+        kicad_override=_fake_kicad(),
     )
 
     async def exercise() -> httpx.Response:
         async with _client(container) as client:
             return await client.post(
                 "/api/v1/projects",
-                headers={"Idempotency-Key": "remote-project"},
+                headers={
+                    "Authorization": "Bearer remote-test-token",
+                    "Idempotency-Key": "remote-project",
+                },
                 json={"name": "Controller", "source_path": str(tmp_path)},
             )
 
@@ -194,16 +208,234 @@ def test_remote_api_rejects_local_source_paths(tmp_path: Path) -> None:
 
 def test_remote_api_disables_worker_execution_endpoint(tmp_path: Path) -> None:
     container = build_container(
-        _settings(tmp_path, remote_mode=True), kicad_override=_fake_kicad()
+        _settings(tmp_path, remote_mode=True, api_token="remote-test-token"),
+        kicad_override=_fake_kicad(),
     )
 
     async def exercise() -> httpx.Response:
         async with _client(container, raise_app_exceptions=False) as client:
-            return await client.post("/api/v1/worker:run-once")
+            return await client.post(
+                "/api/v1/worker:run-once",
+                headers={"Authorization": "Bearer remote-test-token"},
+            )
 
     response = asyncio.run(exercise())
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "REMOTE_WORKER_DISABLED"
+    container.engine.dispose()
+
+
+def test_remote_api_requires_a_bearer_token_for_controlled_writes(
+    tmp_path: Path,
+) -> None:
+    container = build_container(
+        _settings(tmp_path, remote_mode=True, api_token="remote-test-token"),
+        kicad_override=_fake_kicad(),
+    )
+
+    async def exercise() -> tuple[httpx.Response, httpx.Response]:
+        async with _client(container, raise_app_exceptions=False) as client:
+            missing = await client.post(
+                "/api/v1/projects/prj_missing:adopt",
+                headers={"Idempotency-Key": "remote-adopt-missing"},
+            )
+            authorized = await client.post(
+                "/api/v1/projects/prj_missing:adopt",
+                headers={
+                    "Authorization": "Bearer remote-test-token",
+                    "Idempotency-Key": "remote-adopt-missing",
+                },
+            )
+            return missing, authorized
+
+    missing, authorized = asyncio.run(exercise())
+    assert missing.status_code == 401
+    assert missing.json()["error"]["code"] == "REMOTE_AUTH_REQUIRED"
+    assert authorized.status_code == 404
+    assert authorized.json()["error"]["code"] == "PROJECT_NOT_FOUND"
+    container.engine.dispose()
+
+
+def test_remote_api_uses_authenticated_actor_not_request_actor(tmp_path: Path) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    source = tmp_path / "remote-controlled-source"
+    source.mkdir()
+    (source / "board.kicad_sch").write_text("(kicad_sch)\n", encoding="utf-8")
+    container = build_container(
+        _settings(tmp_path, remote_mode=True, api_token="remote-test-token"),
+        kicad_override=_fake_kicad(),
+    )
+    project = container.projects.create("Controller", source, "remote-project")
+    managed = container.revisions.adopt(project.id, "remote-adopt")
+    draft = container.requirements.import_draft(
+        managed.id,
+        (fixtures / "requirements" / "reference-controller.yaml").read_bytes(),
+        "remote-requirements",
+    )
+    pending = container.requirements.submit(draft.id, "remote-requirements-submit")
+
+    async def exercise() -> httpx.Response:
+        async with _client(container, raise_app_exceptions=False) as client:
+            return await client.post(
+                "/api/v1/approvals",
+                headers={
+                    "Authorization": "Bearer remote-test-token",
+                    "Idempotency-Key": "remote-g1",
+                },
+                json={
+                    "subject_type": "requirement_set",
+                    "subject_id": pending.id,
+                    "subject_digest": pending.subject_digest(),
+                    "decision": "approve",
+                    "actor": {"type": "human", "id": "forged-user"},
+                    "comment": "approved remotely",
+                },
+            )
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 200
+    decision = container.gate_decisions.find_by_key(managed.id, "remote-g1")
+    assert decision is not None
+    assert decision.actor_type == "service"
+    assert decision.actor_id == "remote-api"
+
+    current_project = container.projects.get(managed.id)
+    batch = _command_batch(
+        {"id": current_project.id, "current_revision": current_project.current_revision},
+        {"id": pending.id},
+    )
+    batch["actor"] = {"type": "human", "id": "forged-user"}
+    batch["commands"][0]["actor"] = {"type": "human", "id": "forged-user"}
+
+    async def create_proposal() -> httpx.Response:
+        async with _client(container, raise_app_exceptions=False) as client:
+            return await client.post(
+                f"/api/v1/projects/{managed.id}/proposals",
+                headers={
+                    "Authorization": "Bearer remote-test-token",
+                    "Idempotency-Key": "api-proposal",
+                },
+                json=batch,
+            )
+
+    queued = asyncio.run(create_proposal())
+    assert queued.status_code == 202
+    stored = container.command_batches.get(queued.json()["command_batch_id"])
+    assert stored.actor.type == "service"
+    assert stored.actor.id == "remote-api"
+    assert {(command.actor.type, command.actor.id) for command in stored.commands} == {
+        ("service", "remote-api")
+    }
+    container.engine.dispose()
+
+
+def test_api_rejects_oversized_json_before_decoding_body(tmp_path: Path) -> None:
+    container = build_container(
+        _settings(tmp_path, max_api_body_bytes=32), kicad_override=_fake_kicad()
+    )
+    body = b'{"payload":"' + (b"x" * 64) + b'"}'
+
+    async def streamed_body():
+        yield body[:17]
+        yield body[17:]
+
+    async def exercise() -> tuple[httpx.Response, httpx.Response]:
+        async with _client(container, raise_app_exceptions=False) as client:
+            fixed_length = await client.post(
+                "/api/v1/projects/prj_missing/requirement-sets",
+                headers={
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                    "Idempotency-Key": "body-limit-length",
+                },
+                content=body,
+            )
+            streamed = await client.post(
+                "/api/v1/projects/prj_missing/requirement-sets",
+                headers={
+                    "Content-Type": "application/json",
+                    "Idempotency-Key": "body-limit-stream",
+                },
+                content=streamed_body(),
+            )
+            return fixed_length, streamed
+
+    fixed_length, streamed = asyncio.run(exercise())
+    for response in (fixed_length, streamed):
+        assert response.status_code == 413
+        error = response.json()["error"]
+        assert error["code"] == "REQUEST_BODY_TOO_LARGE"
+        assert response.headers["X-Correlation-ID"] == error["correlation_id"]
+    container.engine.dispose()
+
+
+def test_api_returns_schema_errors_for_non_finite_json_values(tmp_path: Path) -> None:
+    container = build_container(_settings(tmp_path), kicad_override=_fake_kicad())
+
+    async def exercise() -> tuple[httpx.Response, httpx.Response]:
+        async with _client(container, raise_app_exceptions=False) as client:
+            requirements = await client.post(
+                "/api/v1/projects/prj_missing/requirement-sets",
+                headers={"Idempotency-Key": "non-finite-requirements"},
+                content=b'{"schema_version":NaN}',
+            )
+            proposal = await client.post(
+                "/api/v1/projects/prj_missing/proposals",
+                headers={"Idempotency-Key": "non-finite-proposal"},
+                content=b'{"schema_version":NaN}',
+            )
+            return requirements, proposal
+
+    requirements, proposal = asyncio.run(exercise())
+    assert requirements.status_code == 422
+    assert requirements.json()["error"]["code"] == "REQUIREMENTS_SCHEMA_INVALID"
+    assert proposal.status_code == 422
+    assert proposal.json()["error"]["code"] == "DESIGN_COMMAND_SCHEMA_INVALID"
+    container.engine.dispose()
+
+
+def test_api_returns_stable_error_when_g1_is_no_longer_pending(tmp_path: Path) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    source = tmp_path / "g1-source"
+    source.mkdir()
+    (source / "board.kicad_sch").write_text("(kicad_sch)\n", encoding="utf-8")
+    container = build_container(_settings(tmp_path), kicad_override=_fake_kicad())
+    project = container.projects.create("Controller", source, "g1-project")
+    managed = container.revisions.adopt(project.id, "g1-adopt")
+    draft = container.requirements.import_draft(
+        managed.id,
+        (fixtures / "requirements" / "reference-controller.yaml").read_bytes(),
+        "g1-requirements",
+    )
+    pending = container.requirements.submit(draft.id, "g1-requirements-submit")
+    frozen = container.approvals.decide_g1(
+        requirement_set_id=pending.id,
+        subject_digest=pending.subject_digest(),
+        decision="approve",
+        actor_type="human",
+        actor_id="local-user",
+        comment="approved",
+        idempotency_key="g1-first-decision",
+    )
+
+    async def exercise() -> httpx.Response:
+        async with _client(container, raise_app_exceptions=False) as client:
+            return await client.post(
+                "/api/v1/approvals",
+                headers={"Idempotency-Key": "g1-second-decision"},
+                json={
+                    "subject_type": "requirement_set",
+                    "subject_id": frozen.id,
+                    "subject_digest": frozen.subject_digest(),
+                    "decision": "approve",
+                    "actor": {"type": "human", "id": "local-user"},
+                    "comment": "repeated approval",
+                },
+            )
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "REQUEST_INVALID"
     container.engine.dispose()
 
 
@@ -248,6 +480,17 @@ def test_doctor_json_has_stable_shape(tmp_path: Path) -> None:
         "profile_id",
         "profile_revision",
     }
+
+
+def test_cli_serve_rejects_non_loopback_bindings(monkeypatch) -> None:
+    def unexpected_build():
+        raise AssertionError("serve should validate its host before building services")
+
+    monkeypatch.setattr("pcbflow.cli._build", unexpected_build)
+    result = CliRunner().invoke(app, ["serve", "--host", "0.0.0.0"])
+
+    assert result.exit_code != 0
+    assert "loopback" in result.output
 
 
 def test_cli_commands_share_persisted_services(tmp_path: Path) -> None:

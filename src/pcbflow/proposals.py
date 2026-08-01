@@ -19,7 +19,7 @@ from pcbflow.artifacts import ArtifactDescriptor
 from pcbflow.canonical import canonical_digest, canonical_json_bytes
 from pcbflow.commands import ValidationKind, evaluate_precondition, PreconditionContext
 from pcbflow.commands import load_command_batch
-from pcbflow.domain import ProjectMode
+from pcbflow.domain import ProjectMode, RequestInvalidError
 from pcbflow.repositories import (
     IdempotencyConflictError,
     ProjectRepository,
@@ -210,8 +210,6 @@ class ProposalService:
         project = self._projects.get(batch.project_id)
         if project.mode is not ProjectMode.MANAGED:
             raise ProjectNotManagedError(project.id)
-        if self._reconciler is not None:
-            self._reconciler.assert_writable(project.id)
         if project.current_revision != batch.base_revision:
             if self._metrics is not None:
                 self._metrics.increment(MetricName.PROJECT_REVISION_CONFLICT_TOTAL)
@@ -222,7 +220,27 @@ class ProposalService:
             or requirement_set.status is not RequirementSetStatus.FROZEN
             or project.active_requirement_set_id != requirement_set.id
         ):
-            raise ValueError("batch must use the active frozen requirement set")
+            raise RequestInvalidError(
+                "batch must use the active frozen requirement set"
+            )
+        known_requirement_ids = {
+            requirement.id for requirement in requirement_set.payload.requirements
+        }
+        unknown_requirement_ids = sorted(
+            {
+                requirement_id
+                for command in batch.commands
+                for requirement_id in command.provenance.requirement_ids
+            }
+            - known_requirement_ids
+        )
+        if unknown_requirement_ids:
+            raise RequestInvalidError(
+                "command provenance references unknown frozen requirement: "
+                + ", ".join(unknown_requirement_ids)
+            )
+        if self._reconciler is not None:
+            self._reconciler.assert_writable(project.id)
         return self._store.create_queued(batch)
 
 
@@ -986,8 +1004,6 @@ class ProposalDecisionService:
         if replay is not None:
             return replay
         project, batch, _requirements, _items = self._validate_candidate(proposal, proposal.review_digest or "")
-        if hasattr(self._reconciler, "assert_writable"):
-            self._reconciler.assert_writable(project.id)
         now = self._clock()
         payload = {
             "schema_version": "1.0", "gate": "DESIGN_CHANGE",

@@ -12,6 +12,7 @@ from pcbflow.kicad import (
     KicadProjectNotFoundError,
     KicadReportFormatError,
     KicadToolError,
+    KicadUnavailableError,
     parse_kicad_report,
 )
 from pcbflow.process import ProcessResult
@@ -408,6 +409,64 @@ def test_validate_builds_exact_read_only_commands(tmp_path: Path) -> None:
     ]
     assert reports[0].tool_version == "9.0.2"
     assert reports[0].profile_id == "kicad-9-v1"
+
+
+def test_validate_rejects_an_executable_replaced_during_version_probe(
+    tmp_path: Path,
+) -> None:
+    fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "kicad"
+    executable = tmp_path / "kicad-cli.exe"
+    executable.write_bytes(b"original executable")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.kicad_pcb").write_text(
+        "(kicad_pcb (version 20241229))", encoding="utf-8"
+    )
+
+    class ReplacingVersionRunner(ReportRunner):
+        def run(self, argv, cwd, timeout_seconds):
+            call = tuple(str(value) for value in argv)
+            if call[-1] == "--version":
+                self.calls.append(call)
+                executable.write_bytes(b"replacement executable")
+                return ProcessResult(call, 0, "9.0.2\n", "", False)
+            return super().run(argv, cwd, timeout_seconds)
+
+    runner = ReplacingVersionRunner(
+        {"erc": (fixture_dir / "erc.json").read_bytes(), "drc": (fixture_dir / "drc.json").read_bytes()}
+    )
+    with pytest.raises(KicadUnavailableError, match="executable_changed"):
+        KicadCli(runner, executable, 5).validate(project, tmp_path / "output")
+
+    assert runner.calls == [(str(executable.resolve()), "--version")]
+
+
+def test_validate_rejects_an_executable_replaced_during_validation(
+    tmp_path: Path,
+) -> None:
+    fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "kicad"
+    executable = tmp_path / "kicad-cli.exe"
+    executable.write_bytes(b"original executable")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.kicad_pcb").write_text(
+        "(kicad_pcb (version 20241229))", encoding="utf-8"
+    )
+
+    class ReplacingValidationRunner(ReportRunner):
+        def run(self, argv, cwd, timeout_seconds):
+            result = super().run(argv, cwd, timeout_seconds)
+            if tuple(str(value) for value in argv)[-1] != "--version":
+                executable.write_bytes(b"replacement executable")
+            return result
+
+    runner = ReplacingValidationRunner(
+        {"erc": (fixture_dir / "erc.json").read_bytes(), "drc": (fixture_dir / "drc.json").read_bytes()}
+    )
+    with pytest.raises(KicadUnavailableError, match="executable_changed"):
+        KicadCli(runner, executable, 5).validate(project, tmp_path / "output")
+
+    assert len(runner.calls) == 2
 
 
 def test_validate_rejects_a_format_outside_the_selected_profile(

@@ -179,6 +179,49 @@ def test_workspace_copier_rejects_links_reparse_points_and_copy_limits(
         assert_supported_entry(entry)
 
 
+def test_workspace_copier_rejects_a_top_level_symbolic_link(tmp_path: Path) -> None:
+    target = tmp_path / "workspace-target"
+    target.mkdir()
+    (target / "board.kicad_sch").write_text("board", encoding="utf-8")
+    source_link = tmp_path / "workspace-link"
+    try:
+        source_link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("symbolic links are unavailable on this Windows host")
+
+    with pytest.raises(WorkspaceLinkError):
+        WorkspaceCopier(max_files=10, max_bytes=100).copy(
+            source_link, tmp_path / "workspace-copy"
+        )
+
+
+def test_workspace_copier_rejects_a_top_level_reparse_point(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "workspace-source"
+    source.mkdir()
+    (source / "board.kicad_sch").write_text("board", encoding="utf-8")
+    metadata = source.lstat()
+    original_lstat = Path.lstat
+
+    def reparse_source(path: Path):
+        current = original_lstat(path)
+        if path == source:
+            return SimpleNamespace(
+                st_mode=current.st_mode,
+                st_file_attributes=0x400,
+            )
+        return current
+
+    monkeypatch.setattr(Path, "lstat", reparse_source)
+    monkeypatch.setattr("pcbflow.workspaces.stat.FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+    with pytest.raises(WorkspaceLinkError):
+        WorkspaceCopier(max_files=10, max_bytes=100).copy(
+            source, tmp_path / "workspace-copy"
+        )
+
+
 def test_workspace_copier_rejects_non_regular_entries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

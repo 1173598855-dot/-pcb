@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from pcbflow.artifacts import ArtifactDescriptor, ContentAddressedStore
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.design_tables import RequirementSetRow
-from pcbflow.domain import ProjectMode, new_id, utc_now
+from pcbflow.domain import ProjectMode, RequestInvalidError, new_id, utc_now
 from pcbflow.repositories import (
     IdempotencyConflictError,
     ProjectRepository,
@@ -326,7 +326,7 @@ class RequirementStore:
                 if row.submission_idempotency_key is not None:
                     return self._replay_submission(row, **values)
                 if row.status != RequirementSetStatus.DRAFT.value:
-                    raise ValueError("requirement set is immutable")
+                    raise RequestInvalidError("requirement set is immutable")
                 row.submission_idempotency_key = submission_idempotency_key
                 row.candidate_revision = candidate_revision
                 row.candidate_snapshot_digest = candidate_snapshot_digest

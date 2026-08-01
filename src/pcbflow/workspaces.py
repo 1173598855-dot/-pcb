@@ -86,6 +86,7 @@ class WorkspaceCopier:
         exclude_names: frozenset[str] = frozenset(),
         registered_excludes: frozenset[str] = frozenset(),
     ) -> None:
+        assert_supported_entry(source)
         source = source.resolve(strict=True)
         if not source.is_dir():
             raise ValueError("workspace source must be a directory")

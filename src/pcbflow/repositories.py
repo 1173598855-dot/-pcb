@@ -33,6 +33,7 @@ from pcbflow.tables import (
     TaskAttemptRow,
     TaskRow,
 )
+from pcbflow.workspaces import assert_supported_entry
 
 
 class ProjectNotFoundError(LookupError):
@@ -156,6 +157,7 @@ class ProjectRepository:
     def create_with_status(
         self, name: str, source_path: Path, idempotency_key: str
     ) -> tuple[Project, bool]:
+        assert_supported_entry(source_path)
         resolved = source_path.resolve(strict=True)
         if not resolved.is_dir():
             raise ValueError("project source must be a directory")

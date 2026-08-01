@@ -14,10 +14,14 @@ from pcbflow.container import build_container
 from tests.component_fixtures import build_component_directory
 
 
-def _settings(tmp_path: Path, *, remote_mode: bool = False) -> Settings:
+def _settings(
+    tmp_path: Path, *, remote_mode: bool = False, api_token: str | None = None
+) -> Settings:
     environ = {"PCBFLOW_DATA_DIR": str(tmp_path / "component-api-data")}
     if remote_mode:
         environ["PCBFLOW_REMOTE_MODE"] = "true"
+    if api_token is not None:
+        environ["PCBFLOW_API_TOKEN"] = api_token
     return Settings.from_env(environ)
 
 
@@ -71,7 +75,10 @@ def test_component_revision_api_import_show_list_and_replay(tmp_path: Path) -> N
 
 
 def test_remote_component_api_rejects_import_but_allows_reads(tmp_path: Path) -> None:
-    container = build_container(_settings(tmp_path, remote_mode=True))
+    token = "remote-component-token"
+    container = build_container(
+        _settings(tmp_path, remote_mode=True, api_token=token)
+    )
     manifest_path = build_component_directory(tmp_path / "remote-component") / "component.yaml"
     revision = container.components.import_revision(manifest_path, "remote-seed-1")
 
@@ -80,19 +87,26 @@ def test_remote_component_api_rejects_import_but_allows_reads(tmp_path: Path) ->
         async with httpx.AsyncClient(
             transport=transport, base_url="http://testserver"
         ) as client:
+            authorization = {"Authorization": f"Bearer {token}"}
             rejected = await client.post(
                 "/api/v1/component-revisions",
                 json={"manifest_path": str(manifest_path)},
-                headers={"Idempotency-Key": "remote-api-component-1"},
+                headers={
+                    **authorization,
+                    "Idempotency-Key": "remote-api-component-1",
+                },
             )
             assert rejected.status_code == 403
             assert rejected.json()["error"]["code"] == "LOCAL_SOURCE_PATHS_DISABLED"
 
-            shown = await client.get(f"/api/v1/component-revisions/{revision.id}")
+            shown = await client.get(
+                f"/api/v1/component-revisions/{revision.id}", headers=authorization
+            )
             assert shown.status_code == 200
             listed = await client.get(
                 "/api/v1/component-revisions",
                 params={"component_key": revision.component_key},
+                headers=authorization,
             )
             assert listed.status_code == 200
             assert [item["id"] for item in listed.json()] == [revision.id]
