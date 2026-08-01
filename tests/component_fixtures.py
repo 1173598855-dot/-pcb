@@ -35,18 +35,18 @@ model_3d:
 """
 
 
-def build_component_directory(path: Path, *, include_model: bool) -> Path:
+def build_component_directory(path: Path, *, include_model: bool = True) -> Path:
     path.mkdir(parents=True)
     assets = {
         "datasheet": (
             "datasheet.pdf",
             "application/pdf",
-            b"%PDF-1.7\ncomponent datasheet\n",
+            b"%PDF-1.4\ncomponent fixture\n",
         ),
         "pinout": (
             "pinout.json",
             "application/json",
-            b'{"pins":[{"number":"1"}]}\n',
+            b'{"pins":[{"number":"1","name":"A"}]}',
         ),
         "symbol": (
             "symbol.kicad_sym",
