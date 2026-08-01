@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from pcbflow.approvals import ApprovalService, GateDecisionStore
 from pcbflow.artifacts import ContentAddressedStore
+from pcbflow.component_store import ComponentRevisionStore
+from pcbflow.components import ComponentRevisionService
 from pcbflow.config import Settings
 from pcbflow.db import create_engine_and_session
 from pcbflow.domain import new_id, utc_now
@@ -68,6 +70,8 @@ class Container:
     evidence: EvidenceRepository
     findings: FindingRepository
     artifacts: ContentAddressedStore
+    component_store: ComponentRevisionStore
+    components: ComponentRevisionService
     kicad: KicadPort
     validation: ValidationService
     worker: Worker
@@ -108,6 +112,10 @@ def build_container(
     evidence = EvidenceRepository(sessions)
     findings = FindingRepository(sessions)
     artifacts = ContentAddressedStore(settings.artifact_dir)
+    component_store = ComponentRevisionStore(sessions)
+    components = ComponentRevisionService(
+        component_store, artifacts, max_bytes=settings.max_project_bytes
+    )
     runner = ProcessRunner(settings.max_process_output_bytes)
     revision_store = ProjectRevisionStore(sessions)
     git = GitCli(runner, timeout_seconds=settings.process_timeout_seconds)
@@ -209,6 +217,8 @@ def build_container(
         evidence=evidence,
         findings=findings,
         artifacts=artifacts,
+        component_store=component_store,
+        components=components,
         kicad=selected_kicad,
         validation=validation,
         worker=worker,

@@ -1,14 +1,158 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from pcbflow.artifacts import ArtifactDescriptor
 from pcbflow.canonical import canonical_json_bytes
-from pcbflow.components import component_manifest_digest, load_component_manifest
+from pcbflow.components import (
+    ComponentRevision,
+    component_manifest_digest,
+    load_component_manifest,
+)
 from pcbflow.repositories import IdempotencyConflictError
-from tests.component_fixtures import component_yaml
+from tests.component_fixtures import build_component_directory, component_yaml
+
+
+@pytest.fixture
+def component_directory(tmp_path: Path) -> Path:
+    return build_component_directory(tmp_path / "component", include_model=True)
+
+
+def component_artifact_digests(revision: ComponentRevision) -> tuple[str, ...]:
+    return tuple(
+        digest
+        for digest in (
+            revision.manifest_artifact_digest,
+            revision.datasheet_artifact_digest,
+            revision.pinout_artifact_digest,
+            revision.symbol_artifact_digest,
+            revision.footprint_artifact_digest,
+            revision.model_3d_artifact_digest,
+        )
+        if digest is not None
+    )
+
+
+def test_component_import_stores_canonical_manifest_and_all_asset_evidence(
+    container, component_directory: Path
+) -> None:
+    created = container.components.import_revision(
+        component_directory / "component.yaml", "component-import-1"
+    )
+    assert created.model_3d_artifact_digest is not None
+    assert all(
+        container.artifacts.verify(digest)
+        for digest in component_artifact_digests(created)
+    )
+
+
+def test_component_import_rejects_digest_mismatched_asset_without_revision(
+    container, component_directory: Path
+) -> None:
+    (component_directory / "symbol.kicad_sym").write_bytes(b"tampered")
+
+    with pytest.raises(ValueError, match="digest mismatch"):
+        container.components.import_revision(
+            component_directory / "component.yaml", "component-import-2"
+        )
+
+    assert container.component_store.list_for_component("Acme:LED-0603-RED") == ()
+
+
+def test_component_import_rejects_parent_asset_path_without_revision(
+    container, component_directory: Path
+) -> None:
+    manifest_path = component_directory / "component.yaml"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "path: datasheet.pdf", "path: ../datasheet.pdf"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        container.components.import_revision(manifest_path, "component-import-parent")
+
+    assert container.component_store.list_for_component("Acme:LED-0603-RED") == ()
+
+
+def test_component_import_rejects_linked_asset_without_revision(
+    container, component_directory: Path, tmp_path: Path
+) -> None:
+    linked_asset = component_directory / "symbol.kicad_sym"
+    target = tmp_path / "outside.kicad_sym"
+    target.write_bytes(linked_asset.read_bytes())
+    linked_asset.unlink()
+    try:
+        linked_asset.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this platform")
+
+    with pytest.raises(ValueError, match="regular non-link file"):
+        container.components.import_revision(
+            component_directory / "component.yaml", "component-import-link"
+        )
+
+    assert container.component_store.list_for_component("Acme:LED-0603-RED") == ()
+
+
+def test_component_import_rejects_missing_asset_without_revision(
+    container, component_directory: Path
+) -> None:
+    (component_directory / "footprint.kicad_mod").unlink()
+
+    with pytest.raises(ValueError, match="cannot be read"):
+        container.components.import_revision(
+            component_directory / "component.yaml", "component-import-missing"
+        )
+
+    assert container.component_store.list_for_component("Acme:LED-0603-RED") == ()
+
+
+def test_component_import_enforces_cumulative_byte_limit(
+    container, component_directory: Path
+) -> None:
+    declared_files = (
+        "datasheet.pdf",
+        "pinout.json",
+        "symbol.kicad_sym",
+        "footprint.kicad_mod",
+        "model.step",
+    )
+    byte_limit = (component_directory / "component.yaml").stat().st_size
+    byte_limit += sum(
+        (component_directory / filename).stat().st_size
+        for filename in declared_files
+    ) - 1
+    limited_service = type(container.components)(
+        container.component_store, container.artifacts, max_bytes=byte_limit
+    )
+
+    with pytest.raises(ValueError, match="size limit"):
+        limited_service.import_revision(
+            component_directory / "component.yaml", "component-import-too-large"
+        )
+
+    assert container.component_store.list_for_component("Acme:LED-0603-RED") == ()
+
+
+def test_component_import_replays_identical_import(
+    container, component_directory: Path
+) -> None:
+    first = container.components.import_revision(
+        component_directory / "component.yaml", "component-import-replay"
+    )
+    second = container.components.import_revision(
+        component_directory / "component.yaml", "component-import-replay"
+    )
+
+    assert second == first
+    assert container.component_store.list_for_component("Acme:LED-0603-RED") == (
+        first,
+    )
 
 
 def _component_manifest(artifact_store):
