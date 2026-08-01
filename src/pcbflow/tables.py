@@ -108,6 +108,43 @@ class ArtifactRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ComponentRevisionRow(Base):
+    __tablename__ = "component_revisions"
+    __table_args__ = (
+        UniqueConstraint("component_key", "revision", name="uq_component_revision_identity"),
+        Index("ix_component_revisions_component_key", "component_key", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    component_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    manufacturer: Mapped[str] = mapped_column(String(255), nullable=False)
+    part_number: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    revision: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    canonical_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+    manifest_artifact_digest: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.digest"), nullable=False
+    )
+    datasheet_artifact_digest: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.digest"), nullable=False
+    )
+    pinout_artifact_digest: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.digest"), nullable=False
+    )
+    symbol_artifact_digest: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.digest"), nullable=False
+    )
+    footprint_artifact_digest: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.digest"), nullable=False
+    )
+    model_3d_artifact_digest: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.digest"), nullable=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class EvidenceRow(Base):
     __tablename__ = "evidence"
     __table_args__ = (
