@@ -187,11 +187,15 @@ def object_ref_key(reference: SchematicObjectRef) -> str:
     )
 
 
-def inspect_schematic(project: Path) -> SchematicDocument:
-    return parse_schematic(project).document
+def inspect_schematic(
+    project: Path, *, accepted_versions: frozenset[int] = frozenset((20250114,))
+) -> SchematicDocument:
+    return parse_schematic(project, accepted_versions=accepted_versions).document
 
 
-def parse_schematic(project: Path) -> ParsedSchematic:
+def parse_schematic(
+    project: Path, *, accepted_versions: frozenset[int] = frozenset((20250114,))
+) -> ParsedSchematic:
     project_root = Path(project)
     if not project_root.is_dir():
         raise KicadSemanticError("project must be a directory")
@@ -200,7 +204,9 @@ def parse_schematic(project: Path) -> ParsedSchematic:
     project_root = project_root.resolve()
 
     paths = _schematic_paths(project_root)
-    records = {path: _parse_file(path, project_root) for path in paths}
+    records = {
+        path: _parse_file(path, project_root, accepted_versions) for path in paths
+    }
     links = _resolve_hierarchy(records, project_root)
     root_paths = sorted(
         set(records) - {link.child_path for link in links},
@@ -293,7 +299,9 @@ def _schematic_paths(project_root: Path) -> tuple[Path, ...]:
     return tuple(sorted(set(paths), key=lambda path: path.as_posix()))
 
 
-def _parse_file(path: Path, project_root: Path) -> _FileRecord:
+def _parse_file(
+    path: Path, project_root: Path, accepted_versions: frozenset[int]
+) -> _FileRecord:
     try:
         cst = parse_cst(path.read_bytes())
     except OSError as error:
@@ -301,7 +309,11 @@ def _parse_file(path: Path, project_root: Path) -> _FileRecord:
     if cst.root.head != "kicad_sch":
         raise KicadSemanticError(f"not a KiCad schematic: {path}")
     version = _required_child(cst.root, "version", path).atom_text(1)
-    if version != "20250114":
+    try:
+        format_version = int(version)
+    except ValueError as error:
+        raise KicadSemanticError(f"unsupported KiCad schematic version: {version}") from error
+    if format_version not in accepted_versions:
         raise KicadSemanticError(f"unsupported KiCad schematic version: {version}")
     sheet_uuid = _node_uuid(cst.root, path, "root sheet")
     return _FileRecord(
@@ -875,7 +887,8 @@ def _library_symbol_unit(node: CstList, lib_id: str) -> int | None:
     if name == lib_id:
         return None
     parts = name.rsplit("_", 2)
-    if len(parts) != 3 or parts[0] != lib_id:
+    prefixes = (lib_id, lib_id.rsplit(":", 1)[-1])
+    if len(parts) != 3 or parts[0] not in prefixes:
         return None
     try:
         return int(parts[1])

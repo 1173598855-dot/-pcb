@@ -83,6 +83,15 @@ def _adapter() -> CstSchematicAdapter:
     return CstSchematicAdapter(catalog)
 
 
+def test_adapter_inspects_kicad_10_fixture_with_selected_major() -> None:
+    project = _fixtures() / "kicad" / "real" / "10" / "controlled-write"
+
+    document = CstSchematicAdapter(None).inspect(project, kicad_major=10)
+
+    assert document.kicad_major == 10
+    assert document.symbols
+
+
 def test_property_footprint_and_label_operations_reparse_semantically(
     tmp_path: Path,
 ) -> None:

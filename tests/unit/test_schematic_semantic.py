@@ -42,6 +42,26 @@ def test_inspect_uses_kicad_uuid_as_symbol_identity() -> None:
     assert inspect_schematic(fixture) == document
 
 
+def test_inspects_verified_kicad_10_legacy_format_fixture() -> None:
+    fixture = (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "kicad"
+        / "real"
+        / "10"
+        / "compatible-legacy"
+    )
+
+    document = inspect_schematic(
+        fixture,
+        accepted_versions=frozenset((20231120, 20250114)),
+    )
+
+    assert document.root_file == "up-down-c.kicad_sch"
+    assert document.symbols
+    assert all(symbol.pins for symbol in document.symbols)
+
+
 def test_child_sheet_uuid_scopes_its_contained_symbols(tmp_path: Path) -> None:
     (tmp_path / "root.kicad_sch").write_text(
         """(kicad_sch

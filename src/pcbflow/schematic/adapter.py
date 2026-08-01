@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID, uuid5
@@ -17,6 +17,7 @@ from pcbflow.commands import (
     SchematicObjectRef,
 )
 from pcbflow.observability import MetricName, Metrics
+from pcbflow.kicad_compatibility import profile_for_major
 from pcbflow.schematic.cst import (
     CstAtom,
     CstDocument,
@@ -103,9 +104,15 @@ class ApplyResult:
 
 
 class SchematicAdapter(Protocol):
-    def inspect(self, project: Path) -> SchematicDocument: ...
+    def inspect(self, project: Path, *, kicad_major: int = 9) -> SchematicDocument: ...
 
-    def apply(self, project: Path, commands: tuple[DesignCommand, ...]) -> ApplyResult: ...
+    def apply(
+        self,
+        project: Path,
+        commands: tuple[DesignCommand, ...],
+        *,
+        kicad_major: int = 9,
+    ) -> ApplyResult: ...
 
 
 class CstSchematicAdapter:
@@ -122,10 +129,19 @@ class CstSchematicAdapter:
         self._metrics = metrics
         self._monotonic = monotonic
 
-    def inspect(self, project: Path) -> SchematicDocument:
+    def inspect(self, project: Path, *, kicad_major: int = 9) -> SchematicDocument:
+        profile = profile_for_major(kicad_major)
+        if profile is None:
+            raise ValueError(f"unsupported KiCad major: {kicad_major}")
         started = self._monotonic()
         try:
-            return inspect_schematic(project)
+            return replace(
+                inspect_schematic(
+                    project,
+                    accepted_versions=profile.schematic_format_versions,
+                ),
+                kicad_major=kicad_major,
+            )
         finally:
             if self._metrics is not None:
                 self._metrics.observe(
@@ -133,9 +149,18 @@ class CstSchematicAdapter:
                     max(0.0, self._monotonic() - started),
                 )
 
-    def apply(self, project: Path, commands: tuple[DesignCommand, ...]) -> ApplyResult:
+    def apply(
+        self,
+        project: Path,
+        commands: tuple[DesignCommand, ...],
+        *,
+        kicad_major: int = 9,
+    ) -> ApplyResult:
+        profile = profile_for_major(kicad_major)
+        if profile is None:
+            raise ValueError(f"unsupported KiCad major: {kicad_major}")
         try:
-            result = self._apply(project, commands)
+            result = self._apply(project, commands, kicad_major=kicad_major)
         except Exception:
             if self._metrics is not None:
                 self._metrics.increment(
@@ -150,7 +175,13 @@ class CstSchematicAdapter:
             )
         return result
 
-    def _apply(self, project: Path, commands: tuple[DesignCommand, ...]) -> ApplyResult:
+    def _apply(
+        self,
+        project: Path,
+        commands: tuple[DesignCommand, ...],
+        *,
+        kicad_major: int,
+    ) -> ApplyResult:
         if not commands:
             raise ValueError("at least one design command is required")
         if self._module_catalog is None and any(
@@ -170,16 +201,23 @@ class CstSchematicAdapter:
                 raise ValueError("Task 13 supports exactly one instantiate command per apply")
             command = commands[0]
             assert self._module_catalog is not None
-            before = parse_schematic(project_root)
+            profile = profile_for_major(kicad_major)
+            assert profile is not None
+            before = parse_schematic(
+                project_root,
+                accepted_versions=profile.schematic_format_versions,
+            )
             revision = self._module_catalog.get(command.operation.payload.module_revision_id)
-            result, after, modified = self._instantiate(project_root, before, command, revision)
+            result, after, modified = self._instantiate(
+                project_root, before, command, revision, kicad_major=kicad_major
+            )
             return ApplyResult(
                 modified_files=modified,
                 command_results=(result,),
                 after=after,
                 capability_report=AdapterCapabilityReport(
                     adapter_contract=self._ADAPTER_CONTRACT,
-                    kicad_major=9,
+                    kicad_major=kicad_major,
                     supported_operations=("schematic.instantiate_module",),
                     module_digests=(revision.manifest_digest,),
                 ),
@@ -197,9 +235,14 @@ class CstSchematicAdapter:
             for command in commands
         ):
             raise ModuleRevisionNotFoundError("MODULE_CATALOG_NOT_CONFIGURED")
-        before = parse_schematic(project_root)
+        profile = profile_for_major(kicad_major)
+        assert profile is not None
+        before = parse_schematic(
+            project_root,
+            accepted_versions=profile.schematic_format_versions,
+        )
         results, after, modified, module_digests = self._apply_controlled_operations(
-            project_root, before, commands
+            project_root, before, commands, kicad_major=kicad_major
         )
         return ApplyResult(
             modified_files=modified,
@@ -207,7 +250,7 @@ class CstSchematicAdapter:
             after=after,
             capability_report=AdapterCapabilityReport(
                 adapter_contract=self._ADAPTER_CONTRACT,
-                kicad_major=9,
+                kicad_major=kicad_major,
                 supported_operations=tuple(sorted({command.operation.type for command in commands})),
                 module_digests=module_digests,
             ),
@@ -218,8 +261,16 @@ class CstSchematicAdapter:
         project: Path,
         before: ParsedSchematic,
         commands: tuple[DesignCommand, ...],
+        *,
+        kicad_major: int,
     ) -> tuple[tuple[CommandResult, ...], SchematicDocument, tuple[str, ...], tuple[str, ...]]:
-        return _apply_controlled_operations(project, before, commands, self._module_catalog)
+        return _apply_controlled_operations(
+            project,
+            before,
+            commands,
+            self._module_catalog,
+            kicad_major=kicad_major,
+        )
 
     def _instantiate(
         self,
@@ -227,6 +278,8 @@ class CstSchematicAdapter:
         before: ParsedSchematic,
         command: DesignCommand,
         revision: ModuleRevision,
+        *,
+        kicad_major: int,
     ) -> tuple[CommandResult, SchematicDocument, tuple[str, ...]]:
         operation = command.operation
         assert isinstance(operation, InstantiateModuleOperation)
@@ -271,7 +324,13 @@ class CstSchematicAdapter:
             created = True
             _atomic_replace(target_file, root_bytes)
             root_changed = True
-            after = inspect_schematic(project)
+            profile = profile_for_major(kicad_major)
+            assert profile is not None
+            after = inspect_schematic(
+                project,
+                accepted_versions=profile.schematic_format_versions,
+            )
+            after = replace(after, kicad_major=kicad_major)
             _validate_port_connectivity(
                 after,
                 sheet_uuid,
@@ -326,6 +385,8 @@ def _apply_controlled_operations(
     before: ParsedSchematic,
     commands: tuple[DesignCommand, ...],
     module_catalog: ModuleCatalogPort | None,
+    *,
+    kicad_major: int,
 ) -> tuple[tuple[CommandResult, ...], SchematicDocument, tuple[str, ...], tuple[str, ...]]:
     edits_by_file: dict[Path, list[CstEdit]] = {}
     inserted_by_file: dict[Path, list[CstList]] = {}
@@ -478,7 +539,13 @@ def _apply_controlled_operations(
             document = parse_cst(original_bytes[path])
             changed_files[path] = apply_edits(document, tuple(edits))
             _atomic_replace(path, changed_files[path])
-        after = parse_schematic(project).document
+        profile = profile_for_major(kicad_major)
+        assert profile is not None
+        after = parse_schematic(
+            project,
+            accepted_versions=profile.schematic_format_versions,
+        ).document
+        after = replace(after, kicad_major=kicad_major)
         before_nets = {object_ref_key(item.ref): item for item in before.document.nets}
         after_nets = {object_ref_key(item.ref): item for item in after.nets}
         changed_net_keys = {
