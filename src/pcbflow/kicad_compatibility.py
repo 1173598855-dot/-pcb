@@ -2,6 +2,17 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+
+class KicadOperationUnsupportedError(ValueError):
+    code = "KICAD_OPERATION_UNSUPPORTED"
+
+    def __init__(self, kind: str, profile_id: str) -> None:
+        super().__init__(f"KiCad operation {kind!r} is not supported by {profile_id}")
+        self.kind = kind
+        self.profile_id = profile_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +25,28 @@ class KicadCompatibilityProfile:
     schematic_format_versions: frozenset[int]
     pcb_format_versions: frozenset[int]
     validation_operations: frozenset[str]
+
+    def validation_argv(
+        self,
+        *,
+        executable: Path,
+        kind: Literal["erc", "drc"],
+        design_file: Path,
+        report_file: Path,
+    ) -> tuple[str, ...]:
+        if kind not in self.validation_operations:
+            raise KicadOperationUnsupportedError(kind, self.profile_id)
+        command_group = "sch" if kind == "erc" else "pcb"
+        return (
+            str(executable),
+            command_group,
+            kind,
+            "--format",
+            "json",
+            "--output",
+            str(report_file),
+            str(design_file),
+        )
 
 
 _FORMAT_SCHEMATIC = frozenset({20231120, 20250114})

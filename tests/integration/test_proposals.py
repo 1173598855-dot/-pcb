@@ -36,7 +36,18 @@ class FakeProposalKicad:
     def validate(self, project_dir: Path, output_dir: Path) -> tuple[RawValidationReport, ...]:
         assert project_dir.is_dir()
         output_dir.mkdir(parents=True, exist_ok=True)
-        return (RawValidationReport("erc", self.report, ("kicad-cli", "sch", "erc"), 0, "9.0.2"),)
+        return (
+            RawValidationReport(
+                "erc",
+                self.report,
+                ("kicad-cli", "sch", "erc"),
+                0,
+                "9.0.2",
+                "sha256:" + "9" * 64,
+                "kicad-9-v1",
+                1,
+            ),
+        )
 
 
 class UnavailableProposalKicad(FakeProposalKicad):

@@ -36,6 +36,9 @@ class FakeKicad:
                 argv=("kicad-cli", "sch", "erc"),
                 returncode=0,
                 tool_version="9.0.2",
+                executable_digest="sha256:" + "9" * 64,
+                profile_id="kicad-9-v1",
+                profile_revision=1,
             ),
             RawValidationReport(
                 kind="drc",
@@ -43,6 +46,9 @@ class FakeKicad:
                 argv=("kicad-cli", "pcb", "drc"),
                 returncode=0,
                 tool_version="9.0.2",
+                executable_digest="sha256:" + "9" * 64,
+                profile_id="kicad-9-v1",
+                profile_revision=1,
             ),
         )
 
@@ -238,6 +244,9 @@ def test_doctor_json_has_stable_shape(tmp_path: Path) -> None:
         "version",
         "executable_digest",
         "reason",
+        "major",
+        "profile_id",
+        "profile_revision",
     }
 
 
@@ -325,6 +334,9 @@ class FakeCliKicad:
                 argv=("kicad-cli", "sch", "erc"),
                 returncode=0,
                 tool_version="9.0.2",
+                executable_digest="sha256:" + "9" * 64,
+                profile_id="kicad-9-v1",
+                profile_revision=1,
             ),
         )
 

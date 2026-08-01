@@ -52,6 +52,9 @@ class FakeKicad9:
                 argv=("kicad-cli", "sch", "erc"),
                 returncode=0,
                 tool_version="9.0.2",
+                executable_digest="sha256:" + "9" * 64,
+                profile_id="kicad-9-v1",
+                profile_revision=1,
             ),
         )
 

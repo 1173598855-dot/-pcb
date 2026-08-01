@@ -10,8 +10,13 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from pcbflow.domain import NormalizedFinding, ValidationReport
-from pcbflow.kicad_compatibility import select_kicad_profile
+from pcbflow.kicad_compatibility import (
+    KicadCompatibilityProfile,
+    KicadOperationUnsupportedError,
+    select_kicad_profile,
+)
 from pcbflow.process import ProcessPort, ProcessTimeoutError
+from pcbflow.schematic.cst import CstParseError, parse_cst
 
 _VERSION = re.compile(r"(?<!\d)(\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?)(?!\d)")
 
@@ -35,6 +40,9 @@ class RawValidationReport:
     argv: tuple[str, ...]
     returncode: int
     tool_version: str
+    executable_digest: str
+    profile_id: str
+    profile_revision: int
 
 
 class KicadPort(Protocol):
@@ -47,6 +55,19 @@ class KicadPort(Protocol):
 
 class KicadReportFormatError(ValueError):
     pass
+
+
+class KicadDesignFormatError(ValueError):
+    code = "KICAD_FILE_FORMAT_UNSUPPORTED"
+
+    def __init__(self, path: Path, version: str | None, profile_id: str) -> None:
+        detail = version if version is not None else "unknown"
+        super().__init__(
+            f"KiCad design format {detail} in {path.name} is not supported by {profile_id}"
+        )
+        self.path = path
+        self.version = version
+        self.profile_id = profile_id
 
 
 class AmbiguousKicadProjectError(ValueError):
@@ -247,19 +268,23 @@ class KicadCli:
         capability = self.probe()
         if not capability.available or capability.path is None or capability.version is None:
             raise KicadUnavailableError(capability.reason or "kicad_cli_unavailable")
+        profile = select_kicad_profile(capability.version)
+        if profile is None or capability.profile_id is None:
+            raise KicadUnavailableError("unsupported_version")
+        self._validate_design_formats(schematics, boards, profile)
         output.mkdir(parents=True, exist_ok=True)
 
         reports: list[RawValidationReport] = []
         if schematics:
             reports.append(
                 self._run_validation(
-                    "erc", "sch", schematics[0], output / "erc.json", capability
+                    "erc", schematics[0], output / "erc.json", capability
                 )
             )
         if boards:
             reports.append(
                 self._run_validation(
-                    "drc", "pcb", boards[0], output / "drc.json", capability
+                    "drc", boards[0], output / "drc.json", capability
                 )
             )
         return tuple(reports)
@@ -267,24 +292,25 @@ class KicadCli:
     def _run_validation(
         self,
         kind: Literal["erc", "drc"],
-        command_group: Literal["sch", "pcb"],
         design_file: Path,
         report_file: Path,
         capability: KicadCapability,
     ) -> RawValidationReport:
         assert capability.path is not None
         assert capability.version is not None
+        assert capability.executable_digest is not None
+        assert capability.profile_id is not None
+        assert capability.profile_revision is not None
         if report_file.exists():
             report_file.unlink()
-        argv = (
-            str(capability.path),
-            command_group,
-            kind,
-            "--format",
-            "json",
-            "--output",
-            str(report_file),
-            str(design_file.resolve()),
+        profile = select_kicad_profile(capability.version)
+        if profile is None:
+            raise KicadUnavailableError("unsupported_version")
+        argv = profile.validation_argv(
+            executable=capability.path,
+            kind=kind,
+            design_file=design_file.resolve(),
+            report_file=report_file,
         )
         result = self._runner.run(argv, report_file.parent, self._timeout_seconds)
         if result.returncode != 0:
@@ -299,7 +325,54 @@ class KicadCli:
             argv=tuple(result.argv),
             returncode=result.returncode,
             tool_version=capability.version,
+            executable_digest=capability.executable_digest,
+            profile_id=capability.profile_id,
+            profile_revision=capability.profile_revision,
         )
+
+    @staticmethod
+    def _validate_design_formats(
+        schematics: list[Path],
+        boards: list[Path],
+        profile: KicadCompatibilityProfile,
+    ) -> None:
+        for path in schematics:
+            KicadCli._validate_design_format(
+                path,
+                profile.schematic_format_versions,
+                "kicad_sch",
+                profile.profile_id,
+            )
+        for path in boards:
+            KicadCli._validate_design_format(
+                path,
+                profile.pcb_format_versions,
+                "kicad_pcb",
+                profile.profile_id,
+            )
+
+    @staticmethod
+    def _validate_design_format(
+        path: Path,
+        accepted: frozenset[int],
+        expected_head: str,
+        profile_id: str,
+    ) -> None:
+        try:
+            document = parse_cst(path.read_bytes())
+        except (OSError, CstParseError) as error:
+            raise KicadDesignFormatError(path, None, profile_id) from error
+        if document.root.head != expected_head:
+            raise KicadDesignFormatError(path, None, profile_id)
+        versions = document.root.find_children("version")
+        if len(versions) != 1:
+            raise KicadDesignFormatError(path, None, profile_id)
+        try:
+            version = int(versions[0].atom_text(1))
+        except (IndexError, ValueError, CstParseError) as error:
+            raise KicadDesignFormatError(path, None, profile_id) from error
+        if version not in accepted:
+            raise KicadDesignFormatError(path, str(version), profile_id)
 
     @staticmethod
     def _hash_executable(executable: Path) -> str:

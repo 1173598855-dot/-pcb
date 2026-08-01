@@ -10,7 +10,11 @@ from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.config import Settings
 from pcbflow.container import build_container
 from pcbflow.domain import TaskStatus
-from pcbflow.kicad import KicadReportFormatError, RawValidationReport
+from pcbflow.kicad import (
+    KicadDesignFormatError,
+    KicadReportFormatError,
+    RawValidationReport,
+)
 from pcbflow.repositories import (
     EvidenceRepository,
     FindingRepository,
@@ -54,6 +58,9 @@ class FakeKicad:
                 ("kicad-cli", "sch", "erc"),
                 0,
                 "9.0.2",
+                "sha256:" + "9" * 64,
+                "kicad-9-v1",
+                1,
             ),
             RawValidationReport(
                 "drc",
@@ -61,6 +68,9 @@ class FakeKicad:
                 ("kicad-cli", "pcb", "drc"),
                 0,
                 "9.0.2",
+                "sha256:" + "9" * 64,
+                "kicad-9-v1",
+                1,
             ),
         )
 
@@ -121,6 +131,12 @@ def test_validation_handler_persists_raw_evidence_and_findings(
     assert completed.result == {
         "evidence_ids": [item.id for item in stored_evidence],
         "finding_count": 2,
+        "tool": {
+            "version": "9.0.2",
+            "executable_digest": "sha256:" + "9" * 64,
+            "profile_id": "kicad-9-v1",
+            "profile_revision": 1,
+        },
     }
     assert [item.kind for item in stored_evidence] == ["kicad_erc", "kicad_drc"]
     assert [item.rule_id for item in stored_findings] == [
@@ -205,6 +221,9 @@ def test_validation_report_write_is_fenced_after_lease_replacement(
                     ("kicad-cli", "sch", "erc"),
                     0,
                     "9.0.2",
+                    "sha256:" + "9" * 64,
+                    "kicad-9-v1",
+                    1,
                 ),
             )
 
@@ -266,7 +285,8 @@ def test_invalid_validation_report_is_parsed_before_artifact_write(
         def validate(self, project_dir: Path, output_dir: Path):
             return (
                 RawValidationReport(
-                    "erc", b"not-json", ("kicad-cli", "sch", "erc"), 0, "9.0.2"
+                    "erc", b"not-json", ("kicad-cli", "sch", "erc"), 0,
+                    "9.0.2", "sha256:" + "9" * 64, "kicad-9-v1", 1
                 ),
             )
 
@@ -284,6 +304,54 @@ def test_invalid_validation_report_is_parsed_before_artifact_write(
         handler(lease)
 
     assert not list(store.root.joinpath("objects").rglob("*"))
+
+
+def test_unsupported_kicad_format_is_a_terminal_compatibility_error(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    source = tmp_path / "unsupported-format"
+    source.mkdir()
+    (source / "board.kicad_sch").write_text(
+        '(kicad_sch (version 20990101) (uuid "00000000-0000-0000-0000-000000000001"))',
+        encoding="utf-8",
+    )
+    projects = ProjectRepository(session_factory)
+    tasks = TaskRepository(session_factory)
+    project = projects.create("Unsupported", source, "unsupported-project")
+    task = tasks.enqueue(
+        VALIDATION_TASK_KIND,
+        {"project_id": project.id},
+        "unsupported-validation",
+        project.id,
+    )
+
+    class UnsupportedFormatKicad:
+        def validate(self, project_dir: Path, output_dir: Path):
+            raise KicadDesignFormatError(
+                project_dir / "board.kicad_sch", "20990101", "kicad-10-v1"
+            )
+
+    handler = ValidationTaskHandler(
+        projects,
+        EvidenceRepository(session_factory),
+        FindingRepository(session_factory),
+        ContentAddressedStore(tmp_path / "artifacts"),
+        UnsupportedFormatKicad(),
+        max_files=100,
+        max_bytes=1_000_000,
+    )
+    worker = Worker(
+        tasks,
+        "worker-a",
+        {VALIDATION_TASK_KIND: handler},
+        lambda: NOW,
+        30,
+    )
+
+    assert worker.run_once()
+    failed = tasks.get(task.id)
+    assert failed.status is TaskStatus.FAILED_TERMINAL
+    assert failed.last_error_code == "KICAD_FILE_FORMAT_UNSUPPORTED"
 
 
 def test_validation_rejects_project_over_file_limit(
@@ -388,6 +456,9 @@ def test_managed_validation_reads_database_revision_not_changed_import_source(
                     ("kicad-cli", "sch", "erc"),
                     0,
                     "9.0.2",
+                    "sha256:" + "9" * 64,
+                    "kicad-9-v1",
+                    1,
                 ),
             )
 

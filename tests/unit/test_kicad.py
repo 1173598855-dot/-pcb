@@ -8,6 +8,7 @@ from pcbflow.domain import NormalizedFinding
 from pcbflow.kicad import (
     AmbiguousKicadProjectError,
     KicadCli,
+    KicadDesignFormatError,
     KicadReportFormatError,
     parse_kicad_report,
 )
@@ -171,8 +172,11 @@ def test_validate_builds_exact_read_only_commands(tmp_path: Path) -> None:
     project.mkdir()
     schematic = project / "board.kicad_sch"
     board = project / "board.kicad_pcb"
-    schematic.write_text("fixture", encoding="utf-8")
-    board.write_text("fixture", encoding="utf-8")
+    schematic.write_text(
+        '(kicad_sch (version 20250114) (uuid "00000000-0000-0000-0000-000000000001"))',
+        encoding="utf-8",
+    )
+    board.write_text('(kicad_pcb (version 20241229))', encoding="utf-8")
 
     reports = KicadCli(runner, executable, 5).validate(project, output)
 
@@ -200,6 +204,55 @@ def test_validate_builds_exact_read_only_commands(tmp_path: Path) -> None:
         ),
     ]
     assert reports[0].tool_version == "9.0.2"
+    assert reports[0].profile_id == "kicad-9-v1"
+
+
+def test_validate_rejects_a_format_outside_the_selected_profile(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "kicad-cli.exe"
+    executable.write_bytes(b"fixture executable")
+    project = tmp_path / "project"
+    project.mkdir()
+    schematic = project / "board.kicad_sch"
+    schematic.write_text(
+        '(kicad_sch (version 20990101) (uuid "00000000-0000-0000-0000-000000000001"))',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KicadDesignFormatError) as caught:
+        KicadCli(
+            VersionRunner(
+                ProcessResult((str(executable), "--version"), 0, "10.0.4\n", "", False)
+            ),
+            executable,
+            5,
+        ).validate(project, tmp_path / "output")
+
+    assert caught.value.code == "KICAD_FILE_FORMAT_UNSUPPORTED"
+
+
+def test_kicad_10_profile_builds_the_verified_erc_command(tmp_path: Path) -> None:
+    from pcbflow.kicad_compatibility import select_kicad_profile
+
+    profile = select_kicad_profile("10.0.4")
+    assert profile is not None
+    argv = profile.validation_argv(
+        executable=tmp_path / "kicad-cli.exe",
+        kind="erc",
+        design_file=tmp_path / "board.kicad_sch",
+        report_file=tmp_path / "erc.json",
+    )
+
+    assert argv[1:] == (
+        "sch",
+        "erc",
+        "--format",
+        "json",
+        "--output",
+        str(tmp_path / "erc.json"),
+        str(tmp_path / "board.kicad_sch"),
+    )
 
 
 def test_validate_rejects_multiple_root_schematics(tmp_path: Path) -> None:

@@ -14,6 +14,8 @@ from pcbflow.domain import ProjectMode, Task, TaskLease, utc_now
 from pcbflow.observability import MetricName, Metrics, ensure_trace_id
 from pcbflow.kicad import (
     KicadPort,
+    KicadDesignFormatError,
+    KicadOperationUnsupportedError,
     KicadProjectNotFoundError,
     KicadToolError,
     KicadUnavailableError,
@@ -43,6 +45,32 @@ class ProjectCopyLimitError(TerminalTaskError):
 
 class ProjectLinkError(TerminalTaskError):
     pass
+
+
+def _validation_tool_identity(reports) -> tuple[str, str, str, int]:
+    if not reports:
+        raise TerminalTaskError("KICAD_NO_REPORTS", "validation produced no reports")
+    identity = (
+        reports[0].tool_version,
+        reports[0].executable_digest,
+        reports[0].profile_id,
+        reports[0].profile_revision,
+    )
+    if any(
+        (
+            report.tool_version,
+            report.executable_digest,
+            report.profile_id,
+            report.profile_revision,
+        )
+        != identity
+        for report in reports[1:]
+    ):
+        raise TerminalTaskError(
+            "KICAD_TOOL_IDENTITY_MISMATCH",
+            "validation reports use different KiCad tool identities",
+        )
+    return identity
 
 
 def assert_project_tree_safe(root: Path, *, max_files: int, max_bytes: int) -> None:
@@ -150,6 +178,8 @@ class ValidationTaskHandler:
                 raise TerminalTaskError("KICAD_CLI_UNAVAILABLE", str(error)) from error
             except KicadProjectNotFoundError as error:
                 raise TerminalTaskError("INVALID_KICAD_PROJECT", str(error)) from error
+            except (KicadDesignFormatError, KicadOperationUnsupportedError) as error:
+                raise TerminalTaskError(error.code, str(error)) from error
             except KicadToolError as error:
                 raise RetryableTaskError("KICAD_TOOL_FAILED", str(error)) from error
             finally:
@@ -161,6 +191,7 @@ class ValidationTaskHandler:
 
             evidence_ids: list[str] = []
             finding_count = 0
+            tool_identity = _validation_tool_identity(reports)
             for raw in reports:
                 self._assert_active(lease)
                 parsed = parse_kicad_report(raw.kind, raw.data)
@@ -188,7 +219,16 @@ class ValidationTaskHandler:
                 )
                 evidence_ids.append(record.id)
                 finding_count += len(parsed.findings)
-        return {"evidence_ids": evidence_ids, "finding_count": finding_count}
+        return {
+            "evidence_ids": evidence_ids,
+            "finding_count": finding_count,
+            "tool": {
+                "version": tool_identity[0],
+                "executable_digest": tool_identity[1],
+                "profile_id": tool_identity[2],
+                "profile_revision": tool_identity[3],
+            },
+        }
 
     def _assert_active(self, lease: TaskLease) -> None:
         if self._tasks is not None:
