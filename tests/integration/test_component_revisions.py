@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 from pathlib import Path
 
 import pytest
 
-from pcbflow.artifacts import ArtifactDescriptor
+from pcbflow.artifacts import ArtifactDescriptor, _STREAM_CHUNK_BYTES
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.components import (
     ComponentRevision,
@@ -60,6 +61,50 @@ def test_component_import_rejects_digest_mismatched_asset_without_revision(
         )
 
     assert container.component_store.list_for_component("Acme:LED-0603-RED") == ()
+
+
+def test_component_import_streams_large_assets_without_put_bytes(
+    container, component_directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    large_datasheet = b"%PDF-1.4\n" + b"x" * (_STREAM_CHUNK_BYTES * 2)
+    datasheet = component_directory / "datasheet.pdf"
+    datasheet.write_bytes(large_datasheet)
+    manifest_path = component_directory / "component.yaml"
+    manifest = load_component_manifest(manifest_path.read_bytes())
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            manifest.datasheet.digest,
+            "sha256:" + hashlib.sha256(large_datasheet).hexdigest(),
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        container.artifacts,
+        "put_bytes",
+        lambda *_args, **_kwargs: pytest.fail("component import must stage artifacts"),
+    )
+
+    revision = container.components.import_revision(
+        manifest_path, "component-stream-large"
+    )
+
+    assert container.artifacts.verify(revision.datasheet_artifact_digest)
+
+
+def test_component_import_discards_all_stages_after_later_asset_failure(
+    container, component_directory: Path
+) -> None:
+    manifest_path = component_directory / "component.yaml"
+    manifest = load_component_manifest(manifest_path.read_bytes())
+    (component_directory / "footprint.kicad_mod").write_bytes(b"tampered")
+
+    with pytest.raises(ValueError, match="digest mismatch"):
+        container.components.import_revision(manifest_path, "component-stream-failure")
+
+    assert container.component_store.list_for_component(manifest.component_key) == ()
+    staging = container.artifacts.root / ".staging"
+    assert not staging.exists() or not any(staging.iterdir())
+    assert not container.artifacts._path(manifest.datasheet.digest).exists()
 
 
 def test_component_import_rejects_parent_asset_path_without_revision(

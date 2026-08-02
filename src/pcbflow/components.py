@@ -1,17 +1,21 @@
 from __future__ import annotations
 
-import hashlib
+import io
 import stat
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
-from typing import Literal, Self
+from typing import TYPE_CHECKING, BinaryIO, Iterator, Literal, Self
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from pcbflow.artifacts import ContentAddressedStore
+from pcbflow.artifacts import (
+    ArtifactDigestMismatchError,
+    ArtifactSizeLimitError,
+    ContentAddressedStore,
+)
 from pcbflow.canonical import canonical_digest, canonical_json_bytes
 
 if TYPE_CHECKING:
@@ -111,15 +115,6 @@ class ComponentRevision:
             raise ValueError("component revision status must be verified")
 
 
-@dataclass(frozen=True, slots=True)
-class _DeclaredAssetBytes:
-    datasheet: bytes
-    pinout: bytes
-    symbol: bytes
-    footprint: bytes
-    model_3d: bytes | None
-
-
 class ComponentRevisionService:
     def __init__(
         self,
@@ -140,30 +135,52 @@ class ComponentRevisionService:
         manifest_bytes = _read_regular_file(manifest_path, self._max_bytes)
         manifest = load_component_manifest(manifest_bytes)
         root = _checked_component_directory(manifest_path.parent)
-        assets = _load_declared_assets(
-            root,
-            manifest,
-            self._max_bytes - len(manifest_bytes),
-        )
-        descriptors = (
-            self._artifacts.put_bytes(
-                canonical_json_bytes(manifest.model_dump(mode="json")),
-                _MANIFEST_MEDIA_TYPE,
-            ),
-            self._artifacts.put_bytes(assets.datasheet, manifest.datasheet.media_type),
-            self._artifacts.put_bytes(assets.pinout, manifest.pinout.media_type),
-            self._artifacts.put_bytes(assets.symbol, manifest.symbol.media_type),
-            self._artifacts.put_bytes(assets.footprint, manifest.footprint.media_type),
-        )
-        if assets.model_3d is not None and manifest.model_3d is not None:
-            descriptors += (
-                self._artifacts.put_bytes(
-                    assets.model_3d, manifest.model_3d.media_type
-                ),
-            )
+        canonical_digest = component_manifest_digest(manifest)
+        canonical_bytes = canonical_json_bytes(manifest.model_dump(mode="json"))
+        remaining_bytes = self._max_bytes - len(manifest_bytes)
+
+        with ExitStack() as cleanup:
+            stages = [
+                self._artifacts.stage_stream(
+                    io.BytesIO(canonical_bytes),
+                    _MANIFEST_MEDIA_TYPE,
+                    expected_digest=canonical_digest,
+                )
+            ]
+            cleanup.callback(stages[0].discard)
+            for field_name in (
+                "datasheet",
+                "pinout",
+                "symbol",
+                "footprint",
+                "model_3d",
+            ):
+                asset = getattr(manifest, field_name)
+                if asset is None:
+                    continue
+                candidate = _declared_asset_path(root, asset.path)
+                try:
+                    with _open_regular_file(candidate) as stream:
+                        stage = self._artifacts.stage_stream(
+                            stream,
+                            asset.media_type,
+                            expected_digest=asset.digest,
+                            max_bytes=remaining_bytes,
+                        )
+                except ArtifactDigestMismatchError as error:
+                    raise ValueError(
+                        f"component asset digest mismatch: {asset.path}"
+                    ) from error
+                except ArtifactSizeLimitError as error:
+                    raise ValueError("component import exceeds size limit") from error
+                remaining_bytes -= stage.size
+                stages.append(stage)
+                cleanup.callback(stage.discard)
+            descriptors = tuple(stage.publish() for stage in stages)
+
         return self._store.create(
             manifest=manifest,
-            canonical_digest=component_manifest_digest(manifest),
+            canonical_digest=canonical_digest,
             idempotency_key=idempotency_key,
             artifacts=descriptors,
         )
@@ -179,52 +196,35 @@ def _checked_component_directory(path: Path) -> Path:
     return path
 
 
-def _load_declared_assets(
-    root: Path, manifest: ComponentManifest, remaining_bytes: int
-) -> _DeclaredAssetBytes:
-    values: dict[str, bytes | None] = {}
-    for field_name in ("datasheet", "pinout", "symbol", "footprint", "model_3d"):
-        asset = getattr(manifest, field_name)
-        if asset is None:
-            values[field_name] = None
-            continue
-        candidate = root / asset.path
-        if candidate.parent != root:
-            raise ValueError("component asset must be a direct sibling of the manifest")
-        data = _read_regular_file(candidate, remaining_bytes)
-        remaining_bytes -= len(data)
-        actual_digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
-        if actual_digest != asset.digest:
-            raise ValueError(f"component asset digest mismatch: {asset.path}")
-        values[field_name] = data
-    return _DeclaredAssetBytes(
-        datasheet=_required_asset(values, "datasheet"),
-        pinout=_required_asset(values, "pinout"),
-        symbol=_required_asset(values, "symbol"),
-        footprint=_required_asset(values, "footprint"),
-        model_3d=values["model_3d"],
-    )
+def _declared_asset_path(root: Path, asset_path: str) -> Path:
+    candidate = root / asset_path
+    if candidate.parent != root:
+        raise ValueError("component asset must be a direct sibling of the manifest")
+    return candidate
 
 
-def _required_asset(values: dict[str, bytes | None], field_name: str) -> bytes:
-    value = values[field_name]
-    if value is None:
-        raise ValueError(f"component asset is missing: {field_name}")
-    return value
-
-
-def _read_regular_file(path: Path, max_bytes: int) -> bytes:
+def _validate_regular_file(path: Path) -> None:
     try:
         metadata = path.lstat()
     except OSError as error:
         raise ValueError("component evidence file cannot be read") from error
     if _is_link_or_reparse_point(metadata) or not stat.S_ISREG(metadata.st_mode):
         raise ValueError("component evidence must be a regular non-link file")
+
+
+@contextmanager
+def _open_regular_file(path: Path) -> Iterator[BinaryIO]:
+    _validate_regular_file(path)
     try:
         with path.open("rb") as stream:
-            data = stream.read(max_bytes + 1)
+            yield stream
     except OSError as error:
         raise ValueError("component evidence file cannot be read") from error
+
+
+def _read_regular_file(path: Path, max_bytes: int) -> bytes:
+    with _open_regular_file(path) as stream:
+        data = stream.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise ValueError("component import exceeds size limit")
     return data
