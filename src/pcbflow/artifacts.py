@@ -131,21 +131,24 @@ class ContentAddressedStore:
             raise RuntimeError("staged artifact has already been published or discarded")
         target = self._path(staged.digest)
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
+        try:
+            os.link(staged._temporary_path, target)
+        except FileExistsError:
             self._verify_existing(target, staged.digest, staged.size)
-            staged._temporary_path.unlink(missing_ok=True)
-        else:
-            os.replace(staged._temporary_path, target)
+        staged._temporary_path.unlink(missing_ok=True)
         staged._temporary_path = None
         return ArtifactDescriptor(staged.digest, staged.size, staged.media_type, target)
 
     def _verify_existing(self, target: Path, digest: str, expected_size: int) -> None:
         digest_hash = hashlib.sha256()
         size = 0
-        with target.open("rb") as existing:
-            while chunk := existing.read(_STREAM_CHUNK_BYTES):
-                digest_hash.update(chunk)
-                size += len(chunk)
+        try:
+            with target.open("rb") as existing:
+                while chunk := existing.read(_STREAM_CHUNK_BYTES):
+                    digest_hash.update(chunk)
+                    size += len(chunk)
+        except OSError as error:
+            raise ArtifactConflictError(digest) from error
         if size != expected_size or digest != f"sha256:{digest_hash.hexdigest()}":
             raise ArtifactConflictError(digest)
 

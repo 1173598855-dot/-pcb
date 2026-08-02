@@ -136,3 +136,22 @@ def test_stage_stream_discards_duplicate_staging_file_after_publish(tmp_path: Pa
     store.stage_stream(io.BytesIO(payload), "application/octet-stream").publish()
 
     assert not any((store.root / ".staging").iterdir())
+
+
+def test_publish_never_overwrites_a_target_created_during_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ContentAddressedStore(tmp_path / "artifacts")
+    staged = store.stage_stream(io.BytesIO(b"trusted bytes"), "application/octet-stream")
+    target = store._path(staged.digest)
+
+    def create_conflicting_target(_source: Path, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"attacker bytes")
+        raise FileExistsError(destination)
+
+    monkeypatch.setattr("pcbflow.artifacts.os.link", create_conflicting_target)
+    with pytest.raises(ArtifactConflictError, match=staged.digest):
+        staged.publish()
+    assert target.read_bytes() == b"attacker bytes"
+    staged.discard()
