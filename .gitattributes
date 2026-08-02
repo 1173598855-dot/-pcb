@@ -1,3 +1,2 @@
-*.kicad_sch text eol=lf
-*.kicad_pcb text eol=lf
-*.kicad_pro text eol=lf
+tests/fixtures/kicad/controlled-design/board.kicad_sch text eol=crlf
+tests/fixtures/modules/**/*.kicad_sch text eol=lf
