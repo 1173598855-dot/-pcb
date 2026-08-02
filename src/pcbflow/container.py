@@ -135,6 +135,8 @@ def build_container(
         copier=workspace_copier,
         projects_dir=settings.projects_dir,
         workspaces_dir=settings.workspaces_dir,
+        max_files=settings.max_project_files,
+        max_bytes=settings.max_project_bytes,
     )
     requirement_store = RequirementStore(sessions, artifacts)
     gate_decisions = GateDecisionStore(sessions, artifacts, metrics=metric_sink)

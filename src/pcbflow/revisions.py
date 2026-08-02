@@ -36,9 +36,11 @@ from pcbflow.revision_store import ProjectRevisionStore
 from pcbflow.workspaces import (
     WorkspaceCopier,
     WorkspaceEntryError,
+    WorkspaceLimitError,
     assert_supported_entry,
     is_snapshot_excluded,
     normalize_snapshot_excludes,
+    open_regular_file,
 )
 
 
@@ -47,6 +49,7 @@ _SNAPSHOT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ADOPTION_LOCKS_GUARD = Lock()
 _ADOPTION_LOCKS: dict[Path, Lock] = {}
 _WINDOWS_LOCK_CONTENTION_WINERRORS = frozenset({32, 33})
+_SNAPSHOT_CHUNK_BYTES = 1024 * 1024
 
 
 def _in_process_adoption_lock(path: Path) -> Lock:
@@ -118,6 +121,8 @@ def _strip_revision(revision: str) -> str:
 def _snapshot_files(
     root: Path,
     registered_excludes: frozenset[PurePosixPath],
+    *,
+    max_files: int | None = None,
 ) -> list[tuple[Path, PurePosixPath, os.stat_result]]:
     root = root.resolve(strict=True)
     if not root.is_dir():
@@ -148,6 +153,8 @@ def _snapshot_files(
             if not stat.S_ISREG(metadata.st_mode):
                 raise WorkspaceEntryError(str(path))
             selected.append((path, relative, metadata))
+            if max_files is not None and len(selected) > max_files:
+                raise WorkspaceLimitError("file_count")
     return sorted(selected, key=lambda item: item[1].as_posix())
 
 
@@ -465,6 +472,8 @@ class RevisionService:
         copier: WorkspaceCopier,
         projects_dir: Path,
         workspaces_dir: Path,
+        max_files: int,
+        max_bytes: int,
     ) -> None:
         self._projects = projects
         self._revision_store = revision_store
@@ -472,6 +481,12 @@ class RevisionService:
         self._copier = copier
         self._projects_dir = projects_dir
         self._workspaces_dir = workspaces_dir
+        if max_files <= 0:
+            raise ValueError("max_files must be positive")
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        self._max_files = max_files
+        self._max_bytes = max_bytes
 
     def _repo(self, project_id: str) -> Path:
         if not project_id or any(value in project_id for value in ("/", "\\", "..")):
@@ -560,14 +575,19 @@ class RevisionService:
     ) -> str:
         normalized = normalize_snapshot_excludes(registered_excludes)
         files: list[dict[str, object]] = []
-        for path, relative, metadata in _snapshot_files(root, normalized):
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        total_bytes = 0
+        for path, relative, metadata in _snapshot_files(
+            root, normalized, max_files=self._max_files
+        ):
+            digest, size, mode, total_bytes = self._hash_snapshot_file(
+                path, total_bytes
+            )
             files.append(
                 {
                     "path": relative.as_posix(),
-                    "mode": "100755" if metadata.st_mode & stat.S_IXUSR else "100644",
-                    "size": metadata.st_size,
-                    "digest": f"sha256:{digest}",
+                    "mode": mode,
+                    "size": size,
+                    "digest": digest,
                 }
             )
         return canonical_digest({"snapshot_policy_version": 1, "files": files})
@@ -577,16 +597,20 @@ class RevisionService:
         excludes = self._load_snapshot_excludes(root)
         normalized = normalize_snapshot_excludes(excludes)
         files: list[dict[str, object]] = []
-        for path, relative, metadata in _snapshot_files(root, normalized):
+        total_bytes = 0
+        for path, relative, metadata in _snapshot_files(
+            root, normalized, max_files=self._max_files
+        ):
+            digest, size, mode, total_bytes = self._hash_snapshot_file(
+                path, total_bytes
+            )
             files.append(
                 {
                     "path": relative.as_posix(),
                     "type": "file",
-                    "mode": "100755"
-                    if metadata.st_mode & stat.S_IXUSR
-                    else "100644",
-                    "size": metadata.st_size,
-                    "digest": f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+                    "mode": mode,
+                    "size": size,
+                    "digest": digest,
                 }
             )
         return canonical_json_bytes(
@@ -611,6 +635,27 @@ class RevisionService:
                 "files": files,
             }
         )
+
+    def _hash_snapshot_file(
+        self, path: Path, total_bytes: int
+    ) -> tuple[str, int, str, int]:
+        digest = hashlib.sha256()
+        file_size = 0
+        with open_regular_file(path) as stream:
+            metadata = os.fstat(stream.fileno())
+            mode = "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
+            while True:
+                remaining = self._max_bytes - total_bytes
+                chunk = stream.read(min(_SNAPSHOT_CHUNK_BYTES, remaining + 1))
+                if not chunk:
+                    break
+                if len(chunk) > remaining:
+                    raise WorkspaceLimitError("total_bytes")
+                digest.update(chunk)
+                chunk_size = len(chunk)
+                file_size += chunk_size
+                total_bytes += chunk_size
+        return f"sha256:{digest.hexdigest()}", file_size, mode, total_bytes
 
     def adopt(self, project_id: str, idempotency_key: str) -> Project:
         if not idempotency_key:

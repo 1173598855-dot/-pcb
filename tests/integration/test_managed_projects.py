@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from pcbflow.design_tables import OutboxEventRow
 from pcbflow.domain import ProjectMode
-from pcbflow.revisions import ProjectWorktreeDirtyError
+from pcbflow.revisions import ProjectWorktreeDirtyError, RevisionService
 from pcbflow.revision_store import (
     ProjectRevisionNotFoundError,
     ProjectRevisionStore,
@@ -408,3 +408,47 @@ def test_adopt_serializes_concurrent_attempts_before_repository_cleanup(
     ), outcomes
     assert repo.is_dir()
     assert not second_reached_commit
+
+
+def test_snapshot_digest_streams_large_files(
+    tmp_path: Path, container, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "large-snapshot"
+    workspace.mkdir()
+    large_file = workspace / "large.bin"
+    large_file.write_bytes(b"x" * (2 * 1024 * 1024 + 17))
+    expected = container.revisions.snapshot_digest(workspace)
+    original_read_bytes = Path.read_bytes
+
+    def reject_read_bytes(path: Path) -> bytes:
+        if path == large_file:
+            raise AssertionError("snapshot must stream")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
+
+    assert container.revisions.snapshot_digest(workspace) == expected
+
+
+def test_snapshot_digest_and_manifest_enforce_actual_byte_limits(
+    tmp_path: Path, container
+) -> None:
+    workspace = tmp_path / "bounded-snapshot"
+    workspace.mkdir()
+    (workspace / "pcbflow.yaml").write_bytes(b"{}")
+    (workspace / "data.bin").write_bytes(b"12345")
+    limited = RevisionService(
+        projects=container.projects,
+        revision_store=container.revision_store,
+        git=container.revisions.git,
+        copier=container.revisions._copier,
+        projects_dir=container.settings.projects_dir,
+        workspaces_dir=container.settings.workspaces_dir,
+        max_files=10,
+        max_bytes=4,
+    )
+
+    with pytest.raises(ValueError, match="total_bytes"):
+        limited.snapshot_digest(workspace)
+    with pytest.raises(ValueError, match="total_bytes"):
+        limited.snapshot_manifest(workspace)
