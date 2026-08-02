@@ -245,9 +245,9 @@ remain disabled; run the worker in a trusted local process instead.
 - 仅支持 SQLite 与显式验证的 KiCad 9.x/10.x 写入契约。
 - 每种设计文件在工程根目录中最多一个；多个根原理图或 PCB 会被判定为歧义工程。
 - Phase 2A 支持五种受控操作：直接模块实例化、绑定模块实例化、属性设置、封装指派和标签添加。
-- Worker 当前只提供 `--once` 单任务模式。
+- Worker 支持单任务模式（`--once`）和常驻模式（`--run`），当前仅支持单并发槽位。
 - 不修改注册的外部 `source_path`，不生成制造资料，不访问供应商网络。
-- 不包含 AI 自动设计、任意元件/导线编辑、PCB 布局、Web UI、PostgreSQL 或常驻 Worker。
+- 不包含 AI 自动设计、任意元件/导线编辑、PCB 布局、Web UI 或 PostgreSQL。
 
 ## 开发验证
 
