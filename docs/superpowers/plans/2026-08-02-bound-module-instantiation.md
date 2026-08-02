@@ -46,7 +46,7 @@ class InstantiateBoundModuleOperation(StrictCommandModel):
 
 DesignOperation includes the new operation discriminator. Existing direct operation models remain unmodified.
 
-- [ ] **Step 1: Write the failing schema tests**
+- [x] **Step 1: Write the failing schema tests**
 
 Add this helper beside _batch() in tests/unit/test_commands.py:
 
@@ -90,7 +90,7 @@ def test_bound_module_operation_rejects_direct_module_selection() -> None:
         _load(value)
 ~~~
 
-- [ ] **Step 2: Run the test to verify RED**
+- [x] **Step 2: Run the test to verify RED**
 
 Run:
 
@@ -101,7 +101,7 @@ $env:PYTHONPATH = (Join-Path (Get-Location) 'src')
 
 Expected: valid bound input fails because its operation discriminator is unknown.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [x] **Step 3: Write the minimal implementation**
 
 Add the two models after InstantiateModuleOperation and extend the union exactly as follows:
 
@@ -118,7 +118,7 @@ DesignOperation = Annotated[
 
 Do not add module_revision_id or module_manifest_digest to the new payload.
 
-- [ ] **Step 4: Run the test to verify GREEN**
+- [x] **Step 4: Run the test to verify GREEN**
 
 Run:
 
@@ -129,7 +129,7 @@ $env:PYTHONPATH = (Join-Path (Get-Location) 'src')
 
 Expected: all command schema tests pass, including direct module instantiation.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~powershell
 git add src/pcbflow/commands.py tests/unit/test_commands.py

@@ -100,6 +100,17 @@ class InstantiateModulePayload(StrictCommandModel):
     placement_slot: str = Field(min_length=1)
 
 
+class InstantiateBoundModulePayload(StrictCommandModel):
+    component_module_binding_id: str = Field(
+        pattern=r"^compmod_[A-Za-z0-9_-]+$"
+    )
+    instance_name: str = Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")
+    target_sheet_ref: SchematicObjectRef
+    parameter_bindings: dict[str, str]
+    port_bindings: dict[str, SchematicObjectRef]
+    placement_slot: str = Field(min_length=1)
+
+
 class SetPropertyPayload(StrictCommandModel):
     subject_ref: SchematicObjectRef
     property_name: str = Field(min_length=1)
@@ -123,6 +134,11 @@ class InstantiateModuleOperation(StrictCommandModel):
     payload: InstantiateModulePayload
 
 
+class InstantiateBoundModuleOperation(StrictCommandModel):
+    type: Literal["schematic.instantiate_bound_module"]
+    payload: InstantiateBoundModulePayload
+
+
 class SetPropertyOperation(StrictCommandModel):
     type: Literal["schematic.set_property"]
     payload: SetPropertyPayload
@@ -140,6 +156,7 @@ class AddLabelOperation(StrictCommandModel):
 
 DesignOperation = Annotated[
     InstantiateModuleOperation
+    | InstantiateBoundModuleOperation
     | SetPropertyOperation
     | AssignFootprintOperation
     | AddLabelOperation,

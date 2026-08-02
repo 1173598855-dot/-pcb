@@ -79,6 +79,25 @@ def _batch() -> dict[str, object]:
     }
 
 
+def _bound_operation() -> dict[str, object]:
+    return {
+        "type": "schematic.instantiate_bound_module",
+        "payload": {
+            "component_module_binding_id": "compmod_status_led_v1",
+            "instance_name": "STATUS_LED",
+            "target_sheet_ref": {
+                "kind": "sheet",
+                "sheet_uuid": "00000000-0000-0000-0000-000000000001",
+                "object_uuid": "00000000-0000-0000-0000-000000000001",
+                "pin_number": None,
+            },
+            "parameter_bindings": {"LED_VALUE": "GREEN"},
+            "port_bindings": {},
+            "placement_slot": "auto",
+        },
+    }
+
+
 def _load(value: dict[str, object]):
     return load_command_batch(
         json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
@@ -88,6 +107,26 @@ def _load(value: dict[str, object]):
 def test_batch_is_strict_and_rejects_unknown_fields() -> None:
     value = _batch()
     value["unknown"] = True
+    with pytest.raises(DesignCommandSchemaError):
+        _load(value)
+
+
+def test_batch_accepts_a_bound_module_operation() -> None:
+    value = _batch()
+    value["commands"][0]["operation"] = _bound_operation()  # type: ignore[index]
+
+    operation = _load(value).commands[0].operation
+
+    assert operation.type == "schematic.instantiate_bound_module"
+    assert operation.payload.component_module_binding_id == "compmod_status_led_v1"
+
+
+def test_bound_module_operation_rejects_direct_module_selection() -> None:
+    value = _batch()
+    operation = _bound_operation()
+    operation["payload"]["module_revision_id"] = "modrev_status_led_v1"  # type: ignore[index]
+    value["commands"][0]["operation"] = operation  # type: ignore[index]
+
     with pytest.raises(DesignCommandSchemaError):
         _load(value)
 
