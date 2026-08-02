@@ -166,7 +166,7 @@ def ComponentModuleBindingStore.get(
 
 The three resolution errors expose .code and only public IDs, majors, and digests needed for evidence.
 
-- [ ] **Step 1: Write the failing resolver and store tests**
+- [x] **Step 1: Write the failing resolver and store tests**
 
 Extend RecordingBindingStore with get() and an optional binding value. Add a helper returning a SimpleNamespace binding with id compmod_status_led_v1, component_revision_id comprev_fixture, kicad_major 10, module_revision_id modrev_status_led_v1, and frozen digest sha256: plus sixty-four a characters.
 
@@ -206,7 +206,7 @@ def test_resolve_for_instantiation_rejects_live_digest_drift() -> None:
 
 Add a store test proving store.get(created.id) equals created and store.get("compmod_missing") raises ComponentModuleBindingNotFoundError with code COMPONENT_MODULE_BINDING_NOT_FOUND.
 
-- [ ] **Step 2: Run the tests to verify RED**
+- [x] **Step 2: Run the tests to verify RED**
 
 Run:
 
@@ -217,7 +217,7 @@ $env:PYTHONPATH = (Join-Path (Get-Location) 'src')
 
 Expected: missing get() and resolve_for_instantiation() cause the new tests to fail.
 
-- [ ] **Step 3: Write the minimal resolver**
+- [x] **Step 3: Write the minimal resolver**
 
 Add ComponentModuleBindingStore.get() as a non-writing select(ComponentModuleBindingRow).where(ComponentModuleBindingRow.id == binding_id) query. Raise ComponentModuleBindingNotFoundError(binding_id) when there is no row.
 
@@ -265,7 +265,7 @@ def resolve_for_instantiation(
 
 The mismatch error message must not include a filesystem path or template bytes.
 
-- [ ] **Step 4: Run tests to verify GREEN**
+- [x] **Step 4: Run tests to verify GREEN**
 
 Run:
 
@@ -276,7 +276,7 @@ $env:PYTHONPATH = (Join-Path (Get-Location) 'src')
 
 Expected: binding lookup, major mismatch, catalog integrity, missing module, unsupported major, and digest drift contracts pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~powershell
 git add src/pcbflow/component_binding_store.py src/pcbflow/component_bindings.py tests/unit/test_component_bindings.py tests/integration/test_component_module_bindings.py

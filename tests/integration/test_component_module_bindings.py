@@ -11,7 +11,10 @@ from pcbflow.component_binding_store import (
     ComponentModuleBindingConflictError,
     ComponentModuleBindingStore,
 )
-from pcbflow.component_bindings import ComponentModuleBindingService
+from pcbflow.component_bindings import (
+    ComponentModuleBindingNotFoundError,
+    ComponentModuleBindingService,
+)
 from pcbflow.config import Settings
 from pcbflow.container import build_container
 from pcbflow.repositories import IdempotencyConflictError
@@ -104,6 +107,23 @@ def test_store_creates_replays_and_lists_bindings(container) -> None:
 
     assert replayed == created
     assert store.list_for_component_revision(component.id) == (created,)
+
+
+def test_store_gets_a_binding_or_raises_its_stable_not_found_error(container) -> None:
+    component = _import_component(container)
+    store = ComponentModuleBindingStore(container.sessions)
+    created = store.create(
+        component_revision_id=component.id,
+        kicad_major=10,
+        module_revision_id="modrev_status_led_v1",
+        module_manifest_digest="sha256:" + "a" * 64,
+        idempotency_key="component-module-get",
+    )
+
+    assert store.get(created.id) == created
+    with pytest.raises(ComponentModuleBindingNotFoundError) as raised:
+        store.get("compmod_missing")
+    assert raised.value.code == "COMPONENT_MODULE_BINDING_NOT_FOUND"
 
 
 @pytest.mark.parametrize(

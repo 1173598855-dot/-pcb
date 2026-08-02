@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from pcbflow.component_bindings import (
+    ComponentModuleBindingDigestMismatchError,
+    ComponentModuleBindingKicadMajorMismatchError,
     ComponentModuleBindingService,
     ModuleCatalogUnavailableError,
     ModuleKicadMajorUnsupportedError,
@@ -22,9 +24,11 @@ class FakeComponentStore:
 
 
 class RecordingBindingStore:
-    def __init__(self) -> None:
+    def __init__(self, binding: object | None = None) -> None:
+        self.binding = binding
         self.calls: list[dict[str, object]] = []
         self.list_calls: list[str] = []
+        self.get_calls: list[str] = []
 
     def create(self, **kwargs: object) -> object:
         self.calls.append(kwargs)
@@ -34,21 +38,33 @@ class RecordingBindingStore:
         self.list_calls.append(component_revision_id)
         return ()
 
+    def get(self, binding_id: str) -> object:
+        self.get_calls.append(binding_id)
+        assert self.binding is not None
+        return self.binding
+
 
 class FakeCatalog:
     def __init__(
-        self, *, majors: tuple[int, ...], digest: str, status: str = "verified"
+        self,
+        *,
+        majors: tuple[int, ...],
+        digest: str,
+        status: str = "verified",
+        manifest_module_revision_id: str = "modrev_status_led_v1",
     ) -> None:
+        self.calls: list[str] = []
         self._revision = SimpleNamespace(
             manifest=SimpleNamespace(
                 status=status,
                 kicad_majors=majors,
-                module_revision_id="modrev_status_led_v1",
+                module_revision_id=manifest_module_revision_id,
             ),
             manifest_digest=digest,
         )
 
     def get(self, module_revision_id: str) -> object:
+        self.calls.append(module_revision_id)
         assert module_revision_id == "modrev_status_led_v1"
         return self._revision
 
@@ -66,6 +82,111 @@ class MissingCatalogRevision:
 class UnexpectedCatalog:
     def get(self, module_revision_id: str) -> object:
         raise AssertionError("catalog must not be read for an invalid KiCad major")
+
+
+def _binding(*, digest: str, kicad_major: int = 10) -> object:
+    return SimpleNamespace(
+        id="compmod_status_led_v1",
+        component_revision_id="comprev_fixture",
+        kicad_major=kicad_major,
+        module_revision_id="modrev_status_led_v1",
+        module_manifest_digest=digest,
+    )
+
+
+def test_resolve_for_instantiation_returns_the_live_verified_module() -> None:
+    digest = "sha256:" + "a" * 64
+    binding = _binding(digest=digest)
+    bindings = RecordingBindingStore(binding)
+    catalog = FakeCatalog(majors=(10,), digest=digest)
+    service = ComponentModuleBindingService(FakeComponentStore(), bindings, catalog)
+
+    resolve = getattr(service, "resolve_for_instantiation", None)
+
+    assert resolve is not None
+    resolution = resolve("compmod_status_led_v1", 10)
+    assert resolution.binding is binding
+    assert resolution.module.manifest_digest == digest
+    assert bindings.get_calls == ["compmod_status_led_v1"]
+
+
+def test_resolve_for_instantiation_rejects_a_different_active_major_before_catalog_read() -> None:
+    digest = "sha256:" + "a" * 64
+    catalog = FakeCatalog(majors=(9, 10), digest=digest)
+    service = ComponentModuleBindingService(
+        FakeComponentStore(), RecordingBindingStore(_binding(digest=digest)), catalog
+    )
+    with pytest.raises(ComponentModuleBindingKicadMajorMismatchError) as raised:
+        service.resolve_for_instantiation("compmod_status_led_v1", 9)
+
+    assert raised.value.code == "COMPONENT_MODULE_BINDING_KICAD_MAJOR_MISMATCH"
+    assert catalog.calls == []
+
+
+def test_resolve_for_instantiation_rejects_an_unverified_live_module() -> None:
+    digest = "sha256:" + "a" * 64
+    service = ComponentModuleBindingService(
+        FakeComponentStore(),
+        RecordingBindingStore(_binding(digest=digest)),
+        FakeCatalog(majors=(10,), digest=digest, status="unverified"),
+    )
+
+    with pytest.raises(ModuleCatalogUnavailableError, match="not verified"):
+        service.resolve_for_instantiation("compmod_status_led_v1", 10)
+
+
+def test_resolve_for_instantiation_requires_live_module_major_support() -> None:
+    digest = "sha256:" + "a" * 64
+    service = ComponentModuleBindingService(
+        FakeComponentStore(),
+        RecordingBindingStore(_binding(digest=digest)),
+        FakeCatalog(majors=(9,), digest=digest),
+    )
+
+    with pytest.raises(ModuleKicadMajorUnsupportedError):
+        service.resolve_for_instantiation("compmod_status_led_v1", 10)
+
+
+def test_resolve_for_instantiation_rejects_live_manifest_digest_drift() -> None:
+    service = ComponentModuleBindingService(
+        FakeComponentStore(),
+        RecordingBindingStore(_binding(digest="sha256:" + "a" * 64)),
+        FakeCatalog(majors=(10,), digest="sha256:" + "b" * 64),
+    )
+    with pytest.raises(ComponentModuleBindingDigestMismatchError) as raised:
+        service.resolve_for_instantiation("compmod_status_led_v1", 10)
+
+    assert raised.value.code == "COMPONENT_MODULE_BINDING_DIGEST_MISMATCH"
+    assert raised.value.observed_manifest_digest == "sha256:" + "b" * 64
+
+
+def test_resolve_for_instantiation_rejects_a_different_live_manifest_id() -> None:
+    digest = "sha256:" + "a" * 64
+    service = ComponentModuleBindingService(
+        FakeComponentStore(),
+        RecordingBindingStore(_binding(digest=digest)),
+        FakeCatalog(
+            majors=(10,),
+            digest=digest,
+            manifest_module_revision_id="modrev_status_led_v2",
+        ),
+    )
+    with pytest.raises(ComponentModuleBindingDigestMismatchError) as raised:
+        service.resolve_for_instantiation("compmod_status_led_v1", 10)
+
+    assert raised.value.code == "COMPONENT_MODULE_BINDING_DIGEST_MISMATCH"
+
+
+def test_resolve_for_instantiation_maps_catalog_integrity_failure_to_unavailable() -> None:
+    service = ComponentModuleBindingService(
+        FakeComponentStore(),
+        RecordingBindingStore(_binding(digest="sha256:" + "a" * 64)),
+        IntegrityFailingCatalog(),
+    )
+
+    with pytest.raises(ModuleCatalogUnavailableError) as raised:
+        service.resolve_for_instantiation("compmod_status_led_v1", 10)
+    assert str(raised.value) == "module catalog is unavailable"
 
 
 def test_bind_rejects_missing_catalog() -> None:

@@ -6,7 +6,10 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from pcbflow.component_bindings import ComponentModuleBinding
+from pcbflow.component_bindings import (
+    ComponentModuleBinding,
+    ComponentModuleBindingNotFoundError,
+)
 from pcbflow.domain import new_id, utc_now
 from pcbflow.repositories import IdempotencyConflictError
 from pcbflow.tables import ComponentModuleBindingRow
@@ -170,6 +173,17 @@ class ComponentModuleBindingStore:
                 )
             ).all()
             return tuple(_binding(row) for row in rows)
+
+    def get(self, binding_id: str) -> ComponentModuleBinding:
+        with self._sessions() as session:
+            row = session.scalar(
+                select(ComponentModuleBindingRow).where(
+                    ComponentModuleBindingRow.id == binding_id
+                )
+            )
+            if row is None:
+                raise ComponentModuleBindingNotFoundError(binding_id)
+            return _binding(row)
 
     def find_by_idempotency_key(
         self, idempotency_key: str
