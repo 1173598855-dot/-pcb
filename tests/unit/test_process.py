@@ -40,7 +40,9 @@ def test_runner_reports_timeout(tmp_path: Path) -> None:
 
     assert raised.value.argv[0] == sys.executable
     assert raised.value.timeout_seconds == 0.05
-    assert perf_counter() - started < 1.5
+    # Windows taskkill /T /F may take a couple of seconds to reap a process
+    # tree, but timeout handling must still return well before the child exits.
+    assert perf_counter() - started < 4
 
 
 def test_runner_rejects_empty_command(tmp_path: Path) -> None:
