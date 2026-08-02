@@ -275,14 +275,23 @@ def test_component_revision_store_reserves_write_path_before_catalog_reads(
     manifest = _component_manifest(artifact_store)
     statements: list[str] = []
     execute = Session.execute
+    scalar = Session.scalar
 
-    def record_execute(self, statement, *args, **kwargs):
+    def record_statement(statement) -> None:
         sql = getattr(statement, "text", None) or str(statement)
         if sql == "BEGIN IMMEDIATE" or sql.lstrip().upper().startswith("SELECT"):
             statements.append(sql)
+
+    def record_execute(self, statement, *args, **kwargs):
+        record_statement(statement)
         return execute(self, statement, *args, **kwargs)
 
+    def record_scalar(self, statement, *args, **kwargs):
+        record_statement(statement)
+        return scalar(self, statement, *args, **kwargs)
+
     monkeypatch.setattr(Session, "execute", record_execute)
+    monkeypatch.setattr(Session, "scalar", record_scalar)
     ComponentRevisionStore(session_factory).create(
         manifest=manifest,
         canonical_digest=component_manifest_digest(manifest),
@@ -291,6 +300,13 @@ def test_component_revision_store_reserves_write_path_before_catalog_reads(
     )
 
     assert statements[0] == "BEGIN IMMEDIATE"
+    component_selects = [
+        statement
+        for statement in statements
+        if "FROM component_revisions" in statement
+    ]
+    assert component_selects
+    assert statements.index("BEGIN IMMEDIATE") < statements.index(component_selects[0])
 
 
 def test_component_revision_store_rejects_key_or_identity_conflicts(
