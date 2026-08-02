@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -8,7 +11,11 @@ from pcbflow.component_binding_store import (
     ComponentModuleBindingConflictError,
     ComponentModuleBindingStore,
 )
+from pcbflow.component_bindings import ComponentModuleBindingService
+from pcbflow.config import Settings
+from pcbflow.container import build_container
 from pcbflow.repositories import IdempotencyConflictError
+from pcbflow.schematic.modules import FileModuleCatalog
 from tests.component_fixtures import build_component_directory
 
 
@@ -18,6 +25,24 @@ def _import_component(container):
     )
     return container.components.import_revision(
         component_directory / "component.yaml", "component-binding-import"
+    )
+
+
+def _module_fixture_root() -> Path:
+    return Path(__file__).parents[1] / "fixtures" / "modules"
+
+
+def _catalog_container(tmp_path: Path):
+    return build_container(
+        Settings.from_env(
+            {
+                "PCBFLOW_DATA_DIR": str(tmp_path / "service-data"),
+                "PCBFLOW_DATABASE_URL": (
+                    f"sqlite+pysqlite:///{(tmp_path / 'pcbflow.db').as_posix()}"
+                ),
+                "PCBFLOW_MODULE_CATALOG_DIR": str(_module_fixture_root()),
+            }
+        )
     )
 
 
@@ -197,6 +222,79 @@ def test_store_reraises_unrecovered_integrity_error(
     with pytest.raises(IntegrityError, match="forced duplicate"):
         store.create(
             **_binding_inputs(component.id, idempotency_key="component-module-race")
+        )
+
+
+def test_configured_container_binds_catalog_modules_for_each_supported_major(
+    tmp_path: Path,
+) -> None:
+    services = _catalog_container(tmp_path)
+    try:
+        component = _import_component(services)
+        expected_digest = FileModuleCatalog(
+            _module_fixture_root(), max_files=10_000, max_bytes=1_000_000_000
+        ).get("modrev_status_led_v1").manifest_digest
+
+        nine = services.component_module_bindings.bind(
+            component.id, 9, "modrev_status_led_v1", "component-module-major-9"
+        )
+        ten = services.component_module_bindings.bind(
+            component.id, 10, "modrev_status_led_v1", "component-module-major-10"
+        )
+
+        assert (nine.module_manifest_digest, ten.module_manifest_digest) == (
+            expected_digest,
+            expected_digest,
+        )
+        assert services.component_module_binding_store.list_for_component_revision(
+            component.id
+        ) == (nine, ten)
+    finally:
+        services.dispose()
+
+
+def test_service_conflicts_when_catalog_digest_changes_for_a_bound_slot(
+    container,
+) -> None:
+    component = _import_component(container)
+    revisions = iter(
+        (
+            SimpleNamespace(
+                manifest=SimpleNamespace(
+                    status="verified",
+                    kicad_majors=(10,),
+                    module_revision_id="modrev_status_led_v1",
+                ),
+                manifest_digest="sha256:" + "a" * 64,
+            ),
+            SimpleNamespace(
+                manifest=SimpleNamespace(
+                    status="verified",
+                    kicad_majors=(10,),
+                    module_revision_id="modrev_status_led_v1",
+                ),
+                manifest_digest="sha256:" + "b" * 64,
+            ),
+        )
+    )
+
+    class SequencedCatalog:
+        def get(self, module_revision_id: str) -> object:
+            assert module_revision_id == "modrev_status_led_v1"
+            return next(revisions)
+
+    service = ComponentModuleBindingService(
+        container.component_store,
+        ComponentModuleBindingStore(container.sessions),
+        SequencedCatalog(),
+    )
+    service.bind(
+        component.id, 10, "modrev_status_led_v1", "component-module-first-digest"
+    )
+
+    with pytest.raises(ComponentModuleBindingConflictError):
+        service.bind(
+            component.id, 10, "modrev_status_led_v1", "component-module-second-digest"
         )
 
 

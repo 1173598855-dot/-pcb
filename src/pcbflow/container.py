@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from pcbflow.approvals import ApprovalService, GateDecisionStore
 from pcbflow.artifacts import ContentAddressedStore
+from pcbflow.component_binding_store import ComponentModuleBindingStore
+from pcbflow.component_bindings import ComponentModuleBindingService
 from pcbflow.component_store import ComponentRevisionStore
 from pcbflow.components import ComponentRevisionService
 from pcbflow.config import Settings
@@ -71,7 +73,9 @@ class Container:
     findings: FindingRepository
     artifacts: ContentAddressedStore
     component_store: ComponentRevisionStore
+    component_module_binding_store: ComponentModuleBindingStore
     components: ComponentRevisionService
+    component_module_bindings: ComponentModuleBindingService
     kicad: KicadPort
     validation: ValidationService
     worker: Worker
@@ -118,6 +122,7 @@ def build_container(
     findings = FindingRepository(sessions)
     artifacts = ContentAddressedStore(settings.artifact_dir)
     component_store = ComponentRevisionStore(sessions)
+    component_module_binding_store = ComponentModuleBindingStore(sessions)
     components = ComponentRevisionService(
         component_store, artifacts, max_bytes=settings.max_project_bytes
     )
@@ -169,6 +174,9 @@ def build_container(
     )
     selected_kicad: KicadPort = kicad_override if kicad_override is not None else kicad
     module_catalog = (FileModuleCatalog(settings.module_catalog_dir, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes) if settings.module_catalog_dir is not None else None)
+    component_module_bindings = ComponentModuleBindingService(
+        component_store, component_module_binding_store, module_catalog
+    )
     adapter = CstSchematicAdapter(module_catalog, metrics=metric_sink, monotonic=monotonic)
     proposal_executor = ProposalExecutor(proposal_store=proposal_store, command_batches=command_batches, projects=projects, requirements=requirement_store, tasks=tasks, revisions=revisions, adapter=adapter, kicad=selected_kicad, artifacts=artifacts, evidence=evidence, clock=clock, metrics=metric_sink, monotonic=monotonic, faults=fault_injector, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes)
     proposal_decisions = ProposalDecisionService(
@@ -227,7 +235,9 @@ def build_container(
         findings=findings,
         artifacts=artifacts,
         component_store=component_store,
+        component_module_binding_store=component_module_binding_store,
         components=components,
+        component_module_bindings=component_module_bindings,
         kicad=selected_kicad,
         validation=validation,
         worker=worker,
