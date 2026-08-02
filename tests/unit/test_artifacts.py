@@ -31,6 +31,7 @@ def test_put_rejects_a_corrupted_existing_digest_object(tmp_path: Path) -> None:
     descriptor.path.write_bytes(b"corrupted bytes")
     with pytest.raises(ArtifactConflictError, match=descriptor.digest):
         store.put_bytes(b"trusted evidence", "application/octet-stream")
+    assert not any((store.root / ".staging").iterdir())
 
 
 def test_put_bytes_is_content_addressed_and_idempotent(tmp_path: Path) -> None:

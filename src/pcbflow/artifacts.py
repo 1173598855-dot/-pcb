@@ -74,7 +74,11 @@ class ContentAddressedStore:
 
     def put_bytes(self, data: bytes, media_type: str) -> ArtifactDescriptor:
         with io.BytesIO(data) as stream:
-            return self.stage_stream(stream, media_type).publish()
+            staged = self.stage_stream(stream, media_type)
+        try:
+            return staged.publish()
+        finally:
+            staged.discard()
 
     def stage_stream(
         self,
