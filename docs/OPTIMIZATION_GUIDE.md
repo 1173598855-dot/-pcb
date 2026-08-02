@@ -22,6 +22,7 @@ external-tool trust boundary.
 | Complete | P0 | KiCad execution identity | Proposal validation is bound to the capability observed during preflight. It reuses that version/profile and verifies the executable digest immediately before every spawned validation command. | A replacement after preflight is rejected before a new command is run. |
 | Complete | P0 | Remote API configuration | The configured service actor now has the same 255-character storage/domain bound, configured tokens must be ASCII, and request actor limits align with that boundary. | Invalid startup configuration fails deterministically instead of producing a request-time 500. |
 | Complete | P1 | Command batch persistence | Per-command conflict lookups inside `BEGIN IMMEDIATE` are replaced with bounded set queries and in-memory command-order conflict selection. | A normal multi-command batch uses one command-conflict query while preserving the exact conflicting key. |
+| Complete | P1 | Content-addressed component imports | Canonical manifests and declared assets stream through store-owned staging files, are SHA-256 checked before publication, and retain the cumulative import limit. | Large assets use bounded reads; a late asset failure leaves no component revision or staging residue. |
 | Deferred | P1 | Error-contract reuse | Keep schema and request errors on the established API envelope; only deduplicate construction when a contract test proves the exact response remains stable. | All callers retain their existing status, code, details, and correlation-id behavior. |
 
 ## KiCad Identity Binding
@@ -85,9 +86,6 @@ benchmarks exist:
   to bypass the byte limiter. Any streaming replacement needs a bounded ASGI
   receive wrapper with tests for chunked bodies, disconnects, and oversized
   chunks.
-- Content-addressed component imports: streaming ingestion can reduce peak
-  memory, but must preserve digest calculation, atomic publication, and evidence
-  registration on failure.
 - Workspace copying: combining preflight and copy traversal needs profiling on
   realistic KiCad repositories and must retain link/reparse-point protections.
 - Test startup: a pre-migrated SQLite template or worker parallelism is useful
@@ -100,15 +98,16 @@ benchmarks exist:
 | KiCad identity | Unit test for replacement after expected probe; integration test that proposal execution passes its preflight capability. |
 | Remote configuration | Unit tests for oversized actor IDs and non-ASCII tokens; remote API contract tests remain green. |
 | Batch conflict query | Integration test counts command-row selects for a multi-command batch and retains conflict tests. |
+| Component import streaming | `python -m pytest tests/unit/test_artifacts.py tests/unit/test_components.py tests/integration/test_component_revisions.py tests/e2e/test_component_api_cli.py -q`. |
 | Whole change | `python -m pytest -q`, coverage threshold, `python -m compileall src`, and `git diff --check`. |
 
 ## Latest Verification Run
 
 Run on 2026-08-02 against the working tree containing this guide:
 
-- `python -m pytest -q`: 423 passed, 2 skipped in 385.73 seconds.
+- `python -m pytest -q`: 428 passed, 2 skipped in 340.60 seconds.
 - `python -m pytest --cov=pcbflow --cov-report=term-missing --cov-fail-under=90`:
-  423 passed, 2 skipped; total coverage 91.23%.
+  428 passed, 2 skipped in 363.49 seconds; total coverage 91.25%.
 - `python -m compileall -q src`, `git diff --check`, and
   `git diff --cached --check`: passed with no errors.
 
