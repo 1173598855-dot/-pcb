@@ -474,6 +474,71 @@ def test_worker_marks_retryable_failure(
     assert failed.last_error_code == "TOOL_BUSY"
 
 
+def test_retry_wait_is_not_claimed_before_its_backoff_expires(
+    task_repository: TaskRepository,
+) -> None:
+    task = task_repository.enqueue("unstable", {}, "deferred-retry", None)
+    lease = task_repository.claim_next("worker-a", NOW, 30)
+
+    assert lease is not None
+    task_repository.fail(task.id, lease.lease_token, "TOOL_BUSY", True, NOW)
+    assert task_repository.claim_next(
+        "worker-b", NOW + timedelta(seconds=4), 30
+    ) is None
+
+    resumed = task_repository.claim_next(
+        "worker-b", NOW + timedelta(seconds=5), 30
+    )
+
+    assert resumed is not None
+    assert resumed.task_id == task.id
+
+
+def test_retry_wait_does_not_starve_a_new_queued_task(
+    task_repository: TaskRepository,
+) -> None:
+    first = task_repository.enqueue("unstable", {}, "first-retry", None)
+    lease = task_repository.claim_next("worker-a", NOW, 30)
+
+    assert lease is not None
+    assert lease.task_id == first.id
+    task_repository.fail(first.id, lease.lease_token, "TOOL_BUSY", True, NOW)
+    second = task_repository.enqueue("fresh", {}, "fresh-work", None)
+
+    claimed = task_repository.claim_next("worker-b", NOW + timedelta(seconds=1), 30)
+
+    assert claimed is not None
+    assert claimed.task_id == second.id
+
+
+def test_retryable_failure_becomes_terminal_at_the_attempt_limit(
+    session_factory: sessionmaker[Session],
+) -> None:
+    repository = TaskRepository(
+        session_factory,
+        max_attempts=2,
+        retry_base_seconds=5,
+        retry_max_delay_seconds=30,
+    )
+    task = repository.enqueue("unstable", {}, "limited-retry", None)
+    first = repository.claim_next("worker-a", NOW, 30)
+
+    assert first is not None
+    repository.fail(task.id, first.lease_token, "TOOL_BUSY", True, NOW)
+    second = repository.claim_next("worker-a", NOW + timedelta(seconds=5), 30)
+
+    assert second is not None
+    repository.fail(
+        task.id,
+        second.lease_token,
+        "TOOL_BUSY",
+        True,
+        NOW + timedelta(seconds=5),
+    )
+
+    assert repository.get(task.id).status is TaskStatus.FAILED_TERMINAL
+
+
 def test_worker_marks_unknown_kind_terminal(
     task_repository: TaskRepository,
 ) -> None:

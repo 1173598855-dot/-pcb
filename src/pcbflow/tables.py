@@ -55,7 +55,10 @@ class ProjectRow(Base):
 
 class TaskRow(Base):
     __tablename__ = "tasks"
-    __table_args__ = (Index("ix_tasks_claim", "status", "created_at"),)
+    __table_args__ = (
+        Index("ix_tasks_claim", "status", "created_at"),
+        Index("ix_tasks_claim_ready", "status", "next_attempt_at", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     project_id: Mapped[str | None] = mapped_column(
@@ -69,6 +72,9 @@ class TaskRow(Base):
     lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)

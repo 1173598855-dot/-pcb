@@ -106,7 +106,12 @@ def build_container(
     fault_injector = faults if faults is not None else NoFaults()
 
     projects = ProjectRepository(sessions)
-    tasks = TaskRepository(sessions)
+    tasks = TaskRepository(
+        sessions,
+        max_attempts=settings.task_retry_max_attempts,
+        retry_base_seconds=settings.task_retry_base_seconds,
+        retry_max_delay_seconds=settings.task_retry_max_delay_seconds,
+    )
     command_batches = CommandBatchStore(sessions)
     proposal_store = ProposalStore(sessions, clock)
     evidence = EvidenceRepository(sessions)

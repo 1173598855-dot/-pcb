@@ -61,6 +61,52 @@ def test_settings_parse_validation_limits_and_remote_mode(tmp_path: Path) -> Non
     assert settings.max_api_body_bytes == 12345
 
 
+def test_settings_parse_task_retry_policy(tmp_path: Path) -> None:
+    settings = Settings.from_env(
+        {
+            "PCBFLOW_DATA_DIR": str(tmp_path / "runtime"),
+            "PCBFLOW_TASK_RETRY_MAX_ATTEMPTS": "7",
+            "PCBFLOW_TASK_RETRY_BASE_SECONDS": "9",
+            "PCBFLOW_TASK_RETRY_MAX_DELAY_SECONDS": "90",
+        }
+    )
+
+    assert settings.task_retry_max_attempts == 7
+    assert settings.task_retry_base_seconds == 9
+    assert settings.task_retry_max_delay_seconds == 90
+
+
+@pytest.mark.parametrize(
+    ("environment", "message"),
+    [
+        (
+            {"PCBFLOW_TASK_RETRY_MAX_ATTEMPTS": "0"},
+            "task_retry_max_attempts must be positive",
+        ),
+        (
+            {"PCBFLOW_TASK_RETRY_BASE_SECONDS": "0"},
+            "task_retry_base_seconds must be positive",
+        ),
+        (
+            {"PCBFLOW_TASK_RETRY_MAX_DELAY_SECONDS": "0"},
+            "task_retry_max_delay_seconds must be positive",
+        ),
+        (
+            {
+                "PCBFLOW_TASK_RETRY_BASE_SECONDS": "31",
+                "PCBFLOW_TASK_RETRY_MAX_DELAY_SECONDS": "30",
+            },
+            "task retry base delay must not exceed retry maximum delay",
+        ),
+    ],
+)
+def test_settings_reject_invalid_task_retry_policy(
+    tmp_path: Path, environment: dict[str, str], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        Settings.from_env({"PCBFLOW_DATA_DIR": str(tmp_path), **environment})
+
+
 def test_settings_require_a_token_in_remote_mode(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="remote_mode requires api_token"):
         Settings.from_env(

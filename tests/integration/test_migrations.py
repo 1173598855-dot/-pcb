@@ -15,11 +15,17 @@ def test_initial_migration_creates_vertical_slice_tables(
     }
 
 
-def test_migrations_upgrade_to_component_catalog_head(migrated_engine: Engine) -> None:
+def test_migrations_upgrade_to_task_retry_schedule_head(migrated_engine: Engine) -> None:
     with migrated_engine.connect() as connection:
         version = connection.scalar(text("SELECT version_num FROM alembic_version"))
 
-    assert version == "0003_component_revision_catalog"
+    assert version == "0004_task_retry_schedule"
+
+
+def test_tasks_table_has_retry_eligibility_column(migrated_engine: Engine) -> None:
+    columns = {column["name"] for column in inspect(migrated_engine).get_columns("tasks")}
+
+    assert "next_attempt_at" in columns
 
 
 def test_component_revision_table_has_catalog_columns(migrated_engine: Engine) -> None:

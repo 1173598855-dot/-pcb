@@ -439,8 +439,26 @@ class ProjectRepository:
 
 
 class TaskRepository:
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
+    def __init__(
+        self,
+        sessions: sessionmaker[Session],
+        *,
+        max_attempts: int = 5,
+        retry_base_seconds: int = 5,
+        retry_max_delay_seconds: int = 300,
+    ) -> None:
+        if max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
+        if retry_base_seconds <= 0:
+            raise ValueError("retry_base_seconds must be positive")
+        if retry_max_delay_seconds <= 0:
+            raise ValueError("retry_max_delay_seconds must be positive")
+        if retry_base_seconds > retry_max_delay_seconds:
+            raise ValueError("retry base delay must not exceed retry maximum delay")
         self._sessions = sessions
+        self._max_attempts = max_attempts
+        self._retry_base_seconds = retry_base_seconds
+        self._retry_max_delay_seconds = retry_max_delay_seconds
 
     def enqueue(
         self,
@@ -475,6 +493,7 @@ class TaskRepository:
                     lease_owner=None,
                     lease_token=None,
                     lease_expires_at=None,
+                    next_attempt_at=None,
                     last_error_code=None,
                     attempt_count=0,
                     created_at=now,
@@ -508,8 +527,11 @@ class TaskRepository:
     @staticmethod
     def _claimable(now: datetime):
         return or_(
-            TaskRow.status.in_(
-                [TaskStatus.QUEUED.value, TaskStatus.RETRY_WAIT.value]
+            TaskRow.status == TaskStatus.QUEUED.value,
+            and_(
+                TaskRow.status == TaskStatus.RETRY_WAIT.value,
+                TaskRow.next_attempt_at.is_not(None),
+                TaskRow.next_attempt_at <= now,
             ),
             and_(
                 TaskRow.status.in_(
@@ -555,6 +577,7 @@ class TaskRepository:
                         lease_owner=worker_id,
                         lease_token=lease_token,
                         lease_expires_at=lease_expires_at,
+                        next_attempt_at=None,
                         attempt_count=attempt_number,
                         updated_at=now,
                         version=old_version + 1,
@@ -653,6 +676,13 @@ class TaskRepository:
             status=TaskStatus.SUCCEEDED.value,
             result_json=result,
             last_error_code=None,
+            next_attempt_at=None,
+        )
+
+    def _retry_delay_seconds(self, attempt_count: int) -> int:
+        return min(
+            self._retry_max_delay_seconds,
+            self._retry_base_seconds * (2 ** max(0, attempt_count - 1)),
         )
 
     def fail(
@@ -663,10 +693,20 @@ class TaskRepository:
         retryable: bool,
         now: datetime,
     ) -> None:
-        status = (
-            TaskStatus.RETRY_WAIT.value
-            if retryable
-            else TaskStatus.FAILED_TERMINAL.value
+        with self._sessions() as session:
+            attempt_count = session.scalar(
+                select(TaskRow.attempt_count).where(
+                    TaskRow.id == task_id,
+                    TaskRow.lease_token == lease_token,
+                )
+            )
+        if attempt_count is None:
+            raise StaleLeaseError(task_id)
+        retry_later = retryable and attempt_count < self._max_attempts
+        next_attempt_at = (
+            now + timedelta(seconds=self._retry_delay_seconds(attempt_count))
+            if retry_later
+            else None
         )
         self._finish_attempt(
             task_id,
@@ -674,9 +714,14 @@ class TaskRepository:
             now,
             "retryable_failure" if retryable else "terminal_failure",
             error_code,
-            status=status,
+            status=(
+                TaskStatus.RETRY_WAIT.value
+                if retry_later
+                else TaskStatus.FAILED_TERMINAL.value
+            ),
             result_json=None,
             last_error_code=error_code,
+            next_attempt_at=next_attempt_at,
         )
 
     def _transition_with_lease(

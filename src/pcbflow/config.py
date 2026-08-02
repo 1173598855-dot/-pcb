@@ -22,6 +22,9 @@ class Settings:
     api_token: str | None = None
     api_actor_id: str = "remote-api"
     max_api_body_bytes: int = 1_000_000
+    task_retry_max_attempts: int = 5
+    task_retry_base_seconds: int = 5
+    task_retry_max_delay_seconds: int = 300
 
     def __post_init__(self) -> None:
         scheme = self.database_url.split(":", 1)[0]
@@ -34,6 +37,9 @@ class Settings:
             "max_project_files": self.max_project_files,
             "max_project_bytes": self.max_project_bytes,
             "max_api_body_bytes": self.max_api_body_bytes,
+            "task_retry_max_attempts": self.task_retry_max_attempts,
+            "task_retry_base_seconds": self.task_retry_base_seconds,
+            "task_retry_max_delay_seconds": self.task_retry_max_delay_seconds,
         }
         for name, value in limits.items():
             if value <= 0:
@@ -41,6 +47,10 @@ class Settings:
         if self.task_lease_seconds < self.process_timeout_seconds:
             raise ValueError(
                 "task lease must be at least as long as process timeout"
+            )
+        if self.task_retry_base_seconds > self.task_retry_max_delay_seconds:
+            raise ValueError(
+                "task retry base delay must not exceed retry maximum delay"
             )
         if self.remote_mode and not self.api_token:
             raise ValueError("remote_mode requires api_token")
@@ -103,6 +113,15 @@ class Settings:
             api_actor_id=values.get("PCBFLOW_API_ACTOR_ID", "remote-api"),
             max_api_body_bytes=int(
                 values.get("PCBFLOW_MAX_API_BODY_BYTES", "1000000")
+            ),
+            task_retry_max_attempts=int(
+                values.get("PCBFLOW_TASK_RETRY_MAX_ATTEMPTS", "5")
+            ),
+            task_retry_base_seconds=int(
+                values.get("PCBFLOW_TASK_RETRY_BASE_SECONDS", "5")
+            ),
+            task_retry_max_delay_seconds=int(
+                values.get("PCBFLOW_TASK_RETRY_MAX_DELAY_SECONDS", "300")
             ),
         )
 
