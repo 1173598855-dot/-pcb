@@ -151,6 +151,37 @@ class ComponentRevisionRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ComponentModuleBindingRow(Base):
+    __tablename__ = "component_module_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "component_revision_id",
+            "kicad_major",
+            name="uq_component_module_binding_component_major",
+        ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_component_module_binding_idempotency",
+        ),
+        Index(
+            "ix_component_module_bindings_component_created",
+            "component_revision_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    component_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("component_revisions.id"), nullable=False
+    )
+    kicad_major: Mapped[int] = mapped_column(Integer, nullable=False)
+    module_revision_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    module_manifest_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class EvidenceRow(Base):
     __tablename__ = "evidence"
     __table_args__ = (
