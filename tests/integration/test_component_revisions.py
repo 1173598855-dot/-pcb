@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
+from sqlalchemy.orm import Session
 
 from pcbflow.artifacts import ArtifactDescriptor, _STREAM_CHUNK_BYTES
 from pcbflow.canonical import canonical_json_bytes
@@ -264,6 +265,32 @@ def test_component_revision_store_replays_identical_import(
         artifacts=_component_artifacts(artifact_store, manifest),
     )
     assert second == first
+
+
+def test_component_revision_store_reserves_write_path_before_catalog_reads(
+    session_factory, artifact_store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pcbflow.component_store import ComponentRevisionStore
+
+    manifest = _component_manifest(artifact_store)
+    statements: list[str] = []
+    execute = Session.execute
+
+    def record_execute(self, statement, *args, **kwargs):
+        sql = getattr(statement, "text", None) or str(statement)
+        if sql == "BEGIN IMMEDIATE" or sql.lstrip().upper().startswith("SELECT"):
+            statements.append(sql)
+        return execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "execute", record_execute)
+    ComponentRevisionStore(session_factory).create(
+        manifest=manifest,
+        canonical_digest=component_manifest_digest(manifest),
+        idempotency_key="component-led-write-reservation",
+        artifacts=_component_artifacts(artifact_store, manifest),
+    )
+
+    assert statements[0] == "BEGIN IMMEDIATE"
 
 
 def test_component_revision_store_rejects_key_or_identity_conflicts(

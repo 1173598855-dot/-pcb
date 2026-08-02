@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -122,6 +122,7 @@ class ComponentRevisionStore:
         self._expected_digests(manifest, artifacts)
         try:
             with self._sessions.begin() as session:
+                session.execute(text("BEGIN IMMEDIATE"))
                 keyed = session.scalar(select(ComponentRevisionRow).where(ComponentRevisionRow.idempotency_key == idempotency_key))
                 if keyed is not None:
                     if not self._matches(session, keyed, manifest, canonical_digest, artifacts):
