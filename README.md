@@ -142,6 +142,14 @@ $task.id
 - `PCBFLOW_WORKER_HEARTBEAT_SECONDS`: 租约续期间隔（默认：30）
 - `PCBFLOW_WORKER_SHUTDOWN_TIMEOUT_SECONDS`: 优雅关闭超时（默认：300）
 
+检查 Worker 健康状态：
+
+```powershell
+.\.venv\Scripts\pcbflow.exe worker health --json
+```
+
+返回 Worker 状态、槽位使用情况、已完成/失败任务数和运行时长。
+
 ### 4. 查询任务、证据与 Finding
 
 ```powershell
@@ -237,6 +245,12 @@ remain disabled; run the worker in a trusted local process instead.
 - `PCBFLOW_REMOTE_MODE`
 - `PCBFLOW_API_TOKEN`
 - `PCBFLOW_API_ACTOR_ID`
+- `PCBFLOW_WORKER_SLOTS` (并发任务槽位数，默认 1)
+- `PCBFLOW_WORKER_POLL_SECONDS` (轮询间隔，默认 5)
+- `PCBFLOW_WORKER_POLL_MAX_SECONDS` (最大退避间隔，默认 60)
+- `PCBFLOW_WORKER_HEARTBEAT_SECONDS` (租约续期间隔，默认 30)
+- `PCBFLOW_WORKER_SHUTDOWN_TIMEOUT_SECONDS` (优雅关闭超时，默认 300)
+- `PCBFLOW_WORKER_ID` (可选，自定义 Worker 标识符)
 
 `PCBFLOW_DATABASE_URL` 和 `PCBFLOW_ARTIFACT_DIR` 的显式值优先于根据 `PCBFLOW_DATA_DIR` 推导出的默认位置。
 
@@ -245,7 +259,7 @@ remain disabled; run the worker in a trusted local process instead.
 - 仅支持 SQLite 与显式验证的 KiCad 9.x/10.x 写入契约。
 - 每种设计文件在工程根目录中最多一个；多个根原理图或 PCB 会被判定为歧义工程。
 - Phase 2A 支持五种受控操作：直接模块实例化、绑定模块实例化、属性设置、封装指派和标签添加。
-- Worker 支持单任务模式（`--once`）和常驻模式（`--run`），当前仅支持单并发槽位。
+- Worker 支持单任务模式（`--once`）和常驻模式（`--run`），支持可配置的并发槽位和自动租约续期。
 - 不修改注册的外部 `source_path`，不生成制造资料，不访问供应商网络。
 - 不包含 AI 自动设计、任意元件/导线编辑、PCB 布局、Web UI 或 PostgreSQL。
 
