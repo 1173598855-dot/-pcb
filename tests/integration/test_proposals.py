@@ -11,7 +11,12 @@ from pcbflow.canonical import canonical_json_bytes
 from pcbflow.config import Settings
 from pcbflow.container import build_container
 from pcbflow.domain import TaskLease, TaskStatus
-from pcbflow.kicad import KicadCapability, KicadUnavailableError, RawValidationReport
+from pcbflow.kicad import (
+    KicadCapability,
+    KicadInputLimitError,
+    KicadUnavailableError,
+    RawValidationReport,
+)
 from pcbflow.observability import MetricName
 from pcbflow.design_tables import ChangeProposalRow
 from pcbflow.proposals import EvidenceSet, ProposalExecutor, ProposalStatus
@@ -67,6 +72,13 @@ class UnavailableProposalKicad(FakeProposalKicad):
 class UnavailableDuringValidationKicad(FakeProposalKicad):
     def validate(self, project_dir: Path, output_dir: Path) -> tuple[RawValidationReport, ...]:
         raise KicadUnavailableError("executable_changed")
+
+
+class InputLimitDuringValidationKicad(FakeProposalKicad):
+    def validate(self, project_dir: Path, output_dir: Path) -> tuple[RawValidationReport, ...]:
+        raise KicadInputLimitError(
+            "KICAD_REPORT_LIMIT_EXCEEDED", output_dir / "erc.json", 32
+        )
 
 
 class CapabilityCapturingProposalKicad(FakeProposalKicad):
@@ -211,6 +223,30 @@ def test_kicad_unavailable_during_validation_uses_unavailable_error_code(
         failed = container.proposal_store.get(proposal.id)
         assert failed.status is ProposalStatus.VALIDATION_FAILED
         assert failed.last_error_code == "KICAD_CLI_UNAVAILABLE"
+    finally:
+        container.dispose()
+
+
+def test_kicad_input_limit_during_validation_preserves_error_code(
+    tmp_path: Path,
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    container = build_container(
+        _settings(tmp_path, fixtures / "modules"),
+        kicad_override=InputLimitDuringValidationKicad(),
+        clock=lambda: NOW,
+    )
+    try:
+        _source, project, requirement_set = _prepare(container, tmp_path)
+        proposal = container.proposals.create(
+            _instantiate_batch(project, requirement_set),
+            "execute-status-led",
+        )
+
+        assert container.worker.run_once()
+        failed = container.proposal_store.get(proposal.id)
+        assert failed.status is ProposalStatus.VALIDATION_FAILED
+        assert failed.last_error_code == "KICAD_REPORT_LIMIT_EXCEEDED"
     finally:
         container.dispose()
 

@@ -12,6 +12,7 @@ from pcbflow.container import build_container
 from pcbflow.domain import TaskStatus
 from pcbflow.kicad import (
     KicadDesignFormatError,
+    KicadInputLimitError,
     KicadReportFormatError,
     RawValidationReport,
 )
@@ -352,6 +353,52 @@ def test_unsupported_kicad_format_is_a_terminal_compatibility_error(
     failed = tasks.get(task.id)
     assert failed.status is TaskStatus.FAILED_TERMINAL
     assert failed.last_error_code == "KICAD_FILE_FORMAT_UNSUPPORTED"
+
+
+def test_kicad_input_limit_is_a_terminal_validation_error(
+    session_factory: sessionmaker[Session], tmp_path: Path
+) -> None:
+    source = tmp_path / "input-limit"
+    source.mkdir()
+    (source / "board.kicad_sch").write_text("schematic", encoding="utf-8")
+    projects = ProjectRepository(session_factory)
+    tasks = TaskRepository(session_factory)
+    project = projects.create("Input limit", source, "input-limit-project")
+    task = tasks.enqueue(
+        VALIDATION_TASK_KIND,
+        {"project_id": project.id},
+        "input-limit-validation",
+        project.id,
+    )
+    class LimitedKicad:
+        def validate(self, project_dir: Path, output_dir: Path):
+            raise KicadInputLimitError(
+                "KICAD_REPORT_LIMIT_EXCEEDED", output_dir / "erc.json", 32
+            )
+
+    handler = ValidationTaskHandler(
+        projects,
+        EvidenceRepository(session_factory),
+        FindingRepository(session_factory),
+        ContentAddressedStore(tmp_path / "artifacts"),
+        LimitedKicad(),
+        max_files=100,
+        max_bytes=1_000_000,
+        tasks=tasks,
+        clock=lambda: NOW,
+    )
+    worker = Worker(
+        tasks,
+        "worker-a",
+        {VALIDATION_TASK_KIND: handler},
+        lambda: NOW,
+        30,
+    )
+
+    assert worker.run_once()
+    failed = tasks.get(task.id)
+    assert failed.status is TaskStatus.FAILED_TERMINAL
+    assert failed.last_error_code == "KICAD_REPORT_LIMIT_EXCEEDED"
 
 
 def test_validation_rejects_project_over_file_limit(

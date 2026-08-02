@@ -39,6 +39,7 @@ from pcbflow.kicad import (
     KicadCapabilityBoundPort,
     KicadCapability,
     KicadDesignFormatError,
+    KicadInputLimitError,
     KicadOperationUnsupportedError,
     parse_kicad_report,
     KicadUnavailableError,
@@ -677,6 +678,7 @@ class ProposalExecutor:
         except (
             KicadUnavailableError,
             KicadDesignFormatError,
+            KicadInputLimitError,
             KicadOperationUnsupportedError,
         ) as error:
             code = (

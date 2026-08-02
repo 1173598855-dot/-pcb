@@ -10,6 +10,7 @@ from pcbflow.kicad import (
     AmbiguousKicadProjectError,
     KicadCli,
     KicadDesignFormatError,
+    KicadInputLimitError,
     KicadProjectNotFoundError,
     KicadReportFormatError,
     KicadToolError,
@@ -192,6 +193,22 @@ def test_validate_rejects_malformed_design_format(tmp_path: Path, payload: bytes
         )
 
     assert getattr(caught.value, "code", None) == "KICAD_FILE_FORMAT_UNSUPPORTED"
+
+
+def test_validate_rejects_oversized_design_before_parsing(tmp_path: Path) -> None:
+    path = tmp_path / "board.kicad_sch"
+    path.write_bytes(b"x" * 33)
+
+    with pytest.raises(KicadInputLimitError) as caught:
+        KicadCli._validate_design_format(
+            path,
+            frozenset((20250114,)),
+            "kicad_sch",
+            "kicad-9-v1",
+            max_design_file_bytes=32,
+        )
+
+    assert caught.value.code == "KICAD_DESIGN_FILE_LIMIT_EXCEEDED"
 
 
 def test_validate_rejects_file_as_project(tmp_path: Path) -> None:
@@ -410,6 +427,28 @@ def test_validate_builds_exact_read_only_commands(tmp_path: Path) -> None:
     ]
     assert reports[0].tool_version == "9.0.2"
     assert reports[0].profile_id == "kicad-9-v1"
+
+
+def test_validate_rejects_oversized_report_before_parsing(tmp_path: Path) -> None:
+    runner = ReportRunner({"erc": b"x" * 33})
+    executable = tmp_path / "kicad-cli.exe"
+    executable.write_bytes(b"fixture executable")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.kicad_sch").write_text(
+        '(kicad_sch (version 20250114) (uuid "00000000-0000-0000-0000-000000000001"))',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KicadInputLimitError) as caught:
+        KicadCli(
+            runner,
+            executable,
+            5,
+            max_report_bytes=32,
+        ).validate(project, tmp_path / "output")
+
+    assert caught.value.code == "KICAD_REPORT_LIMIT_EXCEEDED"
 
 
 def test_validate_rejects_an_executable_replaced_during_version_probe(

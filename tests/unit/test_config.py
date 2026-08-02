@@ -50,6 +50,8 @@ def test_settings_parse_validation_limits_and_remote_mode(tmp_path: Path) -> Non
             "PCBFLOW_API_TOKEN": "remote-test-token",
             "PCBFLOW_API_ACTOR_ID": "remote-service",
             "PCBFLOW_MAX_API_BODY_BYTES": "12345",
+            "PCBFLOW_MAX_KICAD_DESIGN_FILE_BYTES": "45678",
+            "PCBFLOW_MAX_KICAD_REPORT_BYTES": "56789",
         }
     )
 
@@ -59,6 +61,8 @@ def test_settings_parse_validation_limits_and_remote_mode(tmp_path: Path) -> Non
     assert settings.api_token == "remote-test-token"
     assert settings.api_actor_id == "remote-service"
     assert settings.max_api_body_bytes == 12345
+    assert settings.max_kicad_design_file_bytes == 45678
+    assert settings.max_kicad_report_bytes == 56789
 
 
 def test_settings_parse_task_retry_policy(tmp_path: Path) -> None:
@@ -177,6 +181,8 @@ def test_settings_preserve_legacy_positional_module_catalog_argument(
         ("PCBFLOW_MAX_PROJECT_FILES", "0"),
         ("PCBFLOW_MAX_PROJECT_BYTES", "0"),
         ("PCBFLOW_MAX_API_BODY_BYTES", "0"),
+        ("PCBFLOW_MAX_KICAD_DESIGN_FILE_BYTES", "0"),
+        ("PCBFLOW_MAX_KICAD_REPORT_BYTES", "0"),
     ],
 )
 def test_settings_reject_non_positive_runtime_limits(

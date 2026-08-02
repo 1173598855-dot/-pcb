@@ -15,6 +15,7 @@ from pcbflow.observability import MetricName, Metrics, ensure_trace_id
 from pcbflow.kicad import (
     KicadPort,
     KicadDesignFormatError,
+    KicadInputLimitError,
     KicadOperationUnsupportedError,
     KicadProjectNotFoundError,
     KicadToolError,
@@ -178,6 +179,8 @@ class ValidationTaskHandler:
                 raise TerminalTaskError("KICAD_CLI_UNAVAILABLE", str(error)) from error
             except KicadProjectNotFoundError as error:
                 raise TerminalTaskError("INVALID_KICAD_PROJECT", str(error)) from error
+            except KicadInputLimitError as error:
+                raise TerminalTaskError(error.code, str(error)) from error
             except (KicadDesignFormatError, KicadOperationUnsupportedError) as error:
                 raise TerminalTaskError(error.code, str(error)) from error
             except KicadToolError as error:

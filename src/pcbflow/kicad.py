@@ -67,6 +67,14 @@ class KicadReportFormatError(ValueError):
     pass
 
 
+class KicadInputLimitError(ValueError):
+    def __init__(self, code: str, path: Path, limit: int) -> None:
+        super().__init__(f"KiCad input exceeds {limit} bytes: {path.name}")
+        self.code = code
+        self.path = path
+        self.limit = limit
+
+
 class KicadDesignFormatError(ValueError):
     code = "KICAD_FILE_FORMAT_UNSUPPORTED"
 
@@ -191,10 +199,19 @@ class KicadCli:
         runner: ProcessPort,
         executable: Path | None,
         timeout_seconds: float,
+        *,
+        max_design_file_bytes: int = 50_000_000,
+        max_report_bytes: int = 10_000_000,
     ) -> None:
         self._runner = runner
         self._executable = executable.resolve() if executable is not None else None
         self._timeout_seconds = timeout_seconds
+        if max_design_file_bytes <= 0:
+            raise ValueError("max_design_file_bytes must be positive")
+        if max_report_bytes <= 0:
+            raise ValueError("max_report_bytes must be positive")
+        self._max_design_file_bytes = max_design_file_bytes
+        self._max_report_bytes = max_report_bytes
 
     @staticmethod
     def locate(configured: Path | None = None) -> Path | None:
@@ -434,7 +451,11 @@ class KicadCli:
             raise KicadToolError(kind, result.returncode, result.stderr)
         if not report_file.is_file():
             raise KicadToolError(kind, result.returncode, "report file was not created")
-        data = report_file.read_bytes()
+        data = self._read_bounded(
+            report_file,
+            self._max_report_bytes,
+            "KICAD_REPORT_LIMIT_EXCEEDED",
+        )
         parse_kicad_report(kind, data)
         return RawValidationReport(
             kind=kind,
@@ -447,8 +468,8 @@ class KicadCli:
             profile_revision=capability.profile_revision,
         )
 
-    @staticmethod
     def _validate_design_formats(
+        self,
         schematics: list[Path],
         boards: list[Path],
         profile: KicadCompatibilityProfile,
@@ -459,6 +480,7 @@ class KicadCli:
                 profile.schematic_format_versions,
                 "kicad_sch",
                 profile.profile_id,
+                max_design_file_bytes=self._max_design_file_bytes,
             )
         for path in boards:
             KicadCli._validate_design_format(
@@ -466,6 +488,7 @@ class KicadCli:
                 profile.pcb_format_versions,
                 "kicad_pcb",
                 profile.profile_id,
+                max_design_file_bytes=self._max_design_file_bytes,
             )
 
     @staticmethod
@@ -474,9 +497,19 @@ class KicadCli:
         accepted: frozenset[int],
         expected_head: str,
         profile_id: str,
+        *,
+        max_design_file_bytes: int = 50_000_000,
     ) -> None:
         try:
-            document = parse_cst(path.read_bytes())
+            document = parse_cst(
+                KicadCli._read_bounded(
+                    path,
+                    max_design_file_bytes,
+                    "KICAD_DESIGN_FILE_LIMIT_EXCEEDED",
+                )
+            )
+        except KicadInputLimitError:
+            raise
         except (OSError, CstParseError) as error:
             raise KicadDesignFormatError(path, None, profile_id) from error
         if document.root.head != expected_head:
@@ -490,6 +523,24 @@ class KicadCli:
             raise KicadDesignFormatError(path, None, profile_id) from error
         if version not in accepted:
             raise KicadDesignFormatError(path, str(version), profile_id)
+
+    @staticmethod
+    def _read_bounded(path: Path, limit: int, code: str) -> bytes:
+        if path.stat().st_size > limit:
+            raise KicadInputLimitError(code, path, limit)
+        with path.open("rb") as stream:
+            chunks: list[bytes] = []
+            remaining = limit + 1
+            while remaining:
+                chunk = stream.read(remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > limit:
+            raise KicadInputLimitError(code, path, limit)
+        return data
 
     @staticmethod
     def _hash_executable(executable: Path) -> str:

@@ -164,6 +164,8 @@ def build_container(
         runner,
         KicadCli.locate(settings.kicad_cli),
         settings.process_timeout_seconds,
+        max_design_file_bytes=settings.max_kicad_design_file_bytes,
+        max_report_bytes=settings.max_kicad_report_bytes,
     )
     selected_kicad: KicadPort = kicad_override if kicad_override is not None else kicad
     module_catalog = (FileModuleCatalog(settings.module_catalog_dir, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes) if settings.module_catalog_dir is not None else None)

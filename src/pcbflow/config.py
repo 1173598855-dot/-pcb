@@ -25,6 +25,8 @@ class Settings:
     task_retry_max_attempts: int = 5
     task_retry_base_seconds: int = 5
     task_retry_max_delay_seconds: int = 300
+    max_kicad_design_file_bytes: int = 50_000_000
+    max_kicad_report_bytes: int = 10_000_000
 
     def __post_init__(self) -> None:
         scheme = self.database_url.split(":", 1)[0]
@@ -40,6 +42,8 @@ class Settings:
             "task_retry_max_attempts": self.task_retry_max_attempts,
             "task_retry_base_seconds": self.task_retry_base_seconds,
             "task_retry_max_delay_seconds": self.task_retry_max_delay_seconds,
+            "max_kicad_design_file_bytes": self.max_kicad_design_file_bytes,
+            "max_kicad_report_bytes": self.max_kicad_report_bytes,
         }
         for name, value in limits.items():
             if value <= 0:
@@ -122,6 +126,12 @@ class Settings:
             ),
             task_retry_max_delay_seconds=int(
                 values.get("PCBFLOW_TASK_RETRY_MAX_DELAY_SECONDS", "300")
+            ),
+            max_kicad_design_file_bytes=int(
+                values.get("PCBFLOW_MAX_KICAD_DESIGN_FILE_BYTES", "50000000")
+            ),
+            max_kicad_report_bytes=int(
+                values.get("PCBFLOW_MAX_KICAD_REPORT_BYTES", "10000000")
             ),
         )
 
