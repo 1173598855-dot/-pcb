@@ -13,6 +13,11 @@ from fastapi.encoders import jsonable_encoder
 from pcbflow.api import _mapped_domain_error, create_app
 from pcbflow.approvals import ApprovalDigestMismatchError
 from pcbflow.commands import DesignCommandSchemaError, load_command_batch
+from pcbflow.component_binding_store import ComponentModuleBindingConflictError
+from pcbflow.component_bindings import (
+    ModuleCatalogUnavailableError,
+    ModuleKicadMajorUnsupportedError,
+)
 from pcbflow.component_store import ComponentRevisionNotFoundError
 from pcbflow.config import Settings
 from pcbflow.container import Container, build_container
@@ -34,6 +39,7 @@ from pcbflow.revisions import (
     ProjectNotManagedError as RevisionProjectNotManagedError,
     ProjectWorktreeDirtyError,
 )
+from pcbflow.schematic.modules import ModuleRevisionNotFoundError
 
 app = typer.Typer(no_args_is_help=True)
 project_app = typer.Typer(no_args_is_help=True)
@@ -82,6 +88,20 @@ def _cli_error(error: BaseException) -> tuple[str, str]:
         return "DESIGN_COMMAND_SCHEMA_INVALID", "the design command batch is invalid"
     if isinstance(error, ComponentRevisionNotFoundError):
         return "COMPONENT_REVISION_NOT_FOUND", "component revision not found"
+    if isinstance(error, ModuleRevisionNotFoundError):
+        return "MODULE_REVISION_NOT_FOUND", "module revision not found"
+    if isinstance(error, ModuleCatalogUnavailableError):
+        return "MODULE_CATALOG_UNAVAILABLE", "module catalog is unavailable"
+    if isinstance(error, ModuleKicadMajorUnsupportedError):
+        return (
+            "MODULE_KICAD_MAJOR_UNSUPPORTED",
+            "module does not support the requested KiCad major",
+        )
+    if isinstance(error, ComponentModuleBindingConflictError):
+        return (
+            "COMPONENT_MODULE_BINDING_CONFLICT",
+            "component revision already has a different module binding for this KiCad major",
+        )
     if isinstance(
         error, (ProjectNotFoundError, RequirementSetNotFoundError, ProposalNotFoundError)
     ):
@@ -285,6 +305,48 @@ def component_list(
     try:
         revisions = container.component_store.list_for_component(component_key)
         _emit(revisions, json_output, f"{len(revisions)} component revision(s)")
+    finally:
+        container.dispose()
+
+
+@component_app.command("bind-module")
+def component_bind_module(
+    component_revision_id: str,
+    kicad_major: Annotated[int, typer.Option("--kicad-major")],
+    module_revision_id: Annotated[str, typer.Option("--module-revision-id")],
+    idempotency_key: Annotated[str, typer.Option("--idempotency-key")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    container = _build()
+    try:
+        try:
+            binding = container.component_module_bindings.bind(
+                component_revision_id,
+                kicad_major,
+                module_revision_id,
+                idempotency_key,
+            )
+        except Exception as error:
+            _abort(error)
+        _emit(binding, json_output, binding.id)
+    finally:
+        container.dispose()
+
+
+@component_app.command("bindings")
+def component_bindings(
+    component_revision_id: str,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    container = _build()
+    try:
+        try:
+            bindings = container.component_module_bindings.list_for_component_revision(
+                component_revision_id
+            )
+        except Exception as error:
+            _abort(error)
+        _emit(bindings, json_output, f"{len(bindings)} component module binding(s)")
     finally:
         container.dispose()
 

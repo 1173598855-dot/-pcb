@@ -14,6 +14,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pcbflow.approvals import ApprovalDigestMismatchError
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.commands import DesignCommandSchemaError, load_command_batch
+from pcbflow.component_binding_store import ComponentModuleBindingConflictError
+from pcbflow.component_bindings import (
+    ModuleCatalogUnavailableError,
+    ModuleKicadMajorUnsupportedError,
+)
 from pcbflow.component_store import ComponentRevisionNotFoundError
 from pcbflow.config import Settings
 from pcbflow.container import Container, build_container
@@ -42,6 +47,7 @@ from pcbflow.revisions import (
     ProjectNotManagedError as RevisionProjectNotManagedError,
     ProjectWorktreeDirtyError,
 )
+from pcbflow.schematic.modules import ModuleRevisionNotFoundError
 
 
 class StrictRequest(BaseModel):
@@ -55,6 +61,11 @@ class CreateProjectRequest(StrictRequest):
 
 class CreateComponentRevisionRequest(StrictRequest):
     manifest_path: str = Field(min_length=1)
+
+
+class CreateComponentModuleBindingRequest(StrictRequest):
+    kicad_major: int = Field(ge=1)
+    module_revision_id: str = Field(min_length=1)
 
 
 class ActorRequest(StrictRequest):
@@ -465,6 +476,47 @@ def create_app(container: Container | None = None) -> FastAPI:
             "component revision not found",
         )
 
+    @app.exception_handler(ModuleRevisionNotFoundError)
+    async def handle_module_revision_not_found(
+        request: Request, error: ModuleRevisionNotFoundError
+    ) -> JSONResponse:
+        return _error_response(
+            request, 404, "MODULE_REVISION_NOT_FOUND", "module revision not found"
+        )
+
+    @app.exception_handler(ModuleCatalogUnavailableError)
+    async def handle_module_catalog_unavailable(
+        request: Request, error: ModuleCatalogUnavailableError
+    ) -> JSONResponse:
+        return _error_response(
+            request,
+            409,
+            "MODULE_CATALOG_UNAVAILABLE",
+            "module catalog is unavailable",
+        )
+
+    @app.exception_handler(ModuleKicadMajorUnsupportedError)
+    async def handle_module_kicad_major_unsupported(
+        request: Request, error: ModuleKicadMajorUnsupportedError
+    ) -> JSONResponse:
+        return _error_response(
+            request,
+            422,
+            "MODULE_KICAD_MAJOR_UNSUPPORTED",
+            "module does not support the requested KiCad major",
+        )
+
+    @app.exception_handler(ComponentModuleBindingConflictError)
+    async def handle_component_module_binding_conflict(
+        request: Request, error: ComponentModuleBindingConflictError
+    ) -> JSONResponse:
+        return _error_response(
+            request,
+            409,
+            "COMPONENT_MODULE_BINDING_CONFLICT",
+            "component revision already has a different module binding for this KiCad major",
+        )
+
     @app.exception_handler(IdempotencyConflictError)
     async def handle_idempotency_conflict(
         request: Request, error: IdempotencyConflictError
@@ -554,6 +606,38 @@ def create_app(container: Container | None = None) -> FastAPI:
     def list_component_revisions(component_key: str):
         return jsonable_encoder(
             services.component_store.list_for_component(component_key)
+        )
+
+    @app.post(
+        "/api/v1/component-revisions/{component_revision_id}/module-bindings",
+        status_code=201,
+    )
+    def create_component_module_binding(
+        component_revision_id: str,
+        payload: CreateComponentModuleBindingRequest,
+        response: Response,
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", min_length=1)
+        ],
+    ):
+        existing = services.component_module_binding_store.find_by_idempotency_key(
+            idempotency_key
+        )
+        binding = services.component_module_bindings.bind(
+            component_revision_id,
+            payload.kicad_major,
+            payload.module_revision_id,
+            idempotency_key,
+        )
+        response.status_code = 200 if existing is not None else 201
+        return jsonable_encoder(binding)
+
+    @app.get("/api/v1/component-revisions/{component_revision_id}/module-bindings")
+    def list_component_module_bindings(component_revision_id: str):
+        return jsonable_encoder(
+            services.component_module_bindings.list_for_component_revision(
+                component_revision_id
+            )
         )
 
     @app.post("/api/v1/projects/{project_id}:adopt")
