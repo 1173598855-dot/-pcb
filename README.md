@@ -169,6 +169,8 @@ Invoke-RestMethod http://127.0.0.1:8765/api/v1/projects
 - `POST /api/v1/worker:run-once`
 - `GET /api/v1/projects/{project_id}/evidence`
 - `GET /api/v1/projects/{project_id}/findings`
+- `POST /api/v1/component-revisions/{component_revision_id}/module-bindings`
+- `GET /api/v1/component-revisions/{component_revision_id}/module-bindings`
 
 写操作需要 `Idempotency-Key` 请求头。若服务以远程模式启动，本地路径注册会被拒绝：
 
@@ -282,13 +284,29 @@ pcbflow component import C:\components\LED-0603-RED\component.yaml `
   --idempotency-key acme-led-red-rev-a --json
 pcbflow component show <component-revision-id> --json
 pcbflow component list --component-key Acme:LED-0603-RED --json
+
+$componentRevisionId = "<component-revision-id>"
+pcbflow component bind-module $componentRevisionId `
+  --kicad-major 10 `
+  --module-revision-id modrev_status_led_v1 `
+  --idempotency-key component-module-v1 `
+  --json
+pcbflow component bindings $componentRevisionId --json
 ```
 
 The REST equivalents are `POST /api/v1/component-revisions`,
 `GET /api/v1/component-revisions/{id}`, and
 `GET /api/v1/component-revisions?component_key=...`. Local-path imports are
-disabled in remote mode. This catalog does not contact suppliers, generate a
-BOM, select replacements, or modify KiCad projects.
+disabled in remote mode. `PCBFLOW_MODULE_CATALOG_DIR` configures the verified
+server-side module catalog used by component bindings. Creating a binding
+freezes the selected module manifest digest; a component revision and KiCad
+major cannot be rebound to a different module. Bindings are available through
+`POST /api/v1/component-revisions/{component_revision_id}/module-bindings` and
+`GET /api/v1/component-revisions/{component_revision_id}/module-bindings`; the
+create operation requires `Idempotency-Key` and is permitted in authenticated
+remote mode because it accepts no client local path. This catalog does not
+contact suppliers, generate a BOM, select replacements, or modify KiCad
+projects.
 
 ## Phase 2A controlled design change kernel
 
