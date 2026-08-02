@@ -4,11 +4,13 @@ import hashlib
 import json
 import os
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from pcbflow.commands import load_command_batch
+from pcbflow.component_bindings import BoundModuleResolution, ComponentModuleBinding
 from pcbflow.schematic.adapter import (
     CstSchematicAdapter,
     DesignCommandUnsupportedError,
@@ -38,6 +40,36 @@ def _fixture_root() -> Path:
     return Path(__file__).resolve().parents[1] / "fixtures"
 
 
+class RecordingBoundModuleResolver:
+    def __init__(self, resolution: BoundModuleResolution) -> None:
+        self._resolution = resolution
+        self.calls: list[tuple[str, int]] = []
+
+    def resolve_for_instantiation(
+        self, binding_id: str, kicad_major: int
+    ) -> BoundModuleResolution:
+        self.calls.append((binding_id, kicad_major))
+        return self._resolution
+
+
+def _bound_resolution() -> BoundModuleResolution:
+    module = FileModuleCatalog(
+        _fixture_root() / "modules", max_files=16, max_bytes=1_000_000
+    ).get("modrev_status_led_v1")
+    return BoundModuleResolution(
+        binding=ComponentModuleBinding(
+            id="compmod_status_led_v1",
+            component_revision_id="comprev_status_led_v1",
+            kicad_major=9,
+            module_revision_id="modrev_status_led_v1",
+            module_manifest_digest=module.manifest_digest,
+            idempotency_key="bound-module-fixture",
+            created_at=datetime(2026, 8, 2, tzinfo=UTC),
+        ),
+        module=module,
+    )
+
+
 def _command(
     project_id: str,
     revision: str,
@@ -63,6 +95,18 @@ def _command(
             "placement_slot": placement_slot,
         },
     }
+    if operation_type == "schematic.instantiate_bound_module":
+        operation = {
+            "type": operation_type,
+            "payload": {
+                "component_module_binding_id": "compmod_status_led_v1",
+                "instance_name": "STATUS_LED",
+                "target_sheet_ref": operation["payload"]["target_sheet_ref"],
+                "parameter_bindings": {"LED_VALUE": "GREEN"},
+                "port_bindings": port_bindings or {},
+                "placement_slot": placement_slot,
+            },
+        }
     if operation_type == "schematic.set_property":
         operation = {
             "type": operation_type,
@@ -234,6 +278,31 @@ def test_instantiate_module_is_deterministic_and_does_not_modify_catalog(tmp_pat
         for path in catalog_root.rglob("*")
         if path.is_file()
     }
+    assert left_result.capability_report.bound_module_resolutions == ()
+
+
+def test_adapter_instantiates_a_bound_module_from_the_resolver(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    shutil.copytree(_fixture_root() / "kicad" / "controlled-design", project)
+    resolution = _bound_resolution()
+    resolver = RecordingBoundModuleResolver(resolution)
+    adapter = CstSchematicAdapter(None, bound_module_resolver=resolver)
+    command = _command(
+        "prj_controller",
+        "git:" + "1" * 40,
+        operation_type="schematic.instantiate_bound_module",
+    )
+
+    result = adapter.apply(project, (command,), kicad_major=9)
+
+    assert resolver.calls == [("compmod_status_led_v1", 9)]
+    assert result.command_results[0].operation_type == "schematic.instantiate_bound_module"
+    assert result.capability_report.module_digests == (
+        resolution.module.manifest_digest,
+    )
+    assert result.capability_report.bound_module_resolutions[0].binding_id == (
+        "compmod_status_led_v1"
+    )
 
 
 def test_future_operation_returns_stable_unsupported_code(tmp_path: Path) -> None:

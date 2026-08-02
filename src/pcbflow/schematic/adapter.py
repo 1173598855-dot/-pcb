@@ -5,13 +5,14 @@ import tempfile
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID, uuid5
 
 from pcbflow.commands import (
     AddLabelOperation,
     AssignFootprintOperation,
     DesignCommand,
+    InstantiateBoundModuleOperation,
     InstantiateModuleOperation,
     SetPropertyOperation,
     SchematicObjectRef,
@@ -47,6 +48,9 @@ from pcbflow.schematic.semantic import (
     object_ref_key,
     parse_schematic,
 )
+
+if TYPE_CHECKING:
+    from pcbflow.component_bindings import BoundModuleResolverPort
 
 
 class UnsupportedDesignCommandError(ValueError):
@@ -84,6 +88,17 @@ class AdapterCapabilityReport:
     kicad_major: int
     supported_operations: tuple[str, ...]
     module_digests: tuple[str, ...]
+    bound_module_resolutions: tuple[BoundModuleResolutionReport, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BoundModuleResolutionReport:
+    binding_id: str
+    component_revision_id: str
+    kicad_major: int
+    module_revision_id: str
+    frozen_manifest_digest: str
+    live_manifest_digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,10 +137,12 @@ class CstSchematicAdapter:
         self,
         module_catalog: ModuleCatalogPort | None,
         *,
+        bound_module_resolver: BoundModuleResolverPort | None = None,
         metrics: Metrics | None = None,
         monotonic=time.monotonic,
     ) -> None:
         self._module_catalog = module_catalog
+        self._bound_module_resolver = bound_module_resolver
         self._metrics = metrics
         self._monotonic = monotonic
 
@@ -196,18 +213,47 @@ class CstSchematicAdapter:
         ):
             raise UnsupportedDesignCommandError(commands[0].operation.type)
         project_root = _checked_project(project)
-        if all(isinstance(command.operation, InstantiateModuleOperation) for command in commands):
+        instantiate_operations = (
+            InstantiateModuleOperation,
+            InstantiateBoundModuleOperation,
+        )
+        if all(
+            isinstance(command.operation, instantiate_operations) for command in commands
+        ):
             if len(commands) != 1:
                 raise ValueError("Task 13 supports exactly one instantiate command per apply")
             command = commands[0]
-            assert self._module_catalog is not None
             profile = profile_for_major(kicad_major)
             assert profile is not None
             before = parse_schematic(
                 project_root,
                 accepted_versions=profile.schematic_format_versions,
             )
-            revision = self._module_catalog.get(command.operation.payload.module_revision_id)
+            operation = command.operation
+            if isinstance(operation, InstantiateModuleOperation):
+                assert self._module_catalog is not None
+                revision = self._module_catalog.get(
+                    operation.payload.module_revision_id
+                )
+                bound_module_resolutions = ()
+            else:
+                if self._bound_module_resolver is None:
+                    raise UnsupportedDesignCommandError(operation.type)
+                resolution = self._bound_module_resolver.resolve_for_instantiation(
+                    operation.payload.component_module_binding_id, kicad_major
+                )
+                revision = resolution.module
+                binding = resolution.binding
+                bound_module_resolutions = (
+                    BoundModuleResolutionReport(
+                        binding_id=binding.id,
+                        component_revision_id=binding.component_revision_id,
+                        kicad_major=kicad_major,
+                        module_revision_id=binding.module_revision_id,
+                        frozen_manifest_digest=binding.module_manifest_digest,
+                        live_manifest_digest=revision.manifest_digest,
+                    ),
+                )
             result, after, modified = self._instantiate(
                 project_root, before, command, revision, kicad_major=kicad_major
             )
@@ -218,8 +264,9 @@ class CstSchematicAdapter:
                 capability_report=AdapterCapabilityReport(
                     adapter_contract=self._ADAPTER_CONTRACT,
                     kicad_major=kicad_major,
-                    supported_operations=("schematic.instantiate_module",),
+                    supported_operations=(operation.type,),
                     module_digests=(revision.manifest_digest,),
+                    bound_module_resolutions=bound_module_resolutions,
                 ),
             )
         supported = (
@@ -253,6 +300,7 @@ class CstSchematicAdapter:
                 kicad_major=kicad_major,
                 supported_operations=tuple(sorted({command.operation.type for command in commands})),
                 module_digests=module_digests,
+                bound_module_resolutions=(),
             ),
         )
 
@@ -282,7 +330,9 @@ class CstSchematicAdapter:
         kicad_major: int,
     ) -> tuple[CommandResult, SchematicDocument, tuple[str, ...]]:
         operation = command.operation
-        assert isinstance(operation, InstantiateModuleOperation)
+        assert isinstance(
+            operation, (InstantiateModuleOperation, InstantiateBoundModuleOperation)
+        )
         payload = operation.payload
         before_document = before.document
         manifest = revision.manifest

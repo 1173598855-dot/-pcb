@@ -287,7 +287,7 @@ git commit -m "feat: resolve bound modules"
 
 **Files:**
 - Modify: src/pcbflow/schematic/adapter.py
-- Test: tests/unit/test_schematic_adapter.py
+- Test: tests/unit/test_schematic_modules.py
 
 **Interfaces:**
 
@@ -312,9 +312,9 @@ class AdapterCapabilityReport:
 
 CstSchematicAdapter receives an optional BoundModuleResolverPort. A bound operation resolves once and passes resolution.module to _instantiate() without a later catalog call.
 
-- [ ] **Step 1: Write failing adapter tests**
+- [x] **Step 1: Write failing adapter tests**
 
-In tests/unit/test_schematic_adapter.py, add a resolver double recording its input and returning a fixture ModuleRevision plus ComponentModuleBinding. Add:
+In tests/unit/test_schematic_modules.py, add a resolver double recording its input and returning a fixture ModuleRevision plus ComponentModuleBinding. Add:
 
 ~~~python
 def test_adapter_instantiates_a_bound_module_from_the_resolver(tmp_path: Path) -> None:
@@ -332,18 +332,18 @@ def test_adapter_instantiates_a_bound_module_from_the_resolver(tmp_path: Path) -
 
 Add a direct module regression asserting direct result.capability_report.bound_module_resolutions equals ().
 
-- [ ] **Step 2: Run the test to verify RED**
+- [x] **Step 2: Run the test to verify RED**
 
 Run:
 
 ~~~powershell
 $env:PYTHONPATH = (Join-Path (Get-Location) 'src')
-& 'C:\GitHub\codex自动化开发pcb\.venv\Scripts\python.exe' -m pytest tests\unit\test_schematic_adapter.py -q --basetemp C:\tmp\pcbflow-bound-module-task-3-red -p no:cacheprovider
+& 'C:\GitHub\codex自动化开发pcb\.venv\Scripts\python.exe' -m pytest tests\unit\test_schematic_modules.py -q --basetemp C:\tmp\pcbflow-bound-module-task-3-red -p no:cacheprovider
 ~~~
 
 Expected: adapter construction or bound operation dispatch fails because the resolver route is absent.
 
-- [ ] **Step 3: Write the minimal adapter integration**
+- [x] **Step 3: Write the minimal adapter integration**
 
 Import InstantiateBoundModuleOperation and the resolver port. Add the keyword-only constructor parameter:
 
@@ -371,21 +371,21 @@ revision = resolution.module
 
 Make _instantiate() accept the union of direct and bound instantiate operations. Populate one ordered BoundModuleResolutionReport only on the bound route; use () for direct and controlled non-bound reports.
 
-- [ ] **Step 4: Run tests to verify GREEN**
+- [x] **Step 4: Run tests to verify GREEN**
 
 Run:
 
 ~~~powershell
 $env:PYTHONPATH = (Join-Path (Get-Location) 'src')
-& 'C:\GitHub\codex自动化开发pcb\.venv\Scripts\python.exe' -m pytest tests\unit\test_schematic_adapter.py tests\unit\test_schematic_modules.py -q --basetemp C:\tmp\pcbflow-bound-module-task-3-green -p no:cacheprovider
+& 'C:\GitHub\codex自动化开发pcb\.venv\Scripts\python.exe' -m pytest tests\unit\test_schematic_modules.py tests\unit\test_schematic_adapter.py -q --basetemp C:\tmp\pcbflow-bound-module-task-3-green -p no:cacheprovider
 ~~~
 
 Expected: resolver is called once before write, bound evidence has no local path, and existing direct module rendering remains unchanged.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~powershell
-git add src/pcbflow/schematic/adapter.py tests/unit/test_schematic_adapter.py
+git add src/pcbflow/schematic/adapter.py tests/unit/test_schematic_modules.py
 git commit -m "feat: instantiate resolved bound modules"
 ~~~
 
