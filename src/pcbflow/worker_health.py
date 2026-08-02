@@ -46,7 +46,7 @@ def get_worker_health(worker: WorkerService) -> WorkerHealth:
     # Determine health status
     if worker.state.value == "STOPPED":
         status = "unhealthy"
-    elif worker.failed_count > worker.completed_count * 0.5:
+    elif worker.failed_count > worker.completed_count * 0.5 and worker.completed_count > 0:
         status = "degraded"  # More than 50% failure rate
     else:
         status = "healthy"
