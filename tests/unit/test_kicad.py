@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -437,6 +438,77 @@ def test_validate_rejects_an_executable_replaced_during_version_probe(
     )
     with pytest.raises(KicadUnavailableError, match="executable_changed"):
         KicadCli(runner, executable, 5).validate(project, tmp_path / "output")
+
+    assert runner.calls == [(str(executable.resolve()), "--version")]
+
+
+def test_validate_rejects_an_executable_replaced_since_expected_probe(
+    tmp_path: Path,
+) -> None:
+    fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "kicad"
+    executable = tmp_path / "kicad-cli.exe"
+    executable.write_bytes(b"original executable")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.kicad_pcb").write_text(
+        "(kicad_pcb (version 20241229))", encoding="utf-8"
+    )
+    runner = ReportRunner(
+        {
+            "erc": (fixture_dir / "erc.json").read_bytes(),
+            "drc": (fixture_dir / "drc.json").read_bytes(),
+        }
+    )
+    cli = KicadCli(runner, executable, 5)
+    expected = cli.probe()
+    assert expected.available
+    executable.write_bytes(b"replacement executable")
+
+    with pytest.raises(KicadUnavailableError, match="executable_changed"):
+        cli.validate_with_capability(
+            project,
+            tmp_path / "output",
+            expected,
+        )
+
+    assert runner.calls == [(str(executable.resolve()), "--version")]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"major": 10},
+        {"profile_id": "kicad-10-v1"},
+        {"profile_revision": 2},
+    ],
+)
+def test_validate_rejects_expected_capability_with_inconsistent_profile(
+    tmp_path: Path, changes: dict[str, int | str]
+) -> None:
+    fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "kicad"
+    executable = tmp_path / "kicad-cli.exe"
+    executable.write_bytes(b"fixture executable")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.kicad_pcb").write_text(
+        "(kicad_pcb (version 20241229))", encoding="utf-8"
+    )
+    runner = ReportRunner(
+        {
+            "erc": (fixture_dir / "erc.json").read_bytes(),
+            "drc": (fixture_dir / "drc.json").read_bytes(),
+        }
+    )
+    cli = KicadCli(runner, executable, 5)
+    expected = cli.probe()
+    assert expected.available
+
+    with pytest.raises(KicadUnavailableError, match="expected_capability_profile_mismatch"):
+        cli.validate_with_capability(
+            project,
+            tmp_path / "output",
+            replace(expected, **changes),
+        )
 
     assert runner.calls == [(str(executable.resolve()), "--version")]
 

@@ -71,6 +71,35 @@ def test_settings_require_a_token_in_remote_mode(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("environment", "message"),
+    [
+        (
+            {
+                "PCBFLOW_API_TOKEN": "remote-token",
+                "PCBFLOW_API_ACTOR_ID": "a" * 256,
+            },
+            "api_actor_id must not exceed 255 characters",
+        ),
+        (
+            {"PCBFLOW_API_TOKEN": "remote-tok\u00e9n"},
+            "api_token must contain only ASCII characters",
+        ),
+    ],
+)
+def test_settings_reject_unsafe_remote_api_configuration(
+    tmp_path: Path, environment: dict[str, str], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        Settings.from_env(
+            {
+                "PCBFLOW_DATA_DIR": str(tmp_path / "runtime"),
+                "PCBFLOW_REMOTE_MODE": "true",
+                **environment,
+            }
+        )
+
+
 def test_settings_preserve_legacy_positional_module_catalog_argument(
     tmp_path: Path,
 ) -> None:

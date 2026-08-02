@@ -59,7 +59,7 @@ class CreateComponentRevisionRequest(StrictRequest):
 
 class ActorRequest(StrictRequest):
     type: Literal["human", "service"]
-    id: str = Field(min_length=1)
+    id: str = Field(min_length=1, max_length=255)
 
 
 class ApprovalRequest(StrictRequest):
@@ -351,6 +351,7 @@ def create_app(container: Container | None = None) -> FastAPI:
                 scheme.lower() != "bearer"
                 or not separator
                 or not expected_token
+                or not provided_token.isascii()
                 or not compare_digest(provided_token, expected_token)
             ):
                 response = _error_response(

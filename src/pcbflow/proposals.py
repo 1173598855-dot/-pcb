@@ -36,6 +36,7 @@ from pcbflow.schematic.diff import CommandAttribution, build_semantic_diff, sema
 from pcbflow.schematic.semantic import SchematicDocument, object_ref_key
 from pcbflow.kicad import (
     KicadPort,
+    KicadCapabilityBoundPort,
     KicadCapability,
     KicadDesignFormatError,
     KicadOperationUnsupportedError,
@@ -554,7 +555,13 @@ class ProposalExecutor:
                 semantic_descriptor = add("schematic_semantic_diff", semantic_diff_bytes(semantic), "application/json")
                 erc_started = self._monotonic()
                 try:
-                    reports = self._kicad.validate(workspace, workspace.parent / "validation-output")
+                    output_dir = workspace.parent / "validation-output"
+                    if isinstance(self._kicad, KicadCapabilityBoundPort):
+                        reports = self._kicad.validate_with_capability(
+                            workspace, output_dir, capability
+                        )
+                    else:
+                        reports = self._kicad.validate(workspace, output_dir)
                 finally:
                     if self._metrics is not None:
                         self._metrics.observe(
@@ -667,8 +674,17 @@ class ProposalExecutor:
             semantic_digest = digest_map.get("schematic_semantic_diff")
             self._proposal_store.mark_validation_failed(proposal_id, lease.task_id, lease.lease_token, self._clock(), error.code, semantic_digest, evidence_set_digest, {"error_code": error.code, "artifact_digests": digest_map}, tuple(evidence))
             raise
-        except (KicadDesignFormatError, KicadOperationUnsupportedError) as error:
-            failed = TerminalTaskError(error.code, str(error))
+        except (
+            KicadUnavailableError,
+            KicadDesignFormatError,
+            KicadOperationUnsupportedError,
+        ) as error:
+            code = (
+                "KICAD_CLI_UNAVAILABLE"
+                if isinstance(error, KicadUnavailableError)
+                else error.code
+            )
+            failed = TerminalTaskError(code, str(error))
             evidence_set_digest = add_failed_evidence_set().digest
             digest_map = {item.item.kind: item.item.artifact_digest for item in evidence}
             self._proposal_store.mark_validation_failed(

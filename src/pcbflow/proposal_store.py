@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from sqlalchemy import select, text, update
+from sqlalchemy import and_, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -195,6 +195,39 @@ class ProposalStore:
         with self._sessions() as session:
             return self._existing(session, batch, batch_json, digest)
 
+    @staticmethod
+    def _conflicting_command_key(session: Session, batch: CommandBatch) -> str | None:
+        # Two IN lists plus project_id stay below SQLite's guaranteed 999 binds.
+        chunk_size = 400
+        for start in range(0, len(batch.commands), chunk_size):
+            commands = batch.commands[start : start + chunk_size]
+            keys = [command.idempotency_key for command in commands]
+            command_ids = [command.command_id for command in commands]
+            rows = session.scalars(
+                select(DesignCommandRow).where(
+                    or_(
+                        and_(
+                            DesignCommandRow.project_id == batch.project_id,
+                            DesignCommandRow.idempotency_key.in_(keys),
+                        ),
+                        DesignCommandRow.id.in_(command_ids),
+                    )
+                )
+            ).all()
+            existing_keys = {
+                row.idempotency_key
+                for row in rows
+                if row.project_id == batch.project_id
+            }
+            existing_ids = {row.id for row in rows}
+            for command in commands:
+                if (
+                    command.idempotency_key in existing_keys
+                    or command.command_id in existing_ids
+                ):
+                    return command.idempotency_key
+        return None
+
     def create_queued(self, batch: CommandBatch) -> ChangeProposal:
         try:
             return self._create_queued(batch)
@@ -207,16 +240,9 @@ class ProposalStore:
                 existing = self._existing(session, batch, batch_json, digest)
                 if existing is not None:
                     return existing
-                for command in batch.commands:
-                    command_row = session.scalar(
-                        select(DesignCommandRow).where(
-                            DesignCommandRow.project_id == batch.project_id,
-                            DesignCommandRow.idempotency_key
-                            == command.idempotency_key,
-                        )
-                    )
-                    if command_row is not None:
-                        raise IdempotencyConflictError(command.idempotency_key)
+                conflict_key = self._conflicting_command_key(session, batch)
+                if conflict_key is not None:
+                    raise IdempotencyConflictError(conflict_key)
             raise
 
     def _create_queued(self, batch: CommandBatch) -> ChangeProposal:
@@ -228,21 +254,9 @@ class ProposalStore:
             if existing is not None:
                 return existing
 
-            for command in batch.commands:
-                existing_command = session.scalar(
-                    select(DesignCommandRow).where(
-                        DesignCommandRow.project_id == batch.project_id,
-                        DesignCommandRow.idempotency_key
-                        == command.idempotency_key,
-                    )
-                )
-                if existing_command is not None:
-                    raise IdempotencyConflictError(command.idempotency_key)
-                existing_command_id = session.get(
-                    DesignCommandRow, command.command_id
-                )
-                if existing_command_id is not None:
-                    raise IdempotencyConflictError(command.idempotency_key)
+            conflict_key = self._conflicting_command_key(session, batch)
+            if conflict_key is not None:
+                raise IdempotencyConflictError(conflict_key)
 
             now = self._clock()
             batch_row = DesignCommandBatchRow(

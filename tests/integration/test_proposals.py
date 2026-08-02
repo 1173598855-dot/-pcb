@@ -11,7 +11,7 @@ from pcbflow.canonical import canonical_json_bytes
 from pcbflow.config import Settings
 from pcbflow.container import build_container
 from pcbflow.domain import TaskLease, TaskStatus
-from pcbflow.kicad import KicadCapability, RawValidationReport
+from pcbflow.kicad import KicadCapability, KicadUnavailableError, RawValidationReport
 from pcbflow.observability import MetricName
 from pcbflow.design_tables import ChangeProposalRow
 from pcbflow.proposals import EvidenceSet, ProposalExecutor, ProposalStatus
@@ -64,12 +64,89 @@ class UnavailableProposalKicad(FakeProposalKicad):
         return KicadCapability(False, None, None, None, "kicad_cli_not_found")
 
 
+class UnavailableDuringValidationKicad(FakeProposalKicad):
+    def validate(self, project_dir: Path, output_dir: Path) -> tuple[RawValidationReport, ...]:
+        raise KicadUnavailableError("executable_changed")
+
+
+class CapabilityCapturingProposalKicad(FakeProposalKicad):
+    def __init__(self) -> None:
+        super().__init__()
+        self.expected_capability: KicadCapability | None = None
+
+    def validate_with_capability(
+        self,
+        project_dir: Path,
+        output_dir: Path,
+        capability: KicadCapability,
+    ) -> tuple[RawValidationReport, ...]:
+        self.expected_capability = capability
+        return super().validate(project_dir, output_dir)
+
+
+class LegacyProposalKicad:
+    def __init__(self) -> None:
+        self._delegate = FakeProposalKicad()
+
+    def probe(self) -> KicadCapability:
+        return self._delegate.probe()
+
+    def validate(
+        self, project_dir: Path, output_dir: Path
+    ) -> tuple[RawValidationReport, ...]:
+        return self._delegate.validate(project_dir, output_dir)
+
+
 def test_container_exposes_the_injected_kicad_port(tmp_path: Path) -> None:
     fixtures = Path(__file__).resolve().parents[1] / "fixtures"
     fake = FakeProposalKicad()
     container = build_container(_settings(tmp_path, fixtures / "modules"), kicad_override=fake, clock=lambda: NOW)
     try:
         assert container.kicad is fake
+    finally:
+        container.dispose()
+
+
+def test_proposal_validation_binds_to_preflight_kicad_capability(
+    tmp_path: Path,
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    fake = CapabilityCapturingProposalKicad()
+    container = build_container(
+        _settings(tmp_path, fixtures / "modules"),
+        kicad_override=fake,
+        clock=lambda: NOW,
+    )
+    try:
+        _source, project, requirement_set = _prepare(container, tmp_path)
+        proposal = container.proposals.create(
+            _instantiate_batch(project, requirement_set),
+            "execute-status-led",
+        )
+
+        assert container.worker.run_once()
+        assert container.proposal_store.get(proposal.id).status is ProposalStatus.READY_FOR_REVIEW
+        assert fake.expected_capability == fake.probe()
+    finally:
+        container.dispose()
+
+
+def test_proposal_validation_supports_legacy_kicad_ports(tmp_path: Path) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    container = build_container(
+        _settings(tmp_path, fixtures / "modules"),
+        kicad_override=LegacyProposalKicad(),
+        clock=lambda: NOW,
+    )
+    try:
+        _source, project, requirement_set = _prepare(container, tmp_path)
+        proposal = container.proposals.create(
+            _instantiate_batch(project, requirement_set),
+            "execute-status-led",
+        )
+
+        assert container.worker.run_once()
+        assert container.proposal_store.get(proposal.id).status is ProposalStatus.READY_FOR_REVIEW
     finally:
         container.dispose()
 
@@ -110,6 +187,30 @@ def test_kicad_unavailable_persists_baseline_evidence(tmp_path: Path) -> None:
         assert failed.status is ProposalStatus.VALIDATION_FAILED
         assert failed.last_error_code == "KICAD_CLI_UNAVAILABLE"
         assert {"design_command_batch", "project_snapshot_before", "command_execution_log", "adapter_capability_report", "proposal_evidence_set"} <= kinds
+    finally:
+        container.dispose()
+
+
+def test_kicad_unavailable_during_validation_uses_unavailable_error_code(
+    tmp_path: Path,
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    container = build_container(
+        _settings(tmp_path, fixtures / "modules"),
+        kicad_override=UnavailableDuringValidationKicad(),
+        clock=lambda: NOW,
+    )
+    try:
+        _source, project, requirement_set = _prepare(container, tmp_path)
+        proposal = container.proposals.create(
+            _instantiate_batch(project, requirement_set),
+            "execute-status-led",
+        )
+
+        assert container.worker.run_once()
+        failed = container.proposal_store.get(proposal.id)
+        assert failed.status is ProposalStatus.VALIDATION_FAILED
+        assert failed.last_error_code == "KICAD_CLI_UNAVAILABLE"
     finally:
         container.dispose()
 

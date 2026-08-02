@@ -7,7 +7,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, runtime_checkable
 
 from pcbflow.domain import NormalizedFinding, ValidationReport
 from pcbflow.kicad_compatibility import (
@@ -50,6 +50,16 @@ class KicadPort(Protocol):
 
     def validate(
         self, project_dir: Path, output_dir: Path
+    ) -> tuple[RawValidationReport, ...]: ...
+
+
+@runtime_checkable
+class KicadCapabilityBoundPort(Protocol):
+    def validate_with_capability(
+        self,
+        project_dir: Path,
+        output_dir: Path,
+        capability: KicadCapability,
     ) -> tuple[RawValidationReport, ...]: ...
 
 
@@ -302,7 +312,30 @@ class KicadCli:
         )
 
     def validate(
-        self, project_dir: Path, output_dir: Path
+        self,
+        project_dir: Path,
+        output_dir: Path,
+    ) -> tuple[RawValidationReport, ...]:
+        return self._validate(project_dir, output_dir)
+
+    def validate_with_capability(
+        self,
+        project_dir: Path,
+        output_dir: Path,
+        capability: KicadCapability,
+    ) -> tuple[RawValidationReport, ...]:
+        return self._validate(
+            project_dir,
+            output_dir,
+            expected_capability=capability,
+        )
+
+    def _validate(
+        self,
+        project_dir: Path,
+        output_dir: Path,
+        *,
+        expected_capability: KicadCapability | None = None,
     ) -> tuple[RawValidationReport, ...]:
         try:
             project = project_dir.resolve(strict=True)
@@ -325,12 +358,30 @@ class KicadCli:
         if not schematics and not boards:
             raise KicadProjectNotFoundError("no root KiCad design files found")
 
-        capability = self.probe()
-        if not capability.available or capability.path is None or capability.version is None:
+        if expected_capability is not None:
+            if expected_capability.path != self._executable:
+                raise KicadUnavailableError("expected_capability_path_mismatch")
+            capability = expected_capability
+        else:
+            capability = self.probe()
+        if (
+            not capability.available
+            or capability.path is None
+            or capability.version is None
+            or capability.executable_digest is None
+            or capability.profile_id is None
+            or capability.profile_revision is None
+        ):
             raise KicadUnavailableError(capability.reason or "kicad_cli_unavailable")
         profile = select_kicad_profile(capability.version)
-        if profile is None or capability.profile_id is None:
+        if profile is None:
             raise KicadUnavailableError("unsupported_version")
+        if expected_capability is not None and (
+            capability.major != profile.major
+            or capability.profile_id != profile.profile_id
+            or capability.profile_revision != profile.revision
+        ):
+            raise KicadUnavailableError("expected_capability_profile_mismatch")
         self._validate_design_formats(schematics, boards, profile)
         output.mkdir(parents=True, exist_ok=True)
 

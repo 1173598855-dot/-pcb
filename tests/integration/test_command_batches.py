@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock
+from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
 from pcbflow.commands import load_command_batch
@@ -19,6 +20,7 @@ from pcbflow.design_tables import (
 from pcbflow.domain import TaskStatus
 from pcbflow.observability import bind_log_context
 from pcbflow.repositories import IdempotencyConflictError
+from pcbflow.proposal_store import ProposalStore
 from pcbflow.tables import TaskRow
 
 
@@ -195,6 +197,73 @@ def test_create_rejects_reusing_a_command_key_in_a_different_batch(
         container.proposals.create(
             json.dumps(second).encode(), str(second["idempotency_key"])
         )
+
+
+def test_create_checks_multi_command_conflicts_with_one_bounded_query(
+    container, frozen_requirement_set
+) -> None:
+    project = container.projects.get(frozen_requirement_set.project_id)
+    value = _batch(project, frozen_requirement_set)
+    commands = value["commands"]
+    assert isinstance(commands, list)
+    for number in range(2, 4):
+        command = json.loads(json.dumps(commands[0]))
+        command["command_id"] = f"cmd_set_status_value_{number}"
+        command["idempotency_key"] = f"proposal:set-status-value:{number}"
+        commands.append(command)
+
+    command_selects: list[str] = []
+
+    def record_command_select(
+        connection, cursor, statement, parameters, context, executemany
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT") and "design_commands" in statement:
+            command_selects.append(statement)
+
+    event.listen(container.engine, "before_cursor_execute", record_command_select)
+    try:
+        container.proposals.create(
+            json.dumps(value, separators=(",", ":")).encode(),
+            str(value["idempotency_key"]),
+        )
+    finally:
+        event.remove(container.engine, "before_cursor_execute", record_command_select)
+
+    assert len(command_selects) == 1
+
+
+def test_command_conflict_prefers_its_own_key_for_cross_project_command_id(
+    container, frozen_requirement_set
+) -> None:
+    project = container.projects.get(frozen_requirement_set.project_id)
+    value = _batch(project, frozen_requirement_set)
+    commands = value["commands"]
+    assert isinstance(commands, list)
+    first = commands[0]
+    assert isinstance(first, dict)
+    second = json.loads(json.dumps(first))
+    second["command_id"] = "cmd_cross_project_conflict"
+    second["idempotency_key"] = "proposal:set-status-value:2"
+    commands.append(second)
+    batch = load_command_batch(json.dumps(value).encode())
+
+    class Rows:
+        def all(self):
+            return [
+                SimpleNamespace(
+                    id="cmd_cross_project_conflict",
+                    idempotency_key="proposal:set-status-value:1",
+                    project_id="prj_other",
+                )
+            ]
+
+    class SessionWithCrossProjectCommand:
+        def scalars(self, statement):
+            return Rows()
+
+    assert ProposalStore._conflicting_command_key(
+        SessionWithCrossProjectCommand(), batch
+    ) == "proposal:set-status-value:2"
 
 
 def test_command_batch_get_rejects_tampered_invalid_json_shape(

@@ -257,6 +257,29 @@ def test_remote_api_requires_a_bearer_token_for_controlled_writes(
     container.engine.dispose()
 
 
+def test_remote_api_rejects_non_ascii_bearer_tokens(tmp_path: Path) -> None:
+    container = build_container(
+        _settings(tmp_path, remote_mode=True, api_token="remote-test-token"),
+        kicad_override=_fake_kicad(),
+    )
+
+    async def exercise() -> httpx.Response:
+        async with _client(container, raise_app_exceptions=False) as client:
+            request = httpx.Request(
+                "GET",
+                "http://testserver/api/v1/projects",
+                headers=[
+                    (b"authorization", b"Bearer remote-" + bytes([255]))
+                ],
+            )
+            return await client.send(request)
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "REMOTE_AUTH_REQUIRED"
+    container.engine.dispose()
+
+
 def test_remote_api_uses_authenticated_actor_not_request_actor(tmp_path: Path) -> None:
     fixtures = Path(__file__).resolve().parents[1] / "fixtures"
     source = tmp_path / "remote-controlled-source"
@@ -327,6 +350,32 @@ def test_remote_api_uses_authenticated_actor_not_request_actor(tmp_path: Path) -
     assert {(command.actor.type, command.actor.id) for command in stored.commands} == {
         ("service", "remote-api")
     }
+    container.engine.dispose()
+
+
+def test_api_rejects_actor_ids_larger_than_the_persistence_contract(
+    tmp_path: Path,
+) -> None:
+    container = build_container(_settings(tmp_path), kicad_override=_fake_kicad())
+
+    async def exercise() -> httpx.Response:
+        async with _client(container, raise_app_exceptions=False) as client:
+            return await client.post(
+                "/api/v1/approvals",
+                headers={"Idempotency-Key": "oversized-actor"},
+                json={
+                    "subject_type": "requirement_set",
+                    "subject_id": "reqset_missing",
+                    "subject_digest": "sha256:" + "0" * 64,
+                    "decision": "approve",
+                    "actor": {"type": "human", "id": "a" * 256},
+                    "comment": "oversized actor must fail validation",
+                },
+            )
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "REQUEST_SCHEMA_INVALID"
     container.engine.dispose()
 
 

@@ -46,6 +46,10 @@ class Settings:
             raise ValueError("remote_mode requires api_token")
         if not self.api_actor_id:
             raise ValueError("api_actor_id must not be empty")
+        if len(self.api_actor_id) > 255:
+            raise ValueError("api_actor_id must not exceed 255 characters")
+        if self.api_token is not None and not self.api_token.isascii():
+            raise ValueError("api_token must contain only ASCII characters")
 
     @property
     def projects_dir(self) -> Path:
