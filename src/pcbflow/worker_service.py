@@ -5,7 +5,7 @@ import os
 import socket
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -63,6 +63,28 @@ class WorkerService:
         self.shutdown_requested = True
         self.state = WorkerState.STOPPING
         logger.info("worker.shutdown_requested active_tasks=%d", len(self.active_tasks))
+
+    def shutdown_gracefully(self) -> bool:
+        """Wait for active tasks to complete. Returns True if clean, False if forced."""
+        self.request_shutdown()
+
+        timeout_at = datetime.now(UTC) + timedelta(
+            seconds=self.container.settings.worker_shutdown_timeout_seconds
+        )
+
+        while self.active_tasks:
+            if datetime.now(UTC) > timeout_at:
+                logger.warning(
+                    "worker.shutdown_timeout_exceeded active_tasks=%s",
+                    list(self.active_tasks.keys()),
+                )
+                self.state = WorkerState.STOPPED
+                return False
+
+            time.sleep(0.5)
+
+        self.state = WorkerState.STOPPED
+        return True
 
     def _backoff_sleep(self) -> None:
         delay = min(

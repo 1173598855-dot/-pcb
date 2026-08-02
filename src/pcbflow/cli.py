@@ -5,6 +5,7 @@ from ipaddress import ip_address
 import stat
 from pathlib import Path
 from typing import Annotated, NoReturn
+from datetime import UTC, datetime
 
 import typer
 import uvicorn
@@ -623,14 +624,77 @@ def validate_project(
 @app.command("worker")
 def run_worker(
     once: Annotated[bool, typer.Option("--once")] = False,
+    run: Annotated[bool, typer.Option("--run")] = False,
+    exit_when_idle: Annotated[bool, typer.Option("--exit-when-idle")] = False,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    if not once:
-        raise typer.BadParameter("only --once is supported")
+    """Execute worker tasks. Use --once for single task, --run for resident mode."""
+    import signal
+    import sys
+
+    if once and run:
+        raise CliInputError(
+            "INVALID_ARGUMENT", "cannot specify both --once and --run"
+        )
+
+    # Legacy --once behavior (or default when no flags)
+    if once or (not run and not exit_when_idle):
+        container = _build()
+        try:
+            handled = container.worker.run_once()
+            _emit({"handled": handled}, json_output, "handled" if handled else "idle")
+        finally:
+            container.dispose()
+        return
+
+    # Resident worker mode
     container = _build()
+    worker = None
+
+    def shutdown_handler(signum, frame):
+        if worker:
+            worker.request_shutdown()
+
+    signal.signal(signal.SIGTERM, shutdown_handler)
+    signal.signal(signal.SIGINT, shutdown_handler)
+
     try:
-        handled = container.worker.run_once()
-        _emit({"handled": handled}, json_output, "handled" if handled else "idle")
+        from pcbflow.worker_service import WorkerService
+
+        worker = WorkerService(container)
+
+        while not worker.shutdown_requested:
+            result = worker.run_one_cycle()
+
+            if exit_when_idle and not result.claimed:
+                break
+
+        duration_seconds = (datetime.now(UTC) - worker.started_at).total_seconds()
+
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "status": "stopped",
+                        "worker_id": worker.worker_id,
+                        "completed": worker.completed_count,
+                        "failed": worker.failed_count,
+                        "duration_seconds": duration_seconds,
+                    }
+                )
+            )
+        else:
+            typer.echo(
+                f"Worker stopped: {worker.completed_count} completed, "
+                f"{worker.failed_count} failed, {duration_seconds:.1f}s"
+            )
+
+        sys.exit(0)
+
+    except KeyboardInterrupt:
+        if worker:
+            worker.request_shutdown()
+        sys.exit(0)
     finally:
         container.dispose()
 
