@@ -400,7 +400,7 @@ git commit -m "feat: instantiate resolved bound modules"
 
 **Interfaces:** The proposal terminal codes are COMPONENT_MODULE_BINDING_NOT_FOUND, COMPONENT_MODULE_BINDING_KICAD_MAJOR_MISMATCH, and COMPONENT_MODULE_BINDING_DIGEST_MISMATCH. Failed command_execution_log data uses stage: bound_module_resolution plus only public binding, module, and digest fields.
 
-- [ ] **Step 1: Write failing proposal tests**
+- [x] **Step 1: Write failing proposal tests**
 
 Add _bound_instantiate_batch(project, requirement_set, binding_id) beside _instantiate_batch() in tests/integration/test_proposals.py. It retains the normal envelope but uses the bound operation.
 
@@ -433,7 +433,7 @@ In tests/e2e/test_api_cli.py, use the existing proposal API and CLI helpers to s
 
 In tests/e2e/test_controlled_design_change.py, add a managed workflow that imports a component, binds the fixture module for FakeKicad9, submits a bound proposal through create_app(container), runs one worker task, and asserts ready_for_review, candidate_revision, and adapter report bound_module_resolutions[0]["binding_id"] equals the stored ID.
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 Run:
 
@@ -444,7 +444,7 @@ $env:PYTHONPATH = (Join-Path (Get-Location) 'src')
 
 Expected: proposal currently rejects the operation or has no resolver report and terminal drift code.
 
-- [ ] **Step 3: Write the minimal proposal integration**
+- [x] **Step 3: Write the minimal proposal integration**
 
 In build_container(), inject the existing binding service into the existing adapter:
 
@@ -475,7 +475,7 @@ Initialize the preliminary capability_report with bound_module_resolutions: []. 
 
 Catch the three typed binding errors before the generic exception clause. Replace command_execution_data with canonical JSON containing stage, binding_id, and any error attributes module_revision_id, frozen_manifest_digest, and observed_manifest_digest. Call add_failed_evidence_set(), mark_validation_failed() with error.code, then raise TerminalTaskError(error.code, str(error)). Do not add catalog paths to this record.
 
-- [ ] **Step 4: Run tests to verify GREEN**
+- [x] **Step 4: Run tests to verify GREEN**
 
 Run:
 
@@ -486,7 +486,7 @@ $env:PYTHONPATH = (Join-Path (Get-Location) 'src')
 
 Expected: success stores the bound-resolution report; drift fails before candidate publication with safe failed evidence.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~powershell
 git add src/pcbflow/container.py src/pcbflow/proposals.py tests/integration/test_proposals.py tests/e2e/test_api_cli.py tests/e2e/test_controlled_design_change.py

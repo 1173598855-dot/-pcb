@@ -15,6 +15,7 @@ from pcbflow.cli import app
 from pcbflow.config import Settings
 from pcbflow.container import build_container
 from pcbflow.kicad import KicadCapability, RawValidationReport
+from tests.component_fixtures import build_component_directory
 
 
 class FakeKicad:
@@ -746,6 +747,26 @@ def _command_batch(project: dict, requirement_set: dict) -> dict:
     }
 
 
+def _bound_command_batch(
+    project: dict, requirement_set: dict, binding_id: str
+) -> dict:
+    batch = _command_batch(project, requirement_set)
+    command = batch["commands"][0]
+    payload = command["operation"]["payload"]
+    command["operation"] = {
+        "type": "schematic.instantiate_bound_module",
+        "payload": {
+            "component_module_binding_id": binding_id,
+            "instance_name": "STATUS_LED",
+            "target_sheet_ref": payload["target_sheet_ref"],
+            "parameter_bindings": payload["parameter_bindings"],
+            "port_bindings": payload["port_bindings"],
+            "placement_slot": payload["placement_slot"],
+        },
+    }
+    return batch
+
+
 def test_phase_2a_cli_help_lists_all_command_groups() -> None:
     runner = CliRunner()
     root = runner.invoke(app, ["--help"])
@@ -893,3 +914,128 @@ def test_cli_runs_the_controlled_change_workflow(
     )
     assert accepted.exit_code == 0, accepted.output
     assert json.loads(accepted.stdout)["status"] == "accepted"
+
+
+def test_api_and_cli_submit_and_execute_bound_module_batches(
+    tmp_path: Path, monkeypatch
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    source = tmp_path / "bound-api-cli-source"
+    shutil.copytree(fixtures / "kicad" / "controlled-design", source)
+    env = {
+        "PCBFLOW_DATA_DIR": str(tmp_path / "data"),
+        "PCBFLOW_MODULE_CATALOG_DIR": str(fixtures / "modules"),
+    }
+    settings = Settings.from_env(env)
+    container = build_container(settings, kicad_override=FakeCliKicad())
+    component_directory = build_component_directory(
+        tmp_path / "bound-api-cli-component", include_model=True
+    )
+    component = container.components.import_revision(
+        component_directory / "component.yaml", "api-cli-bound-component"
+    )
+    binding = container.component_module_bindings.bind(
+        component.id, 9, "modrev_status_led_v1", "api-cli-bound-module-binding"
+    )
+    project = container.projects.create("Controller", source, "api-cli-bound-project")
+    managed = container.revisions.adopt(project.id, "api-cli-bound-adopt")
+    requirements = (fixtures / "requirements" / "reference-controller.yaml").read_bytes()
+    draft = container.requirements.import_draft(
+        managed.id, requirements, "api-cli-bound-requirements"
+    )
+    pending = container.requirements.submit(
+        draft.id, "api-cli-bound-requirements-submit"
+    )
+    frozen = container.approvals.decide_g1(
+        requirement_set_id=pending.id,
+        subject_digest=pending.subject_digest(),
+        decision="approve",
+        actor_type="human",
+        actor_id="local-user",
+        comment="approved",
+        idempotency_key="api-cli-bound-g1",
+    )
+    current = container.projects.get(managed.id)
+    project_view = {"id": current.id, "current_revision": current.current_revision}
+    requirement_set_view = {"id": frozen.id}
+
+    async def submit_with_api() -> str:
+        async with _client(container) as client:
+            batch = _bound_command_batch(project_view, requirement_set_view, binding.id)
+            queued = await client.post(
+                f"/api/v1/projects/{managed.id}/proposals",
+                headers={"Idempotency-Key": "api-proposal"},
+                json=batch,
+            )
+            invalid = _bound_command_batch(
+                project_view, requirement_set_view, binding.id
+            )
+            invalid["batch_id"] = "bat_api_bound_invalid"
+            invalid["idempotency_key"] = "api-bound-invalid"
+            invalid_command = invalid["commands"][0]
+            invalid_command["batch_id"] = "bat_api_bound_invalid"
+            invalid_command["command_id"] = "cmd_api_bound_invalid"
+            invalid_command["idempotency_key"] = "api-bound-invalid:1"
+            invalid_command["operation"]["payload"]["module_revision_id"] = (
+                "modrev_status_led_v1"
+            )
+            rejected = await client.post(
+                f"/api/v1/projects/{managed.id}/proposals",
+                headers={"Idempotency-Key": "api-bound-invalid"},
+                json=invalid,
+            )
+
+            assert queued.status_code == 202, queued.text
+            assert queued.json()["id"].startswith("prop_")
+            assert rejected.status_code == 422
+            assert rejected.json()["error"]["code"] == "DESIGN_COMMAND_SCHEMA_INVALID"
+            assert (await client.post("/api/v1/worker:run-once")).json() == {
+                "handled": True
+            }
+            shown = await client.get(f"/api/v1/proposals/{queued.json()['id']}")
+            assert shown.json()["status"] == "ready_for_review"
+            return queued.json()["id"]
+
+    def build_for_test():
+        return build_container(settings, kicad_override=FakeCliKicad())
+
+    try:
+        api_proposal_id = asyncio.run(submit_with_api())
+        assert api_proposal_id.startswith("prop_")
+        monkeypatch.setattr("pcbflow.cli._build", build_for_test)
+        cli_batch = _bound_command_batch(project_view, requirement_set_view, binding.id)
+        cli_batch["batch_id"] = "bat_cli_bound_status_led"
+        cli_batch["idempotency_key"] = "cli-bound-status-led"
+        cli_command = cli_batch["commands"][0]
+        cli_command["batch_id"] = "bat_cli_bound_status_led"
+        cli_command["command_id"] = "cmd_cli_bound_status_led"
+        cli_command["idempotency_key"] = "cli-bound-status-led:1"
+        batch_file = tmp_path / "bound-cli-commands.json"
+        batch_file.write_text(json.dumps(cli_batch), encoding="utf-8")
+        runner = CliRunner()
+        queued = runner.invoke(
+            app,
+            [
+                "proposal",
+                "create",
+                managed.id,
+                "--file",
+                str(batch_file),
+                "--idempotency-key",
+                "cli-bound-status-led",
+                "--json",
+            ],
+            env=env,
+        )
+        assert queued.exit_code == 0, queued.output
+        cli_proposal = json.loads(queued.stdout)
+        assert cli_proposal["id"].startswith("prop_")
+        worked = runner.invoke(app, ["worker", "--once", "--json"], env=env)
+        assert worked.exit_code == 0, worked.output
+        shown = runner.invoke(
+            app, ["proposal", "show", cli_proposal["id"], "--json"], env=env
+        )
+        assert shown.exit_code == 0, shown.output
+        assert json.loads(shown.stdout)["status"] == "ready_for_review"
+    finally:
+        container.dispose()

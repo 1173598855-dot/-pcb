@@ -19,6 +19,11 @@ from pcbflow.artifacts import ArtifactDescriptor
 from pcbflow.canonical import canonical_digest, canonical_json_bytes
 from pcbflow.commands import ValidationKind, evaluate_precondition, PreconditionContext
 from pcbflow.commands import load_command_batch
+from pcbflow.component_bindings import (
+    ComponentModuleBindingDigestMismatchError,
+    ComponentModuleBindingKicadMajorMismatchError,
+    ComponentModuleBindingNotFoundError,
+)
 from pcbflow.domain import ProjectMode, RequestInvalidError
 from pcbflow.repositories import (
     IdempotencyConflictError,
@@ -482,6 +487,7 @@ class ProposalExecutor:
             capability_report = {
                 "adapter_contract": "pcbflow.schematic.cst.v1",
                 "kicad_major": capability.major,
+                "bound_module_resolutions": [],
                 "kicad": kicad_identity,
             }
             command_execution_data = canonical_json_bytes(
@@ -540,6 +546,17 @@ class ProposalExecutor:
                     "kicad_major": applied.capability_report.kicad_major,
                     "supported_operations": applied.capability_report.supported_operations,
                     "module_digests": applied.capability_report.module_digests,
+                    "bound_module_resolutions": [
+                        {
+                            "binding_id": resolution.binding_id,
+                            "component_revision_id": resolution.component_revision_id,
+                            "kicad_major": resolution.kicad_major,
+                            "module_revision_id": resolution.module_revision_id,
+                            "frozen_manifest_digest": resolution.frozen_manifest_digest,
+                            "live_manifest_digest": resolution.live_manifest_digest,
+                        }
+                        for resolution in applied.capability_report.bound_module_resolutions
+                    ],
                     "kicad": kicad_identity,
                 }
                 for modified_path in applied.modified_files:
@@ -687,6 +704,39 @@ class ProposalExecutor:
                 else error.code
             )
             failed = TerminalTaskError(code, str(error))
+            evidence_set_digest = add_failed_evidence_set().digest
+            digest_map = {item.item.kind: item.item.artifact_digest for item in evidence}
+            self._proposal_store.mark_validation_failed(
+                proposal_id,
+                lease.task_id,
+                lease.lease_token,
+                self._clock(),
+                failed.code,
+                digest_map.get("schematic_semantic_diff"),
+                evidence_set_digest,
+                {"error_code": failed.code, "artifact_digests": digest_map},
+                tuple(evidence),
+            )
+            raise failed from error
+        except (
+            ComponentModuleBindingNotFoundError,
+            ComponentModuleBindingKicadMajorMismatchError,
+            ComponentModuleBindingDigestMismatchError,
+        ) as error:
+            command_execution_record: dict[str, object] = {
+                "stage": "bound_module_resolution",
+                "binding_id": error.binding_id,
+            }
+            for field in (
+                "module_revision_id",
+                "frozen_manifest_digest",
+                "observed_manifest_digest",
+            ):
+                value = getattr(error, field, None)
+                if value is not None:
+                    command_execution_record[field] = value
+            command_execution_data = canonical_json_bytes(command_execution_record)
+            failed = TerminalTaskError(error.code, str(error))
             evidence_set_digest = add_failed_evidence_set().digest
             digest_map = {item.item.kind: item.item.artifact_digest for item in evidence}
             self._proposal_store.mark_validation_failed(

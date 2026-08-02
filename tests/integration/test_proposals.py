@@ -25,6 +25,7 @@ from pcbflow.validation import ProjectCopyLimitError, assert_project_tree_safe
 from pcbflow.tables import ArtifactRow, EvidenceRow, TaskRow
 from sqlalchemy import update
 from pcbflow.tasks import TerminalTaskError
+from tests.component_fixtures import build_component_directory
 
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
 PASSING_ERC = b'{"version":"1.0","source":"board.kicad_sch","violations":[]}'
@@ -278,6 +279,29 @@ def _instantiate_batch(project, requirement_set) -> bytes:
     return json.dumps(value, separators=(",", ":")).encode()
 
 
+def _bound_instantiate_batch(project, requirement_set, binding_id: str) -> bytes:
+    value = json.loads(_instantiate_batch(project, requirement_set))
+    value["batch_id"] = "bat_execute_bound_status_led"
+    value["idempotency_key"] = "execute-bound-status-led"
+    command = value["commands"][0]
+    command["batch_id"] = "bat_execute_bound_status_led"
+    command["command_id"] = "cmd_execute_bound_status_led"
+    command["idempotency_key"] = "execute-bound-status-led:1"
+    payload = command["operation"]["payload"]
+    command["operation"] = {
+        "type": "schematic.instantiate_bound_module",
+        "payload": {
+            "component_module_binding_id": binding_id,
+            "instance_name": "STATUS_LED",
+            "target_sheet_ref": payload["target_sheet_ref"],
+            "parameter_bindings": payload["parameter_bindings"],
+            "port_bindings": payload["port_bindings"],
+            "placement_slot": payload["placement_slot"],
+        },
+    }
+    return json.dumps(value, separators=(",", ":")).encode()
+
+
 def test_proposal_rejects_provenance_for_unknown_frozen_requirement(
     tmp_path: Path,
 ) -> None:
@@ -346,6 +370,167 @@ def test_worker_builds_one_reviewable_candidate_and_complete_evidence(tmp_path: 
             MetricName.ADAPTER_EXECUTION_TOTAL,
         } <= metric_names
         assert _snapshot(source) == source_before
+    finally:
+        container.dispose()
+
+
+def test_worker_records_the_resolved_bound_module_in_capability_evidence(
+    tmp_path: Path,
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    container = build_container(
+        _settings(tmp_path, fixtures / "modules"),
+        kicad_override=FakeProposalKicad(),
+        clock=lambda: NOW,
+    )
+    try:
+        component_directory = build_component_directory(
+            tmp_path / "bound-component", include_model=True
+        )
+        component = container.components.import_revision(
+            component_directory / "component.yaml", "bound-status-led-component"
+        )
+        binding = container.component_module_bindings.bind(
+            component.id, 9, "modrev_status_led_v1", "bound-status-led-binding"
+        )
+        _source, project, requirement_set = _prepare(container, tmp_path)
+        proposal = container.proposals.create(
+            _bound_instantiate_batch(project, requirement_set, binding.id),
+            "execute-bound-status-led",
+        )
+
+        assert container.worker.run_once()
+
+        ready = container.proposal_store.get(proposal.id)
+        evidence = next(
+            item
+            for item in container.evidence.list_for_project(project.id)
+            if item.task_id == proposal.task_id
+            and item.kind == "adapter_capability_report"
+        )
+        with container.artifacts.open(evidence.artifact_digest) as artifact:
+            report = json.loads(artifact.read())
+
+        assert ready.status is ProposalStatus.READY_FOR_REVIEW
+        assert report["bound_module_resolutions"] == [
+            {
+                "binding_id": binding.id,
+                "component_revision_id": binding.component_revision_id,
+                "kicad_major": 9,
+                "module_revision_id": binding.module_revision_id,
+                "frozen_manifest_digest": binding.module_manifest_digest,
+                "live_manifest_digest": binding.module_manifest_digest,
+            }
+        ]
+    finally:
+        container.dispose()
+
+
+def test_catalog_digest_drift_fails_before_candidate_publication(
+    tmp_path: Path,
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    catalog_root = tmp_path / "drifted-modules"
+    shutil.copytree(fixtures / "modules", catalog_root)
+    container = build_container(
+        _settings(tmp_path, catalog_root),
+        kicad_override=FakeProposalKicad(),
+        clock=lambda: NOW,
+    )
+    try:
+        component_directory = build_component_directory(
+            tmp_path / "drift-component", include_model=True
+        )
+        component = container.components.import_revision(
+            component_directory / "component.yaml", "drift-status-led-component"
+        )
+        binding = container.component_module_bindings.bind(
+            component.id, 9, "modrev_status_led_v1", "drift-status-led-binding"
+        )
+        module_manifest = catalog_root / "status-led-v1" / "module.yaml"
+        module_manifest.write_text(
+            module_manifest.read_text(encoding="utf-8").replace(
+                "name: Status LED", "name: Drifted Status LED"
+            ),
+            encoding="utf-8",
+        )
+        source, project, requirement_set = _prepare(container, tmp_path)
+        source_before = _snapshot(source)
+        proposal = container.proposals.create(
+            _bound_instantiate_batch(project, requirement_set, binding.id),
+            "execute-bound-status-led",
+        )
+
+        assert container.worker.run_once()
+
+        failed = container.proposal_store.get(proposal.id)
+        evidence = next(
+            item
+            for item in container.evidence.list_for_project(project.id)
+            if item.task_id == proposal.task_id and item.kind == "command_execution_log"
+        )
+        with container.artifacts.open(evidence.artifact_digest) as artifact:
+            command_log = json.loads(artifact.read())
+
+        assert failed.status is ProposalStatus.VALIDATION_FAILED
+        assert failed.last_error_code == "COMPONENT_MODULE_BINDING_DIGEST_MISMATCH"
+        assert failed.candidate_revision is None
+        assert _snapshot(source) == source_before
+        assert container.revisions.resolve_proposal_ref(project.id, proposal.id) is None
+        assert command_log["stage"] == "bound_module_resolution"
+        assert command_log["binding_id"] == binding.id
+        assert str(catalog_root) not in json.dumps(command_log)
+    finally:
+        container.dispose()
+
+
+@pytest.mark.parametrize(
+    ("binding_kicad_major", "expected_code"),
+    (
+        (None, "COMPONENT_MODULE_BINDING_NOT_FOUND"),
+        (10, "COMPONENT_MODULE_BINDING_KICAD_MAJOR_MISMATCH"),
+    ),
+)
+def test_bound_module_resolution_errors_are_terminal_before_candidate_creation(
+    tmp_path: Path,
+    binding_kicad_major: int | None,
+    expected_code: str,
+) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    container = build_container(
+        _settings(tmp_path, fixtures / "modules"),
+        kicad_override=FakeProposalKicad(),
+        clock=lambda: NOW,
+    )
+    try:
+        binding_id = "compmod_missing"
+        if binding_kicad_major is not None:
+            component_directory = build_component_directory(
+                tmp_path / "mismatch-component", include_model=True
+            )
+            component = container.components.import_revision(
+                component_directory / "component.yaml", "mismatch-status-led-component"
+            )
+            binding = container.component_module_bindings.bind(
+                component.id,
+                binding_kicad_major,
+                "modrev_status_led_v1",
+                "mismatch-status-led-binding",
+            )
+            binding_id = binding.id
+        _source, project, requirement_set = _prepare(container, tmp_path)
+        proposal = container.proposals.create(
+            _bound_instantiate_batch(project, requirement_set, binding_id),
+            "execute-bound-status-led",
+        )
+
+        assert container.worker.run_once()
+
+        failed = container.proposal_store.get(proposal.id)
+        assert failed.status is ProposalStatus.VALIDATION_FAILED
+        assert failed.last_error_code == expected_code
+        assert failed.candidate_revision is None
+        assert container.revisions.resolve_proposal_ref(project.id, proposal.id) is None
     finally:
         container.dispose()
 

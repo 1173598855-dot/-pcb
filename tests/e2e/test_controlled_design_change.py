@@ -25,6 +25,7 @@ from pcbflow.proposals import (
     NoFaults,
     _fault_active,
 )
+from tests.component_fixtures import build_component_directory
 
 
 PASSING_ERC = b'{"version":"1.0","source":"board.kicad_sch","violations":[]}'
@@ -118,6 +119,26 @@ def _command_batch(project: dict, requirement_set: dict) -> dict:
             }
         ],
     }
+
+
+def _bound_command_batch(
+    project: dict, requirement_set: dict, binding_id: str
+) -> dict:
+    batch = _command_batch(project, requirement_set)
+    command = batch["commands"][0]
+    payload = command["operation"]["payload"]
+    command["operation"] = {
+        "type": "schematic.instantiate_bound_module",
+        "payload": {
+            "component_module_binding_id": binding_id,
+            "instance_name": "STATUS_LED",
+            "target_sheet_ref": payload["target_sheet_ref"],
+            "parameter_bindings": payload["parameter_bindings"],
+            "port_bindings": payload["port_bindings"],
+            "placement_slot": payload["placement_slot"],
+        },
+    }
+    return batch
 
 
 def test_rest_contract_covers_adopt_requirements_g1_and_proposal_queue(
@@ -357,6 +378,101 @@ def test_rest_proposal_worker_diff_and_accept(
 
     try:
         asyncio.run(exercise())
+    finally:
+        container.dispose()
+
+
+def test_rest_worker_executes_a_bound_module_proposal(tmp_path: Path) -> None:
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    source = tmp_path / "bound-source"
+    shutil.copytree(fixtures / "kicad" / "controlled-design", source)
+    settings = Settings.from_env(
+        {
+            "PCBFLOW_DATA_DIR": str(tmp_path / "data"),
+            "PCBFLOW_MODULE_CATALOG_DIR": str(fixtures / "modules"),
+        }
+    )
+    container = build_container(settings, kicad_override=FakeKicad9())
+    component_directory = build_component_directory(
+        tmp_path / "bound-component", include_model=True
+    )
+    component = container.components.import_revision(
+        component_directory / "component.yaml", "rest-bound-component"
+    )
+    binding = container.component_module_bindings.bind(
+        component.id, 9, "modrev_status_led_v1", "rest-bound-module-binding"
+    )
+
+    async def exercise() -> tuple[str, str]:
+        async with _client(container) as client:
+            created = await client.post(
+                "/api/v1/projects",
+                headers={"Idempotency-Key": "rest-bound-project"},
+                json={"name": "Controller", "source_path": str(source)},
+            )
+            project_id = created.json()["id"]
+            adopted = await client.post(
+                f"/api/v1/projects/{project_id}:adopt",
+                headers={"Idempotency-Key": "rest-bound-adopt"},
+            )
+            requirement_payload = yaml.safe_load(
+                (fixtures / "requirements" / "reference-controller.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            imported = await client.post(
+                f"/api/v1/projects/{project_id}/requirement-sets",
+                headers={"Idempotency-Key": "rest-bound-requirements"},
+                json=requirement_payload,
+            )
+            submitted = await client.post(
+                f"/api/v1/requirement-sets/{imported.json()['id']}:submit",
+                headers={"Idempotency-Key": "rest-bound-submit"},
+            )
+            approved = await client.post(
+                "/api/v1/approvals",
+                headers={"Idempotency-Key": "rest-bound-approval"},
+                json={
+                    "subject_type": "requirement_set",
+                    "subject_id": submitted.json()["id"],
+                    "subject_digest": submitted.json()["subject_digest"],
+                    "decision": "approve",
+                    "actor": {"type": "human", "id": "local-user"},
+                    "comment": "approved",
+                },
+            )
+            project = (await client.get("/api/v1/projects")).json()[0]
+            queued = await client.post(
+                f"/api/v1/projects/{project_id}/proposals",
+                headers={"Idempotency-Key": "api-proposal"},
+                json=_bound_command_batch(project, approved.json(), binding.id),
+            )
+
+            assert created.status_code == 201
+            assert adopted.status_code == 200
+            assert imported.status_code == 201
+            assert submitted.status_code == 200
+            assert approved.status_code == 200
+            assert queued.status_code == 202
+            proposal_id = queued.json()["id"]
+            assert (await client.post("/api/v1/worker:run-once")).json() == {
+                "handled": True
+            }
+            proposal = (await client.get(f"/api/v1/proposals/{proposal_id}")).json()
+            assert proposal["status"] == "ready_for_review"
+            return project_id, proposal_id
+
+    try:
+        project_id, proposal_id = asyncio.run(exercise())
+        evidence = next(
+            item
+            for item in container.evidence.list_for_project(project_id)
+            if item.task_id == container.proposal_store.get(proposal_id).task_id
+            and item.kind == "adapter_capability_report"
+        )
+        with container.artifacts.open(evidence.artifact_digest) as artifact:
+            report = json.loads(artifact.read())
+        assert report["bound_module_resolutions"][0]["binding_id"] == binding.id
     finally:
         container.dispose()
 
