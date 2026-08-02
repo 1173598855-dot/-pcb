@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from pcbflow.component_binding_store import (
@@ -18,6 +19,44 @@ def _import_component(container):
     return container.components.import_revision(
         component_directory / "component.yaml", "component-binding-import"
     )
+
+
+def _binding_inputs(component_revision_id: str, **overrides: object) -> dict[str, object]:
+    inputs: dict[str, object] = {
+        "component_revision_id": component_revision_id,
+        "kicad_major": 10,
+        "module_revision_id": "modrev_status_led_v1",
+        "module_manifest_digest": "sha256:" + "a" * 64,
+        "idempotency_key": "component-module-binding",
+    }
+    inputs.update(overrides)
+    return inputs
+
+
+def _force_integrity_error_after_hidden_binding_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scalar = Session.scalar
+    flush = Session.flush
+    hidden_reads = 0
+    failed_flushes = 0
+
+    def hide_initial_reads(self, statement, *args, **kwargs):
+        nonlocal hidden_reads
+        if hidden_reads < 2:
+            hidden_reads += 1
+            return None
+        return scalar(self, statement, *args, **kwargs)
+
+    def fail_flush(self, *args, **kwargs):
+        nonlocal failed_flushes
+        if failed_flushes == 0:
+            failed_flushes += 1
+            raise IntegrityError("INSERT", {}, RuntimeError("forced duplicate"))
+        return flush(self, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "scalar", hide_initial_reads)
+    monkeypatch.setattr(Session, "flush", fail_flush)
 
 
 def test_store_creates_replays_and_lists_bindings(container) -> None:
@@ -40,6 +79,25 @@ def test_store_creates_replays_and_lists_bindings(container) -> None:
 
     assert replayed == created
     assert store.list_for_component_revision(component.id) == (created,)
+
+
+@pytest.mark.parametrize(
+    ("kicad_major", "idempotency_key", "message"),
+    ((0, "component-module-invalid", "positive"), (10, "", "idempotency")),
+)
+def test_store_rejects_invalid_write_inputs(
+    container, kicad_major: int, idempotency_key: str, message: str
+) -> None:
+    store = ComponentModuleBindingStore(container.sessions)
+
+    with pytest.raises(ValueError, match=message):
+        store.create(
+            **_binding_inputs(
+                "comprev_unused",
+                kicad_major=kicad_major,
+                idempotency_key=idempotency_key,
+            )
+        )
 
 
 def test_store_rejects_conflicting_slot_and_idempotency_key(container) -> None:
@@ -68,6 +126,77 @@ def test_store_rejects_conflicting_slot_and_idempotency_key(container) -> None:
             module_revision_id="modrev_other_v1",
             module_manifest_digest="sha256:" + "b" * 64,
             idempotency_key="component-module-slot-1",
+        )
+
+
+def test_store_recovers_identical_binding_after_integrity_error(
+    container, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    component = _import_component(container)
+    store = ComponentModuleBindingStore(container.sessions)
+    inputs = _binding_inputs(component.id, idempotency_key="component-module-race")
+    winner = store.create(**inputs)
+
+    _force_integrity_error_after_hidden_binding_reads(monkeypatch)
+
+    assert store.create(**inputs) == winner
+
+
+def test_store_recovers_idempotency_conflict_after_integrity_error(
+    container, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    component = _import_component(container)
+    store = ComponentModuleBindingStore(container.sessions)
+    store.create(
+        **_binding_inputs(component.id, idempotency_key="component-module-race")
+    )
+
+    _force_integrity_error_after_hidden_binding_reads(monkeypatch)
+
+    with pytest.raises(IdempotencyConflictError):
+        store.create(
+            **_binding_inputs(
+                component.id,
+                module_revision_id="modrev_other_v1",
+                module_manifest_digest="sha256:" + "b" * 64,
+                idempotency_key="component-module-race",
+            )
+        )
+
+
+def test_store_recovers_slot_conflict_after_integrity_error(
+    container, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    component = _import_component(container)
+    store = ComponentModuleBindingStore(container.sessions)
+    store.create(
+        **_binding_inputs(component.id, idempotency_key="component-module-winner")
+    )
+
+    _force_integrity_error_after_hidden_binding_reads(monkeypatch)
+
+    with pytest.raises(ComponentModuleBindingConflictError):
+        store.create(
+            **_binding_inputs(
+                component.id,
+                module_revision_id="modrev_other_v1",
+                module_manifest_digest="sha256:" + "b" * 64,
+                idempotency_key="component-module-race",
+            )
+        )
+
+
+def test_store_reraises_unrecovered_integrity_error(
+    container, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    component = _import_component(container)
+    store = ComponentModuleBindingStore(container.sessions)
+
+    _force_integrity_error_after_hidden_binding_reads(monkeypatch)
+
+    with pytest.raises(IntegrityError, match="forced duplicate"):
+        store.create(
+            **_binding_inputs(component.id, idempotency_key="component-module-race")
         )
 
 
