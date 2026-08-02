@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 from datetime import UTC, datetime
 from pathlib import Path
+import shutil
 from threading import Event, Thread
 from types import SimpleNamespace
 
@@ -235,6 +236,77 @@ def test_workspace_copier_rejects_non_regular_entries(
         WorkspaceCopier(max_files=10, max_bytes=100).copy(
             source, tmp_path / "destination"
         )
+
+
+def test_workspace_copier_rejects_child_replaced_before_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pcbflow import workspaces
+
+    source = tmp_path / "source"
+    source.mkdir()
+    child = source / "allowed.txt"
+    child.write_bytes(b"public")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"secret")
+    destination = tmp_path / "destination"
+    real_open = workspaces.os.open
+    replaced = False
+
+    def replace_child(path, flags, *args, **kwargs):
+        nonlocal replaced
+        if Path(path).name == child.name and not replaced:
+            replaced = True
+            child.unlink()
+            try:
+                child.symlink_to(outside)
+            except OSError:
+                pytest.skip("symlink creation is unavailable on this platform")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(workspaces.os, "open", replace_child)
+    with pytest.raises((WorkspaceLinkError, WorkspaceEntryError)):
+        WorkspaceCopier(max_files=10, max_bytes=100).copy(source, destination)
+
+    assert not destination.exists()
+
+
+def test_workspace_copier_counts_bytes_read_after_initial_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pcbflow import workspaces
+
+    source = tmp_path / "source"
+    source.mkdir()
+    child = source / "growing.txt"
+    child.write_bytes(b"12345")
+    destination = tmp_path / "destination"
+    grown = False
+    real_os_open = workspaces.os.open
+    real_shutil_open = getattr(shutil, "open", open)
+
+    def grow_once() -> None:
+        nonlocal grown
+        if not grown:
+            grown = True
+            child.write_bytes(b"123456")
+
+    def grow_os_open(path, flags, *args, **kwargs):
+        if Path(path).name == child.name:
+            grow_once()
+        return real_os_open(path, flags, *args, **kwargs)
+
+    def grow_shutil_open(path, mode="r", *args, **kwargs):
+        if Path(path) == child and "r" in mode:
+            grow_once()
+        return real_shutil_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(workspaces.os, "open", grow_os_open)
+    monkeypatch.setattr(shutil, "open", grow_shutil_open, raising=False)
+    with pytest.raises(WorkspaceLimitError, match="total_bytes"):
+        WorkspaceCopier(max_files=10, max_bytes=5).copy(source, destination)
+
+    assert not destination.exists()
 
 
 class _CapturingRunner:
