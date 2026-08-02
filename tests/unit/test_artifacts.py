@@ -1,10 +1,28 @@
+import io
 import hashlib
 from pathlib import Path
 
 import pytest
 from hypothesis import HealthCheck, given, settings, strategies as st
 
-from pcbflow.artifacts import ArtifactConflictError, ContentAddressedStore, InvalidDigestError
+from pcbflow.artifacts import (
+    ArtifactConflictError,
+    ArtifactDigestMismatchError,
+    ArtifactSizeLimitError,
+    ContentAddressedStore,
+    InvalidDigestError,
+    _STREAM_CHUNK_BYTES,
+)
+
+
+class RecordingReader(io.BytesIO):
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data)
+        self.request_sizes: list[int] = []
+
+    def read(self, size: int = -1) -> bytes:
+        self.request_sizes.append(size)
+        return super().read(size)
 
 
 def test_put_rejects_a_corrupted_existing_digest_object(tmp_path: Path) -> None:
@@ -60,3 +78,60 @@ def test_verify_detects_corrupted_artifact(tmp_path: Path) -> None:
     descriptor.path.write_bytes(b"corrupted")
 
     assert not store.verify(descriptor.digest)
+
+
+def test_stage_stream_reads_bounded_chunks_and_publishes_content(tmp_path: Path) -> None:
+    store = ContentAddressedStore(tmp_path / "artifacts")
+    payload = b"x" * (_STREAM_CHUNK_BYTES * 2 + 17)
+    expected = f"sha256:{hashlib.sha256(payload).hexdigest()}"
+    reader = RecordingReader(payload)
+
+    staged = store.stage_stream(
+        reader,
+        "application/octet-stream",
+        expected_digest=expected,
+        max_bytes=len(payload),
+    )
+
+    assert all(0 < size <= _STREAM_CHUNK_BYTES for size in reader.request_sizes)
+    assert not store._path(expected).exists()
+    descriptor = staged.publish()
+    assert descriptor.digest == expected
+    assert descriptor.size == len(payload)
+    assert descriptor.path.read_bytes() == payload
+
+
+def test_stage_stream_rejects_bad_digest_or_limit_without_publishing(
+    tmp_path: Path,
+) -> None:
+    store = ContentAddressedStore(tmp_path / "artifacts")
+    payload = b"trusted bytes"
+    expected = f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+    with pytest.raises(ArtifactDigestMismatchError):
+        store.stage_stream(
+            io.BytesIO(payload),
+            "application/octet-stream",
+            expected_digest="sha256:" + "0" * 64,
+        )
+    with pytest.raises(ArtifactSizeLimitError):
+        store.stage_stream(
+            io.BytesIO(payload),
+            "application/octet-stream",
+            expected_digest=expected,
+            max_bytes=len(payload) - 1,
+        )
+
+    staging = store.root / ".staging"
+    assert not store._path(expected).exists()
+    assert not staging.exists() or not any(staging.iterdir())
+
+
+def test_stage_stream_discards_duplicate_staging_file_after_publish(tmp_path: Path) -> None:
+    store = ContentAddressedStore(tmp_path / "artifacts")
+    payload = b"duplicate content"
+
+    store.stage_stream(io.BytesIO(payload), "application/octet-stream").publish()
+    store.stage_stream(io.BytesIO(payload), "application/octet-stream").publish()
+
+    assert not any((store.root / ".staging").iterdir())
