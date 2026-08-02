@@ -246,3 +246,98 @@ def test_settings_reject_non_sqlite_database_urls(
                 artifact_dir=tmp_path / "artifacts",
                 kicad_cli=None,
             )
+
+
+def test_worker_settings_have_sensible_defaults(tmp_path: Path) -> None:
+    settings = Settings.from_env({"PCBFLOW_DATA_DIR": str(tmp_path)})
+    assert settings.worker_slots == 1
+    assert settings.worker_poll_seconds == 5
+    assert settings.worker_poll_max_seconds == 60
+    assert settings.worker_heartbeat_seconds == 30
+    assert settings.worker_shutdown_timeout_seconds == 300
+    assert settings.worker_id is None
+
+
+def test_worker_settings_parse_from_environment(tmp_path: Path) -> None:
+    settings = Settings.from_env(
+        {
+            "PCBFLOW_DATA_DIR": str(tmp_path),
+            "PCBFLOW_WORKER_SLOTS": "3",
+            "PCBFLOW_WORKER_POLL_SECONDS": "10",
+            "PCBFLOW_WORKER_POLL_MAX_SECONDS": "120",
+            "PCBFLOW_WORKER_HEARTBEAT_SECONDS": "45",
+            "PCBFLOW_WORKER_SHUTDOWN_TIMEOUT_SECONDS": "600",
+            "PCBFLOW_WORKER_ID": "test-worker-1",
+        }
+    )
+    assert settings.worker_slots == 3
+    assert settings.worker_poll_seconds == 10
+    assert settings.worker_poll_max_seconds == 120
+    assert settings.worker_heartbeat_seconds == 45
+    assert settings.worker_shutdown_timeout_seconds == 600
+    assert settings.worker_id == "test-worker-1"
+
+
+def test_worker_settings_reject_invalid_slot_count(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="worker_slots must be between 1 and 10"):
+        Settings.from_env(
+            {
+                "PCBFLOW_DATA_DIR": str(tmp_path),
+                "PCBFLOW_WORKER_SLOTS": "0",
+            }
+        )
+    with pytest.raises(ValueError, match="worker_slots must be between 1 and 10"):
+        Settings.from_env(
+            {
+                "PCBFLOW_DATA_DIR": str(tmp_path),
+                "PCBFLOW_WORKER_SLOTS": "11",
+            }
+        )
+
+
+def test_worker_settings_reject_invalid_poll_intervals(tmp_path: Path) -> None:
+    with pytest.raises(
+        ValueError, match="worker_poll_seconds must not exceed worker_poll_max_seconds"
+    ):
+        Settings.from_env(
+            {
+                "PCBFLOW_DATA_DIR": str(tmp_path),
+                "PCBFLOW_WORKER_POLL_SECONDS": "70",
+                "PCBFLOW_WORKER_POLL_MAX_SECONDS": "60",
+            }
+        )
+
+
+def test_worker_settings_reject_excessive_heartbeat(tmp_path: Path) -> None:
+    with pytest.raises(
+        ValueError, match="worker_heartbeat_seconds must be less than half"
+    ):
+        Settings.from_env(
+            {
+                "PCBFLOW_DATA_DIR": str(tmp_path),
+                "PCBFLOW_TASK_LEASE_SECONDS": "120",
+                "PCBFLOW_PROCESS_TIMEOUT_SECONDS": "60",
+                "PCBFLOW_WORKER_HEARTBEAT_SECONDS": "70",
+            }
+        )
+
+
+def test_worker_settings_reject_invalid_shutdown_timeout(tmp_path: Path) -> None:
+    with pytest.raises(
+        ValueError, match="worker_shutdown_timeout_seconds must be between 60 and 600"
+    ):
+        Settings.from_env(
+            {
+                "PCBFLOW_DATA_DIR": str(tmp_path),
+                "PCBFLOW_WORKER_SHUTDOWN_TIMEOUT_SECONDS": "30",
+            }
+        )
+    with pytest.raises(
+        ValueError, match="worker_shutdown_timeout_seconds must be between 60 and 600"
+    ):
+        Settings.from_env(
+            {
+                "PCBFLOW_DATA_DIR": str(tmp_path),
+                "PCBFLOW_WORKER_SHUTDOWN_TIMEOUT_SECONDS": "700",
+            }
+        )

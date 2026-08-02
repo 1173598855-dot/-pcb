@@ -27,6 +27,12 @@ class Settings:
     task_retry_max_delay_seconds: int = 300
     max_kicad_design_file_bytes: int = 50_000_000
     max_kicad_report_bytes: int = 10_000_000
+    worker_slots: int = 1
+    worker_poll_seconds: int = 5
+    worker_poll_max_seconds: int = 60
+    worker_heartbeat_seconds: int = 30
+    worker_shutdown_timeout_seconds: int = 300
+    worker_id: str | None = None
 
     def __post_init__(self) -> None:
         scheme = self.database_url.split(":", 1)[0]
@@ -55,6 +61,20 @@ class Settings:
         if self.task_retry_base_seconds > self.task_retry_max_delay_seconds:
             raise ValueError(
                 "task retry base delay must not exceed retry maximum delay"
+            )
+        if not (1 <= self.worker_slots <= 10):
+            raise ValueError("worker_slots must be between 1 and 10")
+        if self.worker_poll_seconds > self.worker_poll_max_seconds:
+            raise ValueError(
+                "worker_poll_seconds must not exceed worker_poll_max_seconds"
+            )
+        if self.worker_heartbeat_seconds >= self.task_lease_seconds / 2:
+            raise ValueError(
+                "worker_heartbeat_seconds must be less than half the lease duration"
+            )
+        if not (60 <= self.worker_shutdown_timeout_seconds <= 600):
+            raise ValueError(
+                "worker_shutdown_timeout_seconds must be between 60 and 600"
             )
         if self.remote_mode and not self.api_token:
             raise ValueError("remote_mode requires api_token")
@@ -133,6 +153,18 @@ class Settings:
             max_kicad_report_bytes=int(
                 values.get("PCBFLOW_MAX_KICAD_REPORT_BYTES", "10000000")
             ),
+            worker_slots=int(values.get("PCBFLOW_WORKER_SLOTS", "1")),
+            worker_poll_seconds=int(values.get("PCBFLOW_WORKER_POLL_SECONDS", "5")),
+            worker_poll_max_seconds=int(
+                values.get("PCBFLOW_WORKER_POLL_MAX_SECONDS", "60")
+            ),
+            worker_heartbeat_seconds=int(
+                values.get("PCBFLOW_WORKER_HEARTBEAT_SECONDS", "30")
+            ),
+            worker_shutdown_timeout_seconds=int(
+                values.get("PCBFLOW_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "300")
+            ),
+            worker_id=values.get("PCBFLOW_WORKER_ID") or None,
         )
 
     def ensure_directories(self) -> None:
