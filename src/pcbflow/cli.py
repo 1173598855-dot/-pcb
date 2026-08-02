@@ -41,6 +41,7 @@ from pcbflow.revisions import (
     ProjectWorktreeDirtyError,
 )
 from pcbflow.schematic.modules import ModuleRevisionNotFoundError
+from pcbflow.worker_health import get_worker_health
 
 app = typer.Typer(no_args_is_help=True)
 project_app = typer.Typer(no_args_is_help=True)
@@ -49,12 +50,14 @@ requirements_app = typer.Typer(no_args_is_help=True)
 approval_app = typer.Typer(no_args_is_help=True)
 proposal_app = typer.Typer(no_args_is_help=True)
 component_app = typer.Typer(no_args_is_help=True)
+worker_app = typer.Typer(no_args_is_help=True)
 app.add_typer(project_app, name="project")
 app.add_typer(task_app, name="task")
 app.add_typer(requirements_app, name="requirements")
 app.add_typer(approval_app, name="approval")
 app.add_typer(proposal_app, name="proposal")
 app.add_typer(component_app, name="component")
+app.add_typer(worker_app, name="worker")
 
 
 class CliInputError(ValueError):
@@ -738,6 +741,40 @@ def list_evidence(
         _emit(evidence, json_output, f"{len(evidence)} evidence record(s)")
     finally:
         container.dispose()
+
+
+@worker_app.command("health")
+def worker_health(
+    worker_file: Annotated[str, typer.Option("--file")] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Check worker health status. Use --file to read from worker state file."""
+    if worker_file:
+        # Read health from persisted worker state file
+        import json as jsonlib
+        from pathlib import Path
+
+        state_path = Path(worker_file)
+        if not state_path.exists():
+            _abort(CliInputError("FILE_NOT_FOUND", f"worker state file not found: {worker_file}"))
+
+        try:
+            with state_path.open("r") as f:
+                state = jsonlib.load(f)
+            _emit(state, json_output, f"Worker {state.get('worker_id', 'unknown')}: {state.get('status', 'unknown')}")
+        except Exception as error:
+            _abort(CliInputError("FILE_READ_ERROR", f"failed to read worker state: {error}"))
+    else:
+        # Check current environment health
+        container = _build()
+        try:
+            from pcbflow.worker_service import WorkerService
+
+            worker = WorkerService(container)
+            health = get_worker_health(worker)
+            _emit(health, json_output, f"Worker {health.worker_id}: {health.status}")
+        finally:
+            container.dispose()
 
 
 @app.command("serve")

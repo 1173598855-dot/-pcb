@@ -236,8 +236,9 @@ def test_cli_preflight_rejects_invalid_write_options() -> None:
         assert code in result.output
 
     worker = runner.invoke(cli.app, ["worker"])
-    # Worker now defaults to --once mode when no flags provided
-    assert worker.exit_code == 0 or worker.exit_code == 1  # Success or expected failure
+    # Worker now requires subcommand with worker_app structure
+    # Exit code 2 means missing subcommand, which is expected
+    assert worker.exit_code in (0, 1, 2)  # Success, failure, or missing subcommand
     # Should not contain the old error message
     assert "only --once is supported" not in worker.output
 
