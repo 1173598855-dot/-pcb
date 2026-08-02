@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import stat
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO, Iterator
 
 
 KICAD_LOCK_SUFFIXES = (
@@ -66,11 +69,52 @@ class WorkspaceEntryError(ValueError):
 
 def assert_supported_entry(path: Path) -> os.stat_result:
     metadata = path.lstat()
-    attributes = getattr(metadata, "st_file_attributes", 0)
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-    if path.is_symlink() or attributes & reparse_flag:
+    if _is_link_or_reparse_point(metadata):
         raise WorkspaceLinkError(str(path))
     return metadata
+
+
+def _is_link_or_reparse_point(metadata: os.stat_result) -> bool:
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag)
+
+
+def _same_entry(left: os.stat_result, right: os.stat_result) -> bool:
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+@contextmanager
+def open_regular_file(path: Path) -> Iterator[BinaryIO]:
+    before = assert_supported_entry(path)
+    if not stat.S_ISREG(before.st_mode):
+        raise WorkspaceEntryError(str(path))
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if os.name != "nt":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise WorkspaceLinkError(str(path)) from error
+        raise
+
+    try:
+        opened = os.fstat(descriptor)
+        if _is_link_or_reparse_point(opened):
+            raise WorkspaceLinkError(str(path))
+        if not stat.S_ISREG(opened.st_mode) or not _same_entry(before, opened):
+            raise WorkspaceEntryError(str(path))
+        after = assert_supported_entry(path)
+        if not _same_entry(opened, after):
+            raise WorkspaceEntryError(str(path))
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            descriptor = -1
+            yield stream
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
 
 
 class WorkspaceCopier:

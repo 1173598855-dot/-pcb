@@ -17,6 +17,11 @@ from pcbflow.artifacts import (
     ContentAddressedStore,
 )
 from pcbflow.canonical import canonical_digest, canonical_json_bytes
+from pcbflow.workspaces import (
+    WorkspaceEntryError,
+    WorkspaceLinkError,
+    open_regular_file,
+)
 
 if TYPE_CHECKING:
     from pcbflow.component_store import ComponentRevisionStore
@@ -203,31 +208,22 @@ def _declared_asset_path(root: Path, asset_path: str) -> Path:
     return candidate
 
 
-def _validate_regular_file(path: Path) -> None:
-    try:
-        metadata = path.lstat()
-    except OSError as error:
-        raise ValueError("component evidence file cannot be read") from error
-    if _is_link_or_reparse_point(metadata) or not stat.S_ISREG(metadata.st_mode):
-        raise ValueError("component evidence must be a regular non-link file")
-
-
 @contextmanager
 def _open_regular_file(path: Path) -> Iterator[BinaryIO]:
-    _validate_regular_file(path)
-    try:
-        with path.open("rb") as stream:
-            yield stream
-    except OSError as error:
-        raise ValueError("component evidence file cannot be read") from error
-
-
-def _read_regular_file(path: Path, max_bytes: int) -> bytes:
-    with _open_regular_file(path) as stream:
-        data = stream.read(max_bytes + 1)
-    if len(data) > max_bytes:
-        raise ValueError("component import exceeds size limit")
-    return data
+    with ExitStack() as stack:
+        try:
+            stream = stack.enter_context(open_regular_file(path))
+        except WorkspaceLinkError as error:
+            raise ValueError(
+                "component evidence must be a regular non-link file"
+            ) from error
+        except WorkspaceEntryError as error:
+            raise ValueError(
+                "component evidence must be a regular non-link file"
+            ) from error
+        except OSError as error:
+            raise ValueError("component evidence file cannot be read") from error
+        yield stream
 
 
 def _is_link_or_reparse_point(metadata: object) -> bool:
@@ -236,6 +232,14 @@ def _is_link_or_reparse_point(metadata: object) -> bool:
     return stat.S_ISLNK(getattr(metadata, "st_mode")) or bool(
         attributes & reparse_flag
     )
+
+
+def _read_regular_file(path: Path, max_bytes: int) -> bytes:
+    with _open_regular_file(path) as stream:
+        data = stream.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError("component import exceeds size limit")
+    return data
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):

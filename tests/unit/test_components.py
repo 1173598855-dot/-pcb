@@ -1,15 +1,35 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
+from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.components import (
+    ComponentRevisionService,
     ComponentRevision,
     component_manifest_digest,
     load_component_manifest,
 )
-from tests.component_fixtures import component_yaml
+from tests.component_fixtures import build_component_directory, component_yaml
+
+
+class _NeverCalledStore:
+    def create(self, **_kwargs):
+        pytest.fail("component store must not be called after import failure")
+
+
+def _component_service(
+    tmp_path: Path,
+) -> tuple[ComponentRevisionService, ContentAddressedStore]:
+    artifacts = ContentAddressedStore(tmp_path / "artifacts")
+    return (
+        ComponentRevisionService(
+            _NeverCalledStore(), artifacts, max_bytes=1_000_000
+        ),
+        artifacts,
+    )
 
 
 def test_load_component_manifest_accepts_verified_canonical_input() -> None:
@@ -95,3 +115,55 @@ def test_component_revision_rejects_non_verified_status() -> None:
             idempotency_key="key",
             created_at=datetime.now(),
         )
+
+
+def test_component_import_rejects_asset_replaced_after_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pcbflow import workspaces
+
+    component_directory = build_component_directory(tmp_path / "component")
+    asset = component_directory / "symbol.kicad_sym"
+    outside = tmp_path / "outside.kicad_sym"
+    outside.write_bytes(asset.read_bytes())
+    service, artifacts = _component_service(tmp_path)
+    real_open = workspaces.os.open
+
+    def replace_after_validation(path, flags, *args, **kwargs):
+        if Path(path) == asset:
+            asset.unlink()
+            try:
+                asset.symlink_to(outside)
+            except OSError:
+                pytest.skip("symlink creation is unavailable on this platform")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(workspaces.os, "open", replace_after_validation)
+    with pytest.raises(ValueError, match="regular non-link file"):
+        service.import_revision(component_directory / "component.yaml", "asset-race")
+
+    staging = artifacts.root / ".staging"
+    assert not staging.exists() or not any(staging.iterdir())
+
+
+def test_component_import_propagates_storage_error_from_asset_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    component_directory = build_component_directory(tmp_path / "component")
+    service, artifacts = _component_service(tmp_path)
+    real_stage_stream = artifacts.stage_stream
+    calls = 0
+
+    def fail_on_second_stage(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("disk full")
+        return real_stage_stream(*args, **kwargs)
+
+    monkeypatch.setattr(artifacts, "stage_stream", fail_on_second_stage)
+    with pytest.raises(OSError, match="disk full"):
+        service.import_revision(component_directory / "component.yaml", "storage-race")
+
+    staging = artifacts.root / ".staging"
+    assert not staging.exists() or not any(staging.iterdir())
