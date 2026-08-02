@@ -367,6 +367,23 @@ class RequirementStore:
 4. 调用按 task kind 注册的 handler。
 5. 把结果标记为 succeeded、retry_wait 或 failed_terminal。
 
+Worker 有两种模式：
+
+**单任务模式（`worker --once`）**：执行一个任务后退出，用于测试和开发。
+
+**常驻模式（`worker --run`）**：持续处理任务队列直到收到 SIGTERM/SIGINT。常驻 Worker 具备：
+- 指数退避：队列为空时使用可配置的退避策略（默认 5 秒基础延迟，最大 60 秒）
+- 优雅关闭：等待活动任务完成（默认最长 300 秒）
+- 信号处理：响应 SIGTERM 和 SIGINT
+- 结构化日志：记录 worker 生命周期事件
+
+配置常驻 Worker：
+- `PCBFLOW_WORKER_SLOTS`: 并发槽位（默认 1，当前仅支持单槽）
+- `PCBFLOW_WORKER_POLL_SECONDS`: 空闲轮询间隔（默认 5）
+- `PCBFLOW_WORKER_POLL_MAX_SECONDS`: 最大退避间隔（默认 60）
+- `PCBFLOW_WORKER_HEARTBEAT_SECONDS`: 租约续期间隔（默认 30）
+- `PCBFLOW_WORKER_SHUTDOWN_TIMEOUT_SECONDS`: 关闭超时（默认 300）
+
 Handler 通过：
 
 - `RetryableTaskError` 表示可重试外部故障。

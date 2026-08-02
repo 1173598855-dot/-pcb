@@ -118,13 +118,29 @@ $task = .\.venv\Scripts\pcbflow.exe validate $project.id `
 $task.id
 ```
 
-### 3. 运行一个 Worker 任务
+### 3. 运行 Worker 任务
+
+生产环境使用常驻 Worker：
+
+```powershell
+.\.venv\Scripts\pcbflow.exe worker --run
+```
+
+开发和测试使用单任务模式：
 
 ```powershell
 .\.venv\Scripts\pcbflow.exe worker --once --json
 ```
 
-Worker 会先检查工程中的链接、Windows reparse point、文件数和总字节数，再把工程复制到 `.pcbflow-data/workspaces/` 下的临时隔离目录。ERC/DRC 只针对该副本运行，临时目录在任务结束后删除。
+常驻 Worker 持续处理任务队列，直到收到 SIGTERM 或 SIGINT 信号。Worker 会等待活动任务完成后优雅关闭（默认最长 300 秒）。
+
+配置 Worker 行为：
+
+- `PCBFLOW_WORKER_SLOTS`: 并发任务槽位数（默认：1）
+- `PCBFLOW_WORKER_POLL_SECONDS`: 空闲轮询间隔（默认：5）
+- `PCBFLOW_WORKER_POLL_MAX_SECONDS`: 最大退避间隔（默认：60）
+- `PCBFLOW_WORKER_HEARTBEAT_SECONDS`: 租约续期间隔（默认：30）
+- `PCBFLOW_WORKER_SHUTDOWN_TIMEOUT_SECONDS`: 优雅关闭超时（默认：300）
 
 ### 4. 查询任务、证据与 Finding
 
