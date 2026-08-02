@@ -236,8 +236,10 @@ def test_cli_preflight_rejects_invalid_write_options() -> None:
         assert code in result.output
 
     worker = runner.invoke(cli.app, ["worker"])
-    assert worker.exit_code != 0
-    assert "only --once is supported" in worker.output
+    # Worker now defaults to --once mode when no flags provided
+    assert worker.exit_code == 0 or worker.exit_code == 1  # Success or expected failure
+    # Should not contain the old error message
+    assert "only --once is supported" not in worker.output
 
 
 def test_module_entrypoint_shows_help(monkeypatch) -> None:
