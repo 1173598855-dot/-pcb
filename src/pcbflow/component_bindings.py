@@ -50,11 +50,18 @@ class ComponentModuleBindingKicadMajorMismatchError(ValueError):
     code = "COMPONENT_MODULE_BINDING_KICAD_MAJOR_MISMATCH"
 
     def __init__(
-        self, binding_id: str, binding_kicad_major: int, active_kicad_major: int
+        self,
+        binding_id: str,
+        binding_kicad_major: int,
+        active_kicad_major: int,
+        module_revision_id: str,
+        frozen_manifest_digest: str,
     ) -> None:
         self.binding_id = binding_id
         self.binding_kicad_major = binding_kicad_major
         self.active_kicad_major = active_kicad_major
+        self.module_revision_id = module_revision_id
+        self.frozen_manifest_digest = frozen_manifest_digest
         super().__init__(
             f"component module binding {binding_id} KiCad major "
             f"{binding_kicad_major} does not match active KiCad major "
@@ -147,7 +154,11 @@ class ComponentModuleBindingService:
         binding = self._binding_store.get(binding_id)
         if binding.kicad_major != kicad_major:
             raise ComponentModuleBindingKicadMajorMismatchError(
-                binding.id, binding.kicad_major, kicad_major
+                binding.id,
+                binding.kicad_major,
+                kicad_major,
+                binding.module_revision_id,
+                binding.module_manifest_digest,
             )
         if self._module_catalog is None:
             raise ModuleCatalogUnavailableError("module catalog is not configured")

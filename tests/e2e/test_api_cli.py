@@ -937,6 +937,12 @@ def test_api_and_cli_submit_and_execute_bound_module_batches(
     binding = container.component_module_bindings.bind(
         component.id, 9, "modrev_status_led_v1", "api-cli-bound-module-binding"
     )
+    mismatched_binding = container.component_module_bindings.bind(
+        component.id,
+        10,
+        "modrev_status_led_v1",
+        "api-cli-bound-module-binding-mismatch",
+    )
     project = container.projects.create("Controller", source, "api-cli-bound-project")
     managed = container.revisions.adopt(project.id, "api-cli-bound-adopt")
     requirements = (fixtures / "requirements" / "reference-controller.yaml").read_bytes()
@@ -994,6 +1000,33 @@ def test_api_and_cli_submit_and_execute_bound_module_batches(
             }
             shown = await client.get(f"/api/v1/proposals/{queued.json()['id']}")
             assert shown.json()["status"] == "ready_for_review"
+
+            failing_batch = _bound_command_batch(
+                project_view, requirement_set_view, mismatched_binding.id
+            )
+            failing_batch["batch_id"] = "bat_api_bound_mismatch"
+            failing_batch["idempotency_key"] = "api-bound-mismatch"
+            failing_command = failing_batch["commands"][0]
+            failing_command["batch_id"] = "bat_api_bound_mismatch"
+            failing_command["command_id"] = "cmd_api_bound_mismatch"
+            failing_command["idempotency_key"] = "api-bound-mismatch:1"
+            failed = await client.post(
+                f"/api/v1/projects/{managed.id}/proposals",
+                headers={"Idempotency-Key": "api-bound-mismatch"},
+                json=failing_batch,
+            )
+            assert failed.status_code == 202, failed.text
+            assert (await client.post("/api/v1/worker:run-once")).json() == {
+                "handled": True
+            }
+            failed_status = await client.get(
+                f"/api/v1/proposals/{failed.json()['id']}"
+            )
+            assert failed_status.json()["status"] == "validation_failed"
+            assert (
+                failed_status.json()["last_error_code"]
+                == "COMPONENT_MODULE_BINDING_KICAD_MAJOR_MISMATCH"
+            )
             return queued.json()["id"]
 
     def build_for_test():
@@ -1037,5 +1070,46 @@ def test_api_and_cli_submit_and_execute_bound_module_batches(
         )
         assert shown.exit_code == 0, shown.output
         assert json.loads(shown.stdout)["status"] == "ready_for_review"
+
+        cli_failure_batch = _bound_command_batch(
+            project_view, requirement_set_view, mismatched_binding.id
+        )
+        cli_failure_batch["batch_id"] = "bat_cli_bound_mismatch"
+        cli_failure_batch["idempotency_key"] = "cli-bound-mismatch"
+        cli_failure_command = cli_failure_batch["commands"][0]
+        cli_failure_command["batch_id"] = "bat_cli_bound_mismatch"
+        cli_failure_command["command_id"] = "cmd_cli_bound_mismatch"
+        cli_failure_command["idempotency_key"] = "cli-bound-mismatch:1"
+        failure_batch_file = tmp_path / "bound-cli-failure-commands.json"
+        failure_batch_file.write_text(
+            json.dumps(cli_failure_batch), encoding="utf-8"
+        )
+        failed = runner.invoke(
+            app,
+            [
+                "proposal",
+                "create",
+                managed.id,
+                "--file",
+                str(failure_batch_file),
+                "--idempotency-key",
+                "cli-bound-mismatch",
+                "--json",
+            ],
+            env=env,
+        )
+        assert failed.exit_code == 0, failed.output
+        failed_proposal = json.loads(failed.stdout)
+        worked = runner.invoke(app, ["worker", "--once", "--json"], env=env)
+        assert worked.exit_code == 0, worked.output
+        failed_status = runner.invoke(
+            app, ["proposal", "show", failed_proposal["id"], "--json"], env=env
+        )
+        assert failed_status.exit_code == 0, failed_status.output
+        assert json.loads(failed_status.stdout)["status"] == "validation_failed"
+        assert (
+            json.loads(failed_status.stdout)["last_error_code"]
+            == "COMPONENT_MODULE_BINDING_KICAD_MAJOR_MISMATCH"
+        )
     finally:
         container.dispose()

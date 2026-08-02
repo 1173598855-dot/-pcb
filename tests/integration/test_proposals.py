@@ -527,10 +527,27 @@ def test_bound_module_resolution_errors_are_terminal_before_candidate_creation(
         assert container.worker.run_once()
 
         failed = container.proposal_store.get(proposal.id)
+        evidence = next(
+            item
+            for item in container.evidence.list_for_project(project.id)
+            if item.task_id == proposal.task_id
+            and item.kind == "command_execution_log"
+        )
+        with container.artifacts.open(evidence.artifact_digest) as artifact:
+            command_log = json.loads(artifact.read())
+
         assert failed.status is ProposalStatus.VALIDATION_FAILED
         assert failed.last_error_code == expected_code
         assert failed.candidate_revision is None
         assert container.revisions.resolve_proposal_ref(project.id, proposal.id) is None
+        assert command_log["stage"] == "bound_module_resolution"
+        assert command_log["binding_id"] == binding_id
+        if binding_kicad_major is not None:
+            assert command_log["module_revision_id"] == binding.module_revision_id
+            assert (
+                command_log["frozen_manifest_digest"]
+                == binding.module_manifest_digest
+            )
     finally:
         container.dispose()
 
