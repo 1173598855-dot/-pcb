@@ -228,7 +228,7 @@ remain disabled; run the worker in a trusted local process instead.
 
 - 仅支持 SQLite 与显式验证的 KiCad 9.x/10.x 写入契约。
 - 每种设计文件在工程根目录中最多一个；多个根原理图或 PCB 会被判定为歧义工程。
-- Phase 2A 支持四种受控操作：模块实例化、属性设置、封装指派和标签添加。
+- Phase 2A 支持五种受控操作：直接模块实例化、绑定模块实例化、属性设置、封装指派和标签添加。
 - Worker 当前只提供 `--once` 单任务模式。
 - 不修改注册的外部 `source_path`，不生成制造资料，不访问供应商网络。
 - 不包含 AI 自动设计、任意元件/导线编辑、PCB 布局、Web UI、PostgreSQL 或常驻 Worker。
@@ -312,7 +312,7 @@ projects.
 
 Phase 2A is the implemented write-capable slice. It adopts an external KiCad
 project into managed Git, freezes a structured requirement set at G1, executes
-one of the four strict schematic operations in an isolated worktree, records
+one of the five strict schematic operations in an isolated worktree, records
 semantic and tool evidence, and waits for an explicit accept or reject
 decision. The registered `source_path` is never written after adoption.
 
@@ -330,7 +330,7 @@ python -m venv .venv
 
 Set `PCBFLOW_KICAD_CLI` to the selected KiCad 9 or 10 `kicad-cli` executable when it is not on
 `PATH`. `PCBFLOW_MODULE_CATALOG_DIR` points at verified module revisions used by
-the instantiate operation.
+the module-instantiation operations.
 
 ### Adopt, freeze G1, and propose
 
@@ -354,8 +354,70 @@ $p = .\.venv\Scripts\python.exe -m pcbflow project add C:\work\controller `
 
 Create a JSON DesignCommand batch with `proposal create`. The supported
 operation types are `schematic.instantiate_module`,
-`schematic.set_property`, `schematic.assign_footprint`, and
-`schematic.add_label`.
+`schematic.instantiate_bound_module`, `schematic.set_property`,
+`schematic.assign_footprint`, and `schematic.add_label`.
+
+Use `schematic.instantiate_bound_module` when a component/module binding has
+already frozen the allowed module for its KiCad major. The binding operation is
+strict: its payload contains `component_module_binding_id`, not a caller-chosen
+`module_revision_id` or manifest digest.
+
+```json
+{
+  "schema_version": "1.0",
+  "batch_id": "bat_bound_status_led",
+  "project_id": "prj_controller",
+  "base_revision": "git:1111111111111111111111111111111111111111",
+  "requirement_set_id": "reqset_controller_v1",
+  "idempotency_key": "bound-status-led",
+  "actor": {"type": "human", "id": "reviewer"},
+  "intent": "Instantiate the frozen status LED",
+  "risk": "medium",
+  "commands": [
+    {
+      "schema_version": "1.0",
+      "command_id": "cmd_bound_status_led",
+      "batch_id": "bat_bound_status_led",
+      "project_id": "prj_controller",
+      "base_revision": "git:1111111111111111111111111111111111111111",
+      "idempotency_key": "bound-status-led:1",
+      "actor": {"type": "human", "id": "reviewer"},
+      "intent": "Instantiate the frozen status LED",
+      "risk": "medium",
+      "preconditions": [],
+      "operation": {
+        "type": "schematic.instantiate_bound_module",
+        "payload": {
+          "component_module_binding_id": "compmod_status_led_v1",
+          "instance_name": "STATUS_LED",
+          "target_sheet_ref": {
+            "kind": "sheet",
+            "sheet_uuid": "00000000-0000-0000-0000-000000000001",
+            "object_uuid": "00000000-0000-0000-0000-000000000001",
+            "pin_number": null
+          },
+          "parameter_bindings": {"LED_VALUE": "GREEN"},
+          "port_bindings": {},
+          "placement_slot": "auto"
+        }
+      },
+      "required_validations": ["semantic_diff"],
+      "provenance": {
+        "requirement_ids": ["REQ-FUNC-001"],
+        "evidence_ids": [],
+        "module_revision_ids": ["modrev_status_led_v1"]
+      }
+    }
+  ]
+}
+```
+
+At execution, the Worker reloads the immutable binding and the configured
+catalog. The active KiCad major and live verified manifest digest must match
+the binding; otherwise the proposal records a terminal resolution error and
+does not write the schematic or create a candidate revision or proposal ref.
+The existing proposal REST and CLI batch submission interfaces handle this
+operation without a new endpoint or command.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pcbflow proposal create <project-id> `
