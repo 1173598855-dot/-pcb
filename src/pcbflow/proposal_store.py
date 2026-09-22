@@ -429,7 +429,16 @@ class ProposalStore:
                 if changed.rowcount != 1: raise StaleLeaseError(task_id)
             self._register_evidence(session, row, evidence, now, proposal_id)
             batch = session.get(DesignCommandBatchRow, row.command_batch_id)
-            payload = audit_payload(actor_type="service", actor_id="pcbflow", action="proposal.validate", object_type="change_proposal", object_id=proposal_id, before_digest=batch.canonical_digest if batch else None, after_digest=evidence_set_digest, result="failed")
+            payload = audit_payload(
+                actor_type="service",
+                actor_id="pcbflow",
+                action="proposal.validate",
+                object_type="change_proposal",
+                object_id=proposal_id,
+                before_digest=batch.canonical_digest if batch else None,
+                after_digest=evidence_set_digest,
+                result="failed",
+            )
             payload.update({"project_id": row.project_id, "task_id": task_id, "error_code": error_code})
             session.add(OutboxEventRow(id=new_id("evt"), aggregate_type="change_proposal", aggregate_id=proposal_id,
                 event_type="proposal.validation_failed", payload_json=payload, created_at=now, processed_at=None, attempt_count=0, last_error_code=None))

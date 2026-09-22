@@ -652,7 +652,17 @@ class ProposalExecutor:
                 evidence_set_digest = evidence_set_descriptor.digest
                 if not all(self._artifacts.verify(item.item.artifact_digest) for item in evidence):
                     raise TerminalTaskError("CANDIDATE_VALIDATION_FAILED", "candidate evidence integrity check failed")
-                review = proposal_review_digest(proposal_id=proposal_id, project_id=project.id, base_revision=batch.base_revision, candidate_revision=candidate.revision, candidate_snapshot_digest=candidate.snapshot_digest, requirement_set_digest=requirements.canonical_digest, semantic_diff_digest=semantic_descriptor.digest, evidence_set_digest=evidence_set_digest, adapter_capability_digest=capability_descriptor.digest)
+                review = proposal_review_digest(
+                    proposal_id=proposal_id,
+                    project_id=project.id,
+                    base_revision=batch.base_revision,
+                    candidate_revision=candidate.revision,
+                    candidate_snapshot_digest=candidate.snapshot_digest,
+                    requirement_set_digest=requirements.canonical_digest,
+                    semantic_diff_digest=semantic_descriptor.digest,
+                    evidence_set_digest=evidence_set_digest,
+                    adapter_capability_digest=capability_descriptor.digest,
+                )
                 result = {
                     "proposal_id": proposal_id,
                     "candidate_revision": candidate.revision,

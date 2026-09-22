@@ -171,11 +171,3 @@ __all__ = [
     "ThermalPolicy",
 ]
 
-
-def _validate_string_tuple(values: tuple[str, ...], context: str) -> None:
-    if type(values) is not tuple or not values:
-        raise ValueError(f"{context} must be a non-empty tuple")
-    if any(type(item) is not str or not item or item != item.strip() for item in values):
-        raise ValueError(f"{context} must contain canonical strings")
-    if len(values) != len(set(values)):
-        raise ValueError(f"{context} must be unique")

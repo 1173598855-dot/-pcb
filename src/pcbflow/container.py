@@ -222,7 +222,24 @@ def build_container(
         metrics=metric_sink,
         monotonic=monotonic,
     )
-    proposal_executor = ProposalExecutor(proposal_store=proposal_store, command_batches=command_batches, projects=projects, requirements=requirement_store, tasks=tasks, revisions=revisions, adapter=adapter, kicad=selected_kicad, artifacts=artifacts, evidence=evidence, clock=clock, metrics=metric_sink, monotonic=monotonic, faults=fault_injector, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes)
+    proposal_executor = ProposalExecutor(
+        proposal_store=proposal_store,
+        command_batches=command_batches,
+        projects=projects,
+        requirements=requirement_store,
+        tasks=tasks,
+        revisions=revisions,
+        adapter=adapter,
+        kicad=selected_kicad,
+        artifacts=artifacts,
+        evidence=evidence,
+        clock=clock,
+        metrics=metric_sink,
+        monotonic=monotonic,
+        faults=fault_injector,
+        max_files=settings.max_project_files,
+        max_bytes=settings.max_project_bytes,
+    )
     proposal_decisions = ProposalDecisionService(
         proposal_store=proposal_store,
         command_batches=command_batches,

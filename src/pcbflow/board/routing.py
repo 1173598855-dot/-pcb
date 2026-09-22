@@ -7,7 +7,8 @@ from dataclasses import dataclass, replace
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.domain import NormalizedFinding
 
-from .ir import BoardObjectId, BoardSnapshot, Net, PointUm, RectUm, RouteSegment, Via
+from .ir import BoardObjectId, BoardSnapshot, Net, Pad, PointUm, RectUm, RouteSegment, Via
+from . import geometry
 from .operations import RouteNets
 from .rulepack import ManufacturingRulePack
 from .validation import BoardRuleChecker
@@ -594,8 +595,8 @@ def _point_near_segment(point: PointUm, start: PointUm, end: PointUm, clearance:
     return _point_segment_within(point, start, end, clearance)
 
 
-def _pad_bounds(pad: object) -> RectUm:
-    return RectUm(pad.position.x - pad.size_x_um // 2, pad.position.y - pad.size_y_um // 2, pad.size_x_um, pad.size_y_um)  # type: ignore[attr-defined]
+def _pad_bounds(pad: Pad) -> RectUm:
+    return geometry.pad_bounds(pad)
 
 
 def _segment_bounds(route: RouteSegment) -> RectUm:
@@ -603,93 +604,35 @@ def _segment_bounds(route: RouteSegment) -> RectUm:
 
 
 def _net_clearance(rulepack: ManufacturingRulePack, snapshot: BoardSnapshot, net_id: BoardObjectId | None) -> int:
-    if net_id is None:
-        return 0
-    try:
-        return rulepack.net_class(snapshot.net(net_id).net_class).clearance_um
-    except KeyError:
-        return 0
+    return geometry.net_clearance(rulepack, snapshot, net_id)
 
 
 def _point_distance_within(point: PointUm, other: PointUm, distance: int) -> bool:
-    dx, dy = point.x - other.x, point.y - other.y
-    return dx * dx + dy * dy <= distance * distance
+    return geometry.point_distance_within(point, other, distance)
 
 
 def _point_segment_within(point: PointUm, start: PointUm, end: PointUm, distance: int) -> bool:
-    dx, dy = end.x - start.x, end.y - start.y
-    if point.x < min(start.x, end.x) - distance or point.x > max(start.x, end.x) + distance or point.y < min(start.y, end.y) - distance or point.y > max(start.y, end.y) + distance:
-        return False
-    px, py = point.x - start.x, point.y - start.y
-    length_sq = dx * dx + dy * dy
-    if length_sq == 0:
-        return _point_distance_within(point, start, distance)
-    projection = px * dx + py * dy
-    if projection <= 0:
-        return _point_distance_within(point, start, distance)
-    if projection >= length_sq:
-        return _point_distance_within(point, end, distance)
-    cross = px * dy - py * dx
-    return cross * cross <= distance * distance * length_sq
+    return geometry.point_segment_within(point, start, end, distance)
 
 
 def _segments_within(a: PointUm, b: PointUm, c: PointUm, d: PointUm, distance: int) -> bool:
-    if max(min(a.x, b.x), min(c.x, d.x)) > min(max(a.x, b.x), max(c.x, d.x)) + distance:
-        return False
-    if max(min(a.y, b.y), min(c.y, d.y)) > min(max(a.y, b.y), max(c.y, d.y)) + distance:
-        return False
-    if _segments_intersect(a, b, c, d):
-        return True
-    return (
-        _point_segment_within(a, c, d, distance)
-        or _point_segment_within(b, c, d, distance)
-        or _point_segment_within(c, a, b, distance)
-        or _point_segment_within(d, a, b, distance)
-    )
+    return geometry.segments_within(a, b, c, d, distance)
 
 
 def _point_rect_within(point: PointUm, rect: RectUm, distance: int) -> bool:
-    dx = max(rect.x - point.x, 0, point.x - (rect.x + rect.width))
-    dy = max(rect.y - point.y, 0, point.y - (rect.y + rect.height))
-    return dx * dx + dy * dy <= distance * distance
+    return geometry.point_rect_within(point, rect, distance)
 
 
 def _segment_rect_within(start: PointUm, end: PointUm, rect: RectUm, distance: int = 0) -> bool:
-    if max(rect.x - distance, min(start.x, end.x)) > min(rect.x + rect.width + distance, max(start.x, end.x)):
-        return False
-    if max(rect.y - distance, min(start.y, end.y)) > min(rect.y + rect.height + distance, max(start.y, end.y)):
-        return False
-    if _segment_intersects_rect(start, end, rect):
-        return True
-    corners = (
-        PointUm(rect.x, rect.y),
-        PointUm(rect.x + rect.width, rect.y),
-        PointUm(rect.x + rect.width, rect.y + rect.height),
-        PointUm(rect.x, rect.y + rect.height),
-    )
-    if any(_point_segment_within(corner, start, end, distance) for corner in corners):
-        return True
-    return any(
-        _point_segment_within(start, left, right, distance)
-        or _point_segment_within(end, left, right, distance)
-        for left, right in zip(corners, corners[1:] + corners[:1], strict=True)
-    )
+    return geometry.segment_rect_within(start, end, rect, distance)
 
 
 def _segment_intersects_rect(start: PointUm, end: PointUm, rect: RectUm) -> bool:
-    if rect.contains(start) or rect.contains(end):
-        return True
-    corners = (PointUm(rect.x, rect.y), PointUm(rect.x + rect.width, rect.y), PointUm(rect.x + rect.width, rect.y + rect.height), PointUm(rect.x, rect.y + rect.height))
-    return any(_segments_intersect(start, end, left, right) for left, right in zip(corners, corners[1:] + corners[:1], strict=True))
+    return geometry.segment_intersects_rect(start, end, rect)
 
 
 def _segments_intersect(a: PointUm, b: PointUm, c: PointUm, d: PointUm) -> bool:
-    def cross(p: PointUm, q: PointUm, r: PointUm) -> int:
-        return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
-    def between(p: PointUm, q: PointUm, r: PointUm) -> bool:
-        return min(p.x, r.x) <= q.x <= max(p.x, r.x) and min(p.y, r.y) <= q.y <= max(p.y, r.y)
-    first, second, third, fourth = cross(a, b, c), cross(a, b, d), cross(c, d, a), cross(c, d, b)
-    return (first == 0 and between(a, c, b)) or (second == 0 and between(a, d, b)) or (third == 0 and between(c, a, d)) or (fourth == 0 and between(c, b, d)) or ((first > 0) != (second > 0) and (third > 0) != (fourth > 0))
+    return geometry.segments_intersect(a, b, c, d)
 
 
 def _fresh_id(value: str, used: set[str]) -> BoardObjectId:
@@ -701,8 +644,33 @@ def _fresh_id(value: str, used: set[str]) -> BoardObjectId:
     return BoardObjectId(candidate)
 
 
-def _operation_key(snapshot_digest: str, rulepack_digest: str, seed: int, requested: tuple[BoardObjectId, ...], paths: list[RoutePathEvidence], removed: list[BoardObjectId]) -> str:
-    payload = {"objective_version": _OBJECTIVE_VERSION, "snapshot_digest": snapshot_digest, "rulepack_digest": rulepack_digest, "seed": seed, "requested": [str(item) for item in requested], "paths": [{"net": str(item.net_id), "score": item.score, "points": [(point.x, point.y, layer) for point, layer in zip(item.points, item.layers, strict=True)]} for item in paths], "removed": [str(item) for item in removed]}
+def _operation_key(
+    snapshot_digest: str,
+    rulepack_digest: str,
+    seed: int,
+    requested: tuple[BoardObjectId, ...],
+    paths: list[RoutePathEvidence],
+    removed: list[BoardObjectId],
+) -> str:
+    payload = {
+        "objective_version": _OBJECTIVE_VERSION,
+        "snapshot_digest": snapshot_digest,
+        "rulepack_digest": rulepack_digest,
+        "seed": seed,
+        "requested": [str(item) for item in requested],
+        "paths": [
+            {
+                "net": str(item.net_id),
+                "score": item.score,
+                "points": [
+                    (point.x, point.y, layer)
+                    for point, layer in zip(item.points, item.layers, strict=True)
+                ],
+            }
+            for item in paths
+        ],
+        "removed": [str(item) for item in removed],
+    }
     return "routing-" + hashlib.sha256(canonical_json_bytes(payload)).hexdigest()[:32]
 
 

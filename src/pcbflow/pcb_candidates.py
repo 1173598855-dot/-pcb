@@ -723,7 +723,20 @@ class PcbCandidateStore:
             raise RequestInvalidError("PCB_CANDIDATE_SOURCE_UNAVAILABLE")
         return self._revisions.snapshot_digest(source_path)
 
-    def create(self, *, project_id: str, base_revision: str, board_snapshot_digest: str, rulepack_digest: str, capability_digest: str, idempotency_key: str, base_snapshot_digest: str | None = None, operations: tuple[BoardOperation, ...] = (), algorithm_evidence: dict[str, Any] | None = None, require_capability: bool = True) -> PcbCandidate:
+    def create(
+        self,
+        *,
+        project_id: str,
+        base_revision: str,
+        board_snapshot_digest: str,
+        rulepack_digest: str,
+        capability_digest: str,
+        idempotency_key: str,
+        base_snapshot_digest: str | None = None,
+        operations: tuple[BoardOperation, ...] = (),
+        algorithm_evidence: dict[str, Any] | None = None,
+        require_capability: bool = True,
+    ) -> PcbCandidate:
         validate_idempotency_key(idempotency_key)
         validate_candidate_digest(
             base_snapshot_digest, field="base_snapshot_digest", allow_none=True

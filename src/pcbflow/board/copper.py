@@ -18,6 +18,8 @@ from .ir import (
     RouteSegment,
     Via,
 )
+from .ir import _validate_string_tuple
+from . import geometry
 from .operations import AddGroundStitching, CreateCopperZones, ThermalPolicy
 from .rulepack import CopperPolicy, ManufacturingRulePack
 from .validation import BoardRuleChecker
@@ -817,12 +819,7 @@ def _point_bounds(point: PointUm, radius: int) -> RectUm:
 
 
 def _pad_bounds(pad: Pad) -> RectUm:
-    return RectUm(
-        pad.position.x - pad.size_x_um // 2,
-        pad.position.y - pad.size_y_um // 2,
-        pad.size_x_um,
-        pad.size_y_um,
-    )
+    return geometry.pad_bounds(pad)
 
 
 def _net_clearance(
@@ -830,12 +827,7 @@ def _net_clearance(
     snapshot: BoardSnapshot,
     net_id: BoardObjectId | None,
 ) -> int:
-    if net_id is None:
-        return 0
-    try:
-        return rulepack.net_class(snapshot.net(net_id).net_class).clearance_um
-    except KeyError:
-        return 0
+    return geometry.net_clearance(rulepack, snapshot, net_id)
 
 
 def _rects_connected(left: RectUm, right: RectUm) -> bool:
@@ -845,102 +837,35 @@ def _rects_connected(left: RectUm, right: RectUm) -> bool:
 
 
 def _point_rect_within(point: PointUm, rect: RectUm, distance: int) -> bool:
-    dx = max(rect.x - point.x, 0, point.x - (rect.x + rect.width))
-    dy = max(rect.y - point.y, 0, point.y - (rect.y + rect.height))
-    return dx * dx + dy * dy <= distance * distance
+    return geometry.point_rect_within(point, rect, distance)
+
+
+def _rect_contains_circle(rect: RectUm, point: PointUm, radius: int) -> bool:
+    return geometry.rect_contains_circle(rect, point, radius)
 
 
 def _segment_rect_within(
     start: PointUm, end: PointUm, rect: RectUm, distance: int = 0
 ) -> bool:
-    if max(rect.x - distance, min(start.x, end.x)) > min(
-        rect.x + rect.width + distance, max(start.x, end.x)
-    ):
-        return False
-    if max(rect.y - distance, min(start.y, end.y)) > min(
-        rect.y + rect.height + distance, max(start.y, end.y)
-    ):
-        return False
-    if _segment_intersects_rect(start, end, rect):
-        return True
-    corners = (
-        PointUm(rect.x, rect.y),
-        PointUm(rect.x + rect.width, rect.y),
-        PointUm(rect.x + rect.width, rect.y + rect.height),
-        PointUm(rect.x, rect.y + rect.height),
-    )
-    if any(_point_segment_within(corner, start, end, distance) for corner in corners):
-        return True
-    return any(
-        _point_segment_within(start, left, right, distance)
-        or _point_segment_within(end, left, right, distance)
-        for left, right in zip(corners, corners[1:] + corners[:1], strict=True)
-    )
+    return geometry.segment_rect_within(start, end, rect, distance)
 
 
 def _segment_intersects_rect(start: PointUm, end: PointUm, rect: RectUm) -> bool:
-    if rect.contains(start) or rect.contains(end):
-        return True
-    corners = (
-        PointUm(rect.x, rect.y),
-        PointUm(rect.x + rect.width, rect.y),
-        PointUm(rect.x + rect.width, rect.y + rect.height),
-        PointUm(rect.x, rect.y + rect.height),
-    )
-    return any(
-        _segments_intersect(start, end, left, right)
-        for left, right in zip(corners, corners[1:] + corners[:1], strict=True)
-    )
+    return geometry.segment_intersects_rect(start, end, rect)
 
 
 def _segments_intersect(a: PointUm, b: PointUm, c: PointUm, d: PointUm) -> bool:
-    def cross(p: PointUm, q: PointUm, r: PointUm) -> int:
-        return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
-
-    def between(p: PointUm, q: PointUm, r: PointUm) -> bool:
-        return min(p.x, r.x) <= q.x <= max(p.x, r.x) and min(p.y, r.y) <= q.y <= max(p.y, r.y)
-
-    first, second = cross(a, b, c), cross(a, b, d)
-    third, fourth = cross(c, d, a), cross(c, d, b)
-    return (
-        (first == 0 and between(a, c, b))
-        or (second == 0 and between(a, d, b))
-        or (third == 0 and between(c, a, d))
-        or (fourth == 0 and between(c, b, d))
-        or ((first > 0) != (second > 0) and (third > 0) != (fourth > 0))
-    )
-
-
-def _rect_contains_circle(rect: RectUm, point: PointUm, radius: int) -> bool:
-    return (
-        point.x - radius >= rect.x
-        and point.y - radius >= rect.y
-        and point.x + radius <= rect.x + rect.width
-        and point.y + radius <= rect.y + rect.height
-    )
+    return geometry.segments_intersect(a, b, c, d)
 
 
 def _point_distance_within(point: PointUm, other: PointUm, distance: int) -> bool:
-    dx, dy = point.x - other.x, point.y - other.y
-    return dx * dx + dy * dy <= distance * distance
+    return geometry.point_distance_within(point, other, distance)
 
 
-def _point_segment_within(point: PointUm, start: PointUm, end: PointUm, distance: int) -> bool:
-    dx, dy = end.x - start.x, end.y - start.y
-    if point.x < min(start.x, end.x) - distance or point.x > max(start.x, end.x) + distance:
-        return False
-    if point.y < min(start.y, end.y) - distance or point.y > max(start.y, end.y) + distance:
-        return False
-    length_sq = dx * dx + dy * dy
-    if length_sq == 0:
-        return _point_distance_within(point, start, distance)
-    projection = (point.x - start.x) * dx + (point.y - start.y) * dy
-    if projection <= 0:
-        return _point_distance_within(point, start, distance)
-    if projection >= length_sq:
-        return _point_distance_within(point, end, distance)
-    cross = (point.x - start.x) * dy - (point.y - start.y) * dx
-    return cross * cross <= distance * distance * length_sq
+def _point_segment_within(
+    point: PointUm, start: PointUm, end: PointUm, distance: int
+) -> bool:
+    return geometry.point_segment_within(point, start, end, distance)
 
 
 def _finding(
@@ -956,15 +881,6 @@ def _finding(
         subject=str(subject),
         message=message,
     )
-
-
-def _validate_string_tuple(values: tuple[str, ...], context: str) -> None:
-    if type(values) is not tuple or not values:
-        raise ValueError(f"{context} must be a non-empty tuple")
-    if any(type(item) is not str or not item or item != item.strip() for item in values):
-        raise ValueError(f"{context} must contain canonical strings")
-    if len(values) != len(set(values)):
-        raise ValueError(f"{context} must be unique")
 
 
 __all__ = [
