@@ -1,5 +1,23 @@
 # PCBFlow
 
+## 2026-08-10 实测完成记录
+
+BoardIR/算法、候选生命周期、G3/G4 fixture、API/CLI、KiCad 10 语义回归和发布
+打包实现均已完成；这不等同于真实嘉立创专业版发布就绪。本机官方 LCEDA 写入桥、原生
+DRC 和真实发布能力仍未验证，所有真实 LCEDA 输出继续 fail-closed，并保持
+`boardir_only`。
+
+完整回归在 Python 3.13.9 / pytest 8.4.2 上通过：`832 passed, 1 skipped`，耗时
+589.92 s，总覆盖率 `90.00%`（12611 statements，1261 misses），带
+`--cov-fail-under=90` 的命令退出码为 0。唯一跳过项为
+`tests/contract/test_lceda_pro_adapter.py:16`，原因：
+`LCEDA Pro write capability unverified: lceda_pro_not_found`。真实硬件/制造人工复审
+和官方 LCEDA bridge 验证均未进行，因此 release-capable LCEDA pipeline 尚未完成。
+
+隔离正向 fixture 已走通 `g3_approved -> ready_for_g4 -> released`，但它仅证明 fixture
+路径，绝不是 LCEDA 原生写入或发布证明。迁移往返必须以编程方式覆盖 `sqlalchemy.url`
+指向隔离数据库；不要对默认 `alembic.ini` URL 执行降级。
+
 ## KiCad compatibility matrix
 
 | KiCad major | Profile | CLI validation | Controlled schematic writes |
@@ -11,9 +29,51 @@
 PCBFLOW_KICAD_CLI selects one active executable. doctor --json reports its
 exact version, executable digest, major, profile id, and profile revision.
 
+## LCEDA Pro capability gate
+
+`pcbflow doctor --json` reports both `kicad_cli` and `lceda_pro`. Use the
+dedicated read-only probe for the LCEDA Pro result:
+
+```powershell
+.\.venv\Scripts\pcbflow.exe eda probe lceda-pro --json
+```
+
+Set `PCBFLOW_LCEDA_PRO_EXECUTABLE` to the GUI executable to collect its
+version and SHA-256 digest. `PCBFLOW_LCEDA_PRO_OFFICIAL_BRIDGE` records the
+candidate vendor-supported CLI, API, or plugin path, but configuring either
+path alone never verifies writes. `write_verified` becomes `true` only when a
+version-identified official bridge passes the frozen minimal
+create/save/reopen/readback fixture contract. That contract can prove only
+the bridge's explicitly reported `snapshot`, `create_candidate`, and
+`apply_operations` results; `run_drc` and `export_release` require separate
+official evidence. Until then every requested native write fails with
+`LCEDA_PRO_WRITE_CAPABILITY_UNVERIFIED`; discovery and the two probe commands
+never write a native project.
+
+## PCB 候选生命周期
+
+`POST /api/v1/projects/{project_id}/pcb-candidates` 和
+`pcbflow pcb candidate create` 目前只创建 `boardir_only` 候选。候选会冻结
+项目 authority、base revision/snapshot、BoardIR snapshot、规则包、capability
+evidence、操作序列和算法 seed；相同项目和幂等键只能重放完全相同的冻结输入，
+显式改变 BoardIR、capability 或 seed 会返回 `IDEMPOTENCY_CONFLICT`。
+
+候选行与内部 `pcb.generate_candidate` 任务在同一数据库事务中写入。Worker
+在取消或租约失效时不会发布候选状态：取消会镜像为 `cancelled`，租约在状态写入
+后失效时会通过版本比较恢复旧状态。不存在的候选任务以
+`PCB_CANDIDATE_NOT_FOUND` 终止。未通过官方 bridge capability gate 时，任务只会
+保留 `boardir_only` 结果并标记为受阻，不会写入原生嘉立创专业版工程。
+
+创建时传入的 capability digest 必须与 capability gate 返回的已验证证据完全一致；
+KiCad authority、缺少 authority 或缺少验证证据都会以
+`PCB_CAPABILITY_GATE_BLOCKED` 拒绝。CLI 与 REST 共用候选输入约束，拒绝负 seed、
+重复或空白 net id 以及非 SHA-256 digest。无论候选状态或调用方的 JSON 声明为何，
+当前公开视图的 `output_kind` 均固定为 `boardir_only`，直到后续阶段持久化并验证原生
+候选或发布证据为止。
+
 PCBFlow 是一个本地优先、以证据为中心的自动化 PCB 开发工作流。当前仓库已实现 Phase 0/1 的只读验证切片和 Phase 2A 的受控设计变更内核：注册本地 KiCad 工程，探测 `kicad-cli`，在隔离副本中运行 ERC/DRC，持久化任务、原始证据和规范化 Finding，并将项目采纳到受管 Git，冻结 G1 需求，在隔离 worktree 中执行受控原理图命令，记录语义 Diff 与 ERC 证据后接受或拒绝候选。
 
-Phase 2A 不会修改注册的外部 `source_path`；制造资料、PCB 自动布局布线、AI 设计、Web UI、常驻 Worker 和嘉立创导出不在当前范围内。
+Phase 2A 不会修改注册的外部 `source_path`。当前仓库在后续增量中已实现 BoardIR-only 的 PCB 布局、受限布线、GND 铜皮规划、候选 G3/G4 和制造发布清单校验；这不等同于真实 LCEDA Pro 原生写入、原生 DRC 或真实制造发布。AI 设计和 Web UI 仍不在当前范围内。
 
 ## 前置条件
 
@@ -139,7 +199,7 @@ $task.id
 - `PCBFLOW_WORKER_SLOTS`: 并发任务槽位数（默认：1）
 - `PCBFLOW_WORKER_POLL_SECONDS`: 空闲轮询间隔（默认：5）
 - `PCBFLOW_WORKER_POLL_MAX_SECONDS`: 最大退避间隔（默认：60）
-- `PCBFLOW_WORKER_HEARTBEAT_SECONDS`: 租约续期间隔（默认：30）
+- `PCBFLOW_WORKER_HEARTBEAT_SECONDS`: 租约续期间隔（默认：30；短租约未显式配置时自动缩短）
 - `PCBFLOW_WORKER_SHUTDOWN_TIMEOUT_SECONDS`: 优雅关闭超时（默认：300）
 
 检查 Worker 健康状态：
@@ -148,17 +208,23 @@ $task.id
 .\.venv\Scripts\pcbflow.exe worker health --json
 ```
 
-返回 Worker 状态、槽位使用情况、已完成/失败任务数和运行时长。
+该命令读取同一 `PCBFLOW_DATA_DIR` 中由 `worker --run` 原子发布的
+`worker-state.json`，返回 Worker 状态、槽位使用情况、已完成/失败任务数和运行时长。
+未检测到运行中的常驻 Worker 快照时，命令以稳定错误码
+`WORKER_STATE_UNAVAILABLE` 退出；也可以使用 `--file` 检查指定快照文件。
 
 ### 4. 查询任务、证据与 Finding
 
 ```powershell
 .\.venv\Scripts\pcbflow.exe task show $task.id --json
+.\.venv\Scripts\pcbflow.exe task cancel $task.id --reason "operator requested cancellation" --idempotency-key cancel-task-001 --json
 .\.venv\Scripts\pcbflow.exe evidence $project.id --json
 .\.venv\Scripts\pcbflow.exe findings $project.id --json
 ```
 
 关闭终端或结束当前进程后，再次运行 `task show` 会读取同一 SQLite 数据库。若 Worker 在任务处于 `leased` 或 `running` 时退出，租约过期后，新的 Worker 可用新的 fencing token 接管任务；旧 token 不能再提交结果。
+
+`task cancel` 可取消 `queued`、`retry_wait`、`leased` 或 `running` 任务。取消会持久化为终态 `cancelled`，保留取消时间和原因，并将活动 TaskAttempt 记录为 `cancelled`；重复请求返回首次持久化的取消快照。REST 使用 `POST /api/v1/tasks/{task_id}:cancel`、`Idempotency-Key` 和 `{"reason":"operator requested cancellation"}` 请求体；原因会去除首尾空白，不能为空且最多 1000 个字符。运行中的外部工具会复用既有的 Windows 进程树或 Linux 进程组终止路径。取消不会修改注册的源工程；候选工作仍由现有的 fencing 和恢复流程保护。
 
 ## 启动本地 REST API
 
@@ -178,7 +244,14 @@ Invoke-RestMethod http://127.0.0.1:8765/api/v1/projects
 - `GET /health`
 - `POST /api/v1/projects`
 - `GET /api/v1/projects`
+- `POST /api/v1/projects/{project_id}/eda-authority`
+- `POST /api/v1/projects/{project_id}/eda-capability-probes`
 - `POST /api/v1/projects/{project_id}:adopt`
+- `POST /api/v1/projects/{project_id}/pcb-candidates`
+- `GET /api/v1/pcb-candidates/{candidate_id}`
+- `POST /api/v1/pcb-candidates/{candidate_id}:approve-g3`
+- `POST /api/v1/pcb-candidates/{candidate_id}:export-release`
+- `POST /api/v1/pcb-candidates/{candidate_id}:approve-g4`
 - `POST /api/v1/projects/{project_id}/requirement-sets`
 - `GET /api/v1/requirement-sets/{requirement_set_id}`
 - `POST /api/v1/requirement-sets/{requirement_set_id}:submit`
@@ -190,9 +263,13 @@ Invoke-RestMethod http://127.0.0.1:8765/api/v1/projects
 - `POST /api/v1/proposals/{proposal_id}:reject`
 - `POST /api/v1/projects/{project_id}/validations`
 - `GET /api/v1/tasks/{task_id}`
+- `POST /api/v1/tasks/{task_id}:cancel`
 - `POST /api/v1/worker:run-once`
 - `GET /api/v1/projects/{project_id}/evidence`
 - `GET /api/v1/projects/{project_id}/findings`
+- `POST /api/v1/component-revisions`
+- `GET /api/v1/component-revisions/{component_revision_id}`
+- `GET /api/v1/component-revisions`
 - `POST /api/v1/component-revisions/{component_revision_id}/module-bindings`
 - `GET /api/v1/component-revisions/{component_revision_id}/module-bindings`
 
@@ -217,6 +294,7 @@ remain disabled; run the worker in a trusted local process instead.
 ```text
 .pcbflow-data/
 ├── pcbflow.db
+├── worker-state.json
 ├── artifacts/
 │   └── objects/sha256/aa/bb/<完整 SHA-256>
 └── workspaces/
@@ -235,6 +313,8 @@ remain disabled; run the worker in a trusted local process instead.
 - `PCBFLOW_DATABASE_URL`
 - `PCBFLOW_ARTIFACT_DIR`
 - `PCBFLOW_KICAD_CLI`
+- `PCBFLOW_LCEDA_PRO_EXECUTABLE`
+- `PCBFLOW_LCEDA_PRO_OFFICIAL_BRIDGE`
 - `PCBFLOW_TASK_LEASE_SECONDS`
 - `PCBFLOW_PROCESS_TIMEOUT_SECONDS`
 - `PCBFLOW_MAX_PROCESS_OUTPUT_BYTES`
@@ -248,7 +328,7 @@ remain disabled; run the worker in a trusted local process instead.
 - `PCBFLOW_WORKER_SLOTS` (并发任务槽位数，默认 1)
 - `PCBFLOW_WORKER_POLL_SECONDS` (轮询间隔，默认 5)
 - `PCBFLOW_WORKER_POLL_MAX_SECONDS` (最大退避间隔，默认 60)
-- `PCBFLOW_WORKER_HEARTBEAT_SECONDS` (租约续期间隔，默认 30)
+- `PCBFLOW_WORKER_HEARTBEAT_SECONDS` (租约续期间隔，默认 30；短租约未显式配置时自动缩短)
 - `PCBFLOW_WORKER_SHUTDOWN_TIMEOUT_SECONDS` (优雅关闭超时，默认 300)
 - `PCBFLOW_WORKER_ID` (可选，自定义 Worker 标识符)
 
@@ -256,12 +336,16 @@ remain disabled; run the worker in a trusted local process instead.
 
 ## 当前限制
 
-- 仅支持 SQLite 与显式验证的 KiCad 9.x/10.x 写入契约。
+- 仅支持 SQLite；原理图写入限于显式验证的 KiCad 9.x/10.x profile，KiCad PCB
+  适配器保持只读，LCEDA 原生写入必须通过官方 bridge capability gate。
 - 每种设计文件在工程根目录中最多一个；多个根原理图或 PCB 会被判定为歧义工程。
 - Phase 2A 支持五种受控操作：直接模块实例化、绑定模块实例化、属性设置、封装指派和标签添加。
 - Worker 支持单任务模式（`--once`）和常驻模式（`--run`），支持可配置的并发槽位和自动租约续期。
-- 不修改注册的外部 `source_path`，不生成制造资料，不访问供应商网络。
-- 不包含 AI 自动设计、任意元件/导线编辑、PCB 布局、Web UI 或 PostgreSQL。
+- 不修改注册的外部 `source_path`，不访问供应商网络。系统可在隔离候选中生成
+  BoardIR-only PCB 结果并校验制造发布制品；未验证官方 LCEDA bridge 时不会写入
+  原生工程、运行原生 DRC 或声明真实制造发布成功。
+- 不包含 AI 自动设计、任意元件/导线编辑、完整 Web UI 或 PostgreSQL；PCB 自动化
+  仅覆盖文档中冻结的 BoardIR V1 范围。
 
 ## 开发验证
 
@@ -478,9 +562,14 @@ settings are `PCBFLOW_TASK_LEASE_SECONDS`, `PCBFLOW_PROCESS_TIMEOUT_SECONDS`,
 `PCBFLOW_MODULE_CATALOG_DIR`, `PCBFLOW_REMOTE_MODE`, `PCBFLOW_API_TOKEN`, and
 `PCBFLOW_API_ACTOR_ID`.
 
-### Phase 2A limits
+### Phase 2A limits and later increments
 
-Only SQLite and explicitly verified KiCad 9.x/10.x profiles are supported. The Worker is an explicit `--once`
-runner, not a resident service. Phase 2A does not include AI generation,
-arbitrary component or wire editing, PCB layout, manufacturing outputs such as
-Gerber/BOM/CPL, supplier access, a Web UI, PostgreSQL, or a resident Worker.
+Only SQLite and explicitly verified KiCad 9.x/10.x profiles are supported. The
+implemented Worker supports one-shot execution with `--once` and resident
+execution with `--run`, including configurable concurrent slots and lease
+renewal. Phase 2A does not include AI generation, arbitrary component or wire
+editing, PCB layout, manufacturing outputs such as Gerber/BOM/CPL, supplier
+access, a Web UI, or PostgreSQL. Separate later increments in this repository
+implement BoardIR-only PCB automation and fixture-backed manufacturing package
+validation. They do not establish verified LCEDA native writes, native DRC, or
+real manufacturing release readiness.

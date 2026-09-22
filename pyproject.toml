@@ -11,6 +11,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
   "alembic>=1.14,<2",
   "fastapi>=0.115,<1",
+  "ortools>=9.14,<10",
   "pydantic>=2.10,<3",
   "PyYAML>=6.0.2,<7",
   "sqlalchemy>=2.0.36,<3",
@@ -35,4 +36,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --basetemp=.pytest-tmp"
-markers = ["kicad: requires a real supported kicad-cli"]
+markers = [
+  "kicad: requires a real supported kicad-cli",
+  "lceda_pro: requires a verified official LCEDA Pro automation bridge",
+]

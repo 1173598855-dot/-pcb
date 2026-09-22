@@ -3,11 +3,15 @@
 .venv/
 .pcbflow-data/
 .pytest_cache/
-.pytest-tmp/
+.pytest-*/
+.pytest-*.txt
 .coverage
+.coverage-*
 htmlcov/
 __pycache__/
 *.py[cod]
+/.task*.code
+/.task*.out
 *.egg-info/
 build/
 dist/

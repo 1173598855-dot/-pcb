@@ -1,10 +1,42 @@
 # PCBFlow 开发完成总结报告
 
+## 2026-08-10 PCB 自动化完成边界复核
+
+本次已完成的是实现和正向 fixture：BoardIR/算法、候选、G3/G4、API/CLI、KiCad 10 parity
+及发布打包；未完成的是本机官方 LCEDA 写桥验证、真实原生 DRC 与真实发布能力。正向
+fixture 的 `g3_approved -> ready_for_g4 -> released` 仅为 fixture-only 结果，不能作为
+LCEDA 原生写入或发布证明；人工硬件/制造评审亦未进行。
+
+全量回归（Python 3.13.9、pytest 8.4.2）为 `832 passed, 1 skipped`，589.92 s，覆盖率
+`90.00%`（12611 statements，1261 misses），`--cov-fail-under=90` exit 0。唯一 skip 是
+`tests/contract/test_lceda_pro_adapter.py:16`：`LCEDA Pro write capability unverified:
+lceda_pro_not_found`。本轮还修复了损坏的 `pcb.export_release` task 引用：现在映射为稳定的
+终态 task error，不再产生 `UNHANDLED_TASK_ERROR`；回归位于
+`tests/integration/test_pcb_release.py`。
+
+## 2026-08-08 候选可靠性复审
+
+复审后补齐任务取消镜像、task↔candidate 关联完整性、SQL 条件 fence、能力证据摘要绑定、
+G3 结果摘要检查以及 REST/CLI 输入契约。公开候选在未持久化并验证原生证据前一律报告
+`boardir_only`。最新定向结果为候选/迁移/任务 `64 passed`、LCEDA capability gate
+`16 passed`、API/CLI E2E `44 passed`；`compileall` 和 `git diff --check` 均成功。
+
+## 2026-08-07 增量开发记录
+
+本报告原有内容记录 Phase 5A/5A.1 的历史交付。本次在不改变该基线结论的前提下，
+完成了 LCEDA Pro 项目 `boardir_only` PCB 候选的持久化和可靠性收敛：候选与内部
+任务原子写入、完整冻结输入幂等比较、稳定 not-found/error mapping、取消镜像以及
+租约丢失后的版本化状态补偿。原生 LCEDA Pro 写入继续由 capability gate 阻断。
+
+已验证候选/迁移/任务 `58 passed`、BoardIR/LCEDA 聚焦 `68 passed, 1 skipped`、
+API/CLI E2E `41 passed`、unit `371 passed`、contract `2 passed, 3 skipped`；候选
+模块定向覆盖率为 `92%`，Alembic 在隔离 SQLite 数据库完成完整往返。
+
 **项目**: PCBFlow - 本地优先、证据驱动的 PCB 自动化开发工作流  
 **完成日期**: 2026-08-03  
 **开发阶段**: Phase 5A + Phase 5A.1（完整实现）  
 **总测试**: 316/316 通过 ✅  
-**状态**: 🎉 生产就绪
+**状态**: 🎉 Phase 5A Worker 基线就绪（历史记录；不代表 LCEDA 发布就绪）
 
 ---
 
@@ -181,7 +213,7 @@ TaskExecution: 轻量级数据类，跟踪任务状态和租约
 
 ---
 
-## 🚀 生产就绪特性
+## 🚀 Phase 5A Worker 生产级特性（历史记录）
 
 ### 可靠性
 ✅ 优雅关闭（等待活动任务完成）  
@@ -266,7 +298,7 @@ slots=1 时使用同步执行，保持与原实现完全相同的行为和性能
 
 ### 短期优化（已规划）
 - [ ] Prometheus metrics 导出端点
-- [ ] 任务取消机制（Phase 5B）
+- [x] 任务取消机制（Phase 5B，已实现）
 - [ ] Worker 池管理工具
 
 ### 中期扩展（待设计）
@@ -315,11 +347,11 @@ PCBFlow 项目已成功完成 Phase 5A 和 Phase 5A.1 的全部开发工作，�
 1. ✅ **功能完整**: 所有计划功能已实现
 2. ✅ **测试充分**: 316 个测试全部通过
 3. ✅ **文档齐全**: 用户和技术文档完整
-4. ✅ **生产就绪**: 可靠性、可观测性、可配置性齐备
+4. ✅ **Worker 基线就绪**: 可靠性、可观测性、可配置性齐备
 5. ✅ **代码质量**: 结构清晰、易于维护
 
 ### 当前状态
-**PCBFlow 已达到生产就绪标准，可以处理实际工作负载。**
+**在 Phase 5A Worker 范围内，PCBFlow 已达到生产级任务执行基线，可以处理相应的实际工作负载；这不代表真实 LCEDA 写入、原生 DRC 或制造发布已就绪。**
 
 系统具备以下能力：
 - 自动化 PCB 设计验证
@@ -339,7 +371,7 @@ PCBFlow 项目已成功完成 Phase 5A 和 Phase 5A.1 的全部开发工作，�
 **开发者**: Claude (Opus 4.8)  
 **日期**: 2026-08-03  
 **版本**: Phase 5A 完成  
-**状态**: ✅ 生产就绪
+**状态**: ✅ Phase 5A Worker 基线就绪（历史记录；不代表 LCEDA 发布就绪）
 
 ---
 

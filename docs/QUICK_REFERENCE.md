@@ -12,8 +12,8 @@ cd pcbflow
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-# 安装依赖
-pip install -e .
+# 安装运行时和开发依赖
+pip install -e ".[dev]"
 
 # 初始化数据库
 pcbflow project list  # 自动运行迁移
@@ -23,7 +23,10 @@ pcbflow project list  # 自动运行迁移
 
 #### 1. 注册项目
 ```powershell
-pcbflow project register <项目路径> --idempotency-key "reg-$(Get-Date -Format yyyyMMdd)"
+$project = pcbflow project add <项目路径> `
+  --name "<项目名称>" `
+  --idempotency-key "reg-$(Get-Date -Format yyyyMMdd)" `
+  --json | ConvertFrom-Json
 ```
 
 #### 2. 验证设计
@@ -60,10 +63,7 @@ pcbflow evidence <项目ID> --json
 pcbflow project list --json
 
 # 采纳项目（版本控制）
-pcbflow project <项目ID> adopt --idempotency-key "adopt-key"
-
-# 创建快照
-pcbflow project <项目ID> snapshot
+pcbflow project adopt <项目ID> --idempotency-key "adopt-key" --json
 ```
 
 ### Worker 管理
@@ -97,8 +97,11 @@ pcbflow serve --host 127.0.0.1 --port 8765
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `PCBFLOW_DATA_DIR` | `./.pcbflow-data` | 数据目录 |
-| `PCBFLOW_DATABASE_URL` | `sqlite:///<DATA_DIR>/pcbflow.db` | 数据库 URL |
-| `PCBFLOW_KICAD_CLI` | `kicad-cli` | KiCad CLI 路径 |
+| `PCBFLOW_DATABASE_URL` | `sqlite+pysqlite:///<绝对数据目录>/pcbflow.db` | 数据库 URL |
+| `PCBFLOW_KICAD_CLI` | 自动探测 | 可选的 KiCad CLI 绝对路径 |
+| `PCBFLOW_MODULE_CATALOG_DIR` | - | 已审核模块目录 |
+| `PCBFLOW_LCEDA_PRO_EXECUTABLE` | 自动探测 | 可选的 LCEDA Pro 可执行文件路径 |
+| `PCBFLOW_LCEDA_PRO_OFFICIAL_BRIDGE` | - | 候选官方自动化桥路径；配置本身不代表写入已验证 |
 
 ### Worker 配置
 | 变量 | 默认值 | 说明 |
@@ -115,46 +118,47 @@ pcbflow serve --host 127.0.0.1 --port 8765
 |------|--------|------|
 | `PCBFLOW_TASK_LEASE_SECONDS` | `180` | 任务租约时长（秒）|
 | `PCBFLOW_PROCESS_TIMEOUT_SECONDS` | `120` | 进程超时时间（秒）|
-| `PCBFLOW_MAX_PROCESS_OUTPUT_BYTES` | `10485760` | 最大输出大小（10MB）|
+| `PCBFLOW_MAX_PROCESS_OUTPUT_BYTES` | `2000000` | stdout 和 stderr 各自的最大字节数 |
 
 ### 资源限制
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `PCBFLOW_MAX_PROJECT_FILES` | `1000` | 项目最大文件数 |
-| `PCBFLOW_MAX_PROJECT_BYTES` | `104857600` | 项目最大大小（100MB）|
-| `PCBFLOW_MAX_API_BODY_BYTES` | `10485760` | API 请求最大大小（10MB）|
+| `PCBFLOW_MAX_PROJECT_FILES` | `10000` | 项目最大文件数 |
+| `PCBFLOW_MAX_PROJECT_BYTES` | `1000000000` | 项目最大总字节数 |
+| `PCBFLOW_MAX_API_BODY_BYTES` | `1000000` | API 请求最大字节数 |
 
 ### 远程模式
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `PCBFLOW_REMOTE_MODE` | `false` | 启用远程模式 |
 | `PCBFLOW_API_TOKEN` | - | API 认证令牌 |
-| `PCBFLOW_API_ACTOR_ID` | `service` | 服务 Actor ID |
+| `PCBFLOW_API_ACTOR_ID` | `remote-api` | 服务 Actor ID |
 
 ## 开发和测试
 
 ### 运行测试
 ```powershell
 # 运行所有测试
-pytest tests/unit/ -v
+.\.venv\Scripts\python.exe -m pytest -q
 
 # 运行特定测试
-pytest tests/unit/test_worker_service.py -v
+.\.venv\Scripts\python.exe -m pytest tests/unit/test_worker_service.py -v
 
-# 运行测试并生成覆盖率报告
-pytest tests/unit/ --cov=src/pcbflow --cov-report=html
+# 运行完整覆盖率门槛
+.\.venv\Scripts\python.exe -m pytest `
+  --cov=pcbflow --cov-report=term-missing --cov-fail-under=90
 ```
 
 ### 数据库管理
 ```powershell
 # 创建新的迁移
-alembic revision --autogenerate -m "描述"
+.\.venv\Scripts\python.exe -m alembic -c alembic.ini revision --autogenerate -m "描述"
 
 # 应用迁移
-alembic upgrade head
+.\.venv\Scripts\python.exe -m alembic -c alembic.ini upgrade head
 
-# 回滚迁移
-alembic downgrade -1
+# 在隔离临时数据库验证升级/降级往返；不要降级默认数据库
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_migrations.py -q
 ```
 
 ### 调试技巧
@@ -207,13 +211,10 @@ Register-ScheduledTask -TaskName "PCBFlow Worker" -Action $action -Trigger $trig
 - 设置任务失败率告警阈值
 
 ### 备份策略
-```powershell
-# 备份数据库
-Copy-Item .pcbflow-data/pcbflow.db "backup/pcbflow-$(Get-Date -Format yyyyMMdd).db"
-
-# 备份 artifacts
-Copy-Item -Recurse .pcbflow-data/artifacts "backup/artifacts-$(Get-Date -Format yyyyMMdd)"
-```
+- 使用 SQLite 在线备份 API 创建一致的数据库快照；不要在 WAL 模式下只复制
+  `pcbflow.db`。
+- 在同一恢复点备份 `artifacts/`，并验证数据库中的 Artifact 摘要对应的对象存在。
+- 恢复演练必须使用隔离数据目录，不能覆盖正在运行的默认数据目录。
 
 ## 性能调优
 
@@ -223,7 +224,7 @@ Copy-Item -Recurse .pcbflow-data/artifacts "backup/artifacts-$(Get-Date -Format 
 - **I/O 密集型**: 可以设置为 CPU 核心数的 1.5-2 倍
 
 ### 数据库优化
-- 定期 VACUUM：`sqlite3 pcbflow.db "VACUUM;"`
+- 仅在维护窗口且没有活动写入时对 `.pcbflow-data/pcbflow.db` 执行 `VACUUM`。
 - 监控 WAL 文件大小
 - 考虑定期归档旧数据
 
@@ -247,12 +248,9 @@ Copy-Item -Recurse .pcbflow-data/artifacts "backup/artifacts-$(Get-Date -Format 
 pcbflow --help
 pcbflow worker --help
 pcbflow project --help
-
-# 查看版本信息
-pcbflow --version
 ```
 
 ---
 
-**最后更新**: 2026-08-03  
-**版本**: Phase 5A 完成
+**最后更新**: 2026-08-14
+**状态**: BoardIR-only PCB 工作流已实现；真实 LCEDA 发布仍受能力门阻断

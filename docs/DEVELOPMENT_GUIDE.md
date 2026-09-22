@@ -3,6 +3,23 @@
 日期：2026-07-29  
 适用对象：后端、EDA 自动化、前端、AI、测试、发布和运维开发者
 
+## 2026-08-10 实测状态
+
+实现与正向 fixture 已完成：BoardIR/算法、候选、G3/G4、API/CLI、KiCad 10 parity 与发布
+打包。真实 LCEDA 专业版写入、原生 DRC 和发布不是已完成能力：本机 probe/doctor 为
+`available:false`、`write_verified:false`、`operations:[]`、`reason:lceda_pro_not_found`，
+且没有 executable、profile、version 或 executable digest。真实 CLI 审计仅创建 queued
+`boardir_only` candidate，并展示 authority、base snapshot、BoardIR、rulepack、capability
+和 operations digests；默认数据库及 authoritative project 未被修改。
+
+2026-08-10 全量 gate 在 Python 3.13.9 / pytest 8.4.2 下为 `832 passed, 1 skipped`，
+589.92 s、总覆盖率 `90.00%`（12611 statements，1261 misses），命令带
+`--cov-fail-under=90` 后退出 0。唯一 skip 是
+`tests/contract/test_lceda_pro_adapter.py:16`：`LCEDA Pro write capability unverified:
+lceda_pro_not_found`。隔离 SQLite 已完成 `upgrade head -> downgrade base -> upgrade head`
+（exit 0，最终 `0009_pcb_candidates (head)`）；它没有使用默认数据库，迁移往返必须以
+程序方式覆盖 `sqlalchemy.url`，不得对默认 `alembic.ini` URL 运行 destructive downgrade。
+
 ## 1. 文档定位
 
 PCBFlow 是一个本地优先、以证据为中心的自动化 PCB 开发平台。它把需求、KiCad 工程、自动化命令、验证、审批和制造输出组织为可恢复、可审查的工程工作流。
@@ -31,12 +48,13 @@ PCBFlow 是一个本地优先、以证据为中心的自动化 PCB 开发平台�
 | 需求冻结与 G1 | 已实现 | Phase 2A：导入、提交、G1 审批与摘要绑定 |
 | 原理图自动修改 | 已实现 | Phase 2A：模块实例化、属性、封装与标签操作 |
 | 受控候选与恢复 | 已实现 | Phase 2A：fencing、语义 Diff、ERC、接受/拒绝与 reconcile |
-| PCB 自动布局布线 | 路线图 | Phase 3 |
-| Gerber/BOM/CPL | 路线图 | Phase 4 |
-| 嘉立创规则与交换 | 路线图 | Phase 4 |
+| PCB 自动布局布线 | BoardIR-only 已实现 | 已实现确定性布局、受限布线、GND 铜皮规划和候选证据；真实 LCEDA 原生写入与原生 DRC 仍受能力门阻断 |
+| Gerber/BOM/CPL | 发布校验已实现 | 已实现制造制品校验、BOM/CPL 交叉检查、发布清单和 G4；真实工具导出仍依赖已验证的适配器能力 |
+| 嘉立创规则与交换 | 规则包与能力门已实现 | 已实现规则包绑定、LCEDA 探测和 fail-closed 交换边界；本机官方写入桥未验证 |
 | AI 辅助设计 | 路线图 | Phase 2C 以后 |
 | Web UI 与完整审批 | 路线图 | Phase 5 |
-| 常驻 Worker 与取消 | 路线图 | Phase 5A |
+| 常驻 Worker | 已实现 | `worker --run`、并发槽位、续租和健康检查 |
+| 任务取消 | 已实现 | `task cancel`、`POST /api/v1/tasks/{task_id}:cancel`、持久化 `cancelled` 状态与进程树终止 |
 
 开发者必须在文档、CLI 帮助和 API 中区分“当前已实现”和“计划能力”。不能发布一个尚未存在的命令示例。
 
@@ -212,7 +230,7 @@ python -m venv .venv
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m pytest --cov=pcbflow --cov-report=term-missing --cov-fail-under=80
+.\.venv\Scripts\python.exe -m pytest --cov=pcbflow --cov-report=term-missing --cov-fail-under=90
 .\.venv\Scripts\python.exe -m pytest -m kicad -v
 git diff --check
 ```
@@ -237,7 +255,7 @@ $task = .\.venv\Scripts\pcbflow.exe validate $project.id `
 .\.venv\Scripts\pcbflow.exe findings $project.id --json
 ```
 
-当前 `worker --once` 每次最多执行一个任务。循环执行或作为服务运行尚未实现。
+`worker --once` 每次最多执行一个任务。生产环境可使用 `worker --run` 持续处理任务队列；`--exit-when-idle` 适合受控的批处理和集成测试。
 
 ## 9. 配置与运行数据
 
@@ -258,8 +276,12 @@ $task = .\.venv\Scripts\pcbflow.exe validate $project.id `
 | `PCBFLOW_API_TOKEN` | 远程模式必填的 Bearer token |
 | `PCBFLOW_API_ACTOR_ID` | 远程认证请求记录使用的服务 actor ID |
 | `PCBFLOW_MAX_API_BODY_BYTES` | JSON 请求体解码前的最大字节数 |
+| `PCBFLOW_MODULE_CATALOG_DIR` | 只读加载本地已审核模块目录 |
+| `PCBFLOW_LCEDA_PRO_EXECUTABLE` | 可选的 LCEDA Pro 可执行文件绝对路径 |
+| `PCBFLOW_LCEDA_PRO_OFFICIAL_BRIDGE` | 候选官方自动化桥路径；配置本身不验证写入能力 |
 
-Phase 2A 计划新增 `PCBFLOW_MODULE_CATALOG_DIR`，用于只读加载本地已审核模块目录；在实现落地前该变量不存在。
+`PCBFLOW_MODULE_CATALOG_DIR` 已实现，并由模块绑定和受控实例化流程使用。LCEDA
+配置只参与探测；原生写入、DRC 和导出仍要求版本化官方 bridge 提供独立的已验证证据。
 
 默认数据布局：
 
@@ -332,6 +354,8 @@ Phase 2A 计划新增 `PCBFLOW_MODULE_CATALOG_DIR`，用于只读加载本地已
 - 重复启动不会重复写入种子数据。
 
 如果 SQLite 无法安全执行某种列变更，使用批量迁移或新表复制，不要依赖只在 PostgreSQL 上成立的 DDL。
+降级往返只能通过程序方式把 Alembic `sqlalchemy.url` 覆盖到隔离临时数据库；不得对
+默认 `alembic.ini` 数据库执行破坏性 downgrade。
 
 ## 13. 仓储设计
 
@@ -365,7 +389,7 @@ class RequirementStore:
 2. 创建新的 lease token 和 TaskAttempt。
 3. 把状态从 `leased` 转为 `running`。
 4. 调用按 task kind 注册的 handler。
-5. 把结果标记为 succeeded、retry_wait 或 failed_terminal。
+5. 把结果标记为 succeeded、retry_wait、failed_terminal 或 cancelled。
 
 Worker 有两种模式：
 
@@ -378,10 +402,10 @@ Worker 有两种模式：
 - 结构化日志：记录 worker 生命周期事件
 
 配置常驻 Worker：
-- `PCBFLOW_WORKER_SLOTS`: 并发槽位（默认 1，当前仅支持单槽）
+- `PCBFLOW_WORKER_SLOTS`: 并发槽位（默认 1）
 - `PCBFLOW_WORKER_POLL_SECONDS`: 空闲轮询间隔（默认 5）
 - `PCBFLOW_WORKER_POLL_MAX_SECONDS`: 最大退避间隔（默认 60）
-- `PCBFLOW_WORKER_HEARTBEAT_SECONDS`: 租约续期间隔（默认 30）
+- `PCBFLOW_WORKER_HEARTBEAT_SECONDS`: 租约续期间隔（默认 30；短租约未显式配置时自动缩短）
 - `PCBFLOW_WORKER_SHUTDOWN_TIMEOUT_SECONDS`: 关闭超时（默认 300）
 
 Handler 通过：
@@ -405,21 +429,21 @@ Handler 通过：
 
 Handler 不应自行循环领取任务，也不应从全局环境重新构造容器。
 
-### 14.3 Phase 5A 常驻 Worker
+### 14.3 已实现的 Phase 5A 常驻 Worker
 
-常驻 Worker 应增加：
+常驻 Worker 已提供：
 
-- `worker run` 主循环。
-- 空队列有界退避和抖动。
-- 周期心跳与续租。
-- 取消请求。
-- Windows Job Object 和 Linux 进程组终止。
-- 优雅关闭。
-- Worker 身份、启动时间和最后心跳。
-- 并发槽位和 task kind 限流。
-- 健康检查与指标。
+- `worker --run` 主循环，以及用于批处理的 `--exit-when-idle`。
+- 空队列有界指数退避。
+- 周期租约续期和 Worker 身份跟踪。
+- SIGTERM/SIGINT 关机请求与活动任务等待超时。
+- 可配置并发槽位。
+- `worker health --json` 健康检查：常驻进程原子发布
+  `PCBFLOW_DATA_DIR/worker-state.json`，查询命令读取同一快照而不创建新的
+  Worker 实例。
+- Worker 生命周期日志。
 
-常驻 Worker 不能仅用 `while True: run_once()` 拼接完成。必须处理租约续期、进程树、数据库断连、关机信号和背压。
+Phase 5B 已实现任务取消和进程树终止：`queued`、`retry_wait`、`leased` 与 `running` Task 可通过 `task cancel` 或 `POST /api/v1/tasks/{task_id}:cancel` 进入持久化终态 `cancelled`。取消清除 lease，关闭活动 TaskAttempt，并保留取消时间与原因；迟到的 Worker 仍受 fencing 阻止，不能发布结果。REST 请求体严格为 `{"reason":"..."}`，原因在持久化前去除首尾空白、不能为空且最多 1000 个字符。运行中的外部进程通过任务级取消探针复用 Windows `taskkill /T /F` 或 Linux 进程组终止；若探针读取本身失败，ProcessRunner 仍会终止并回收该进程树后重新抛出原始错误。不能安全中断的纯 Python handler 会在下一个取消检查点停止发布结果。task kind 限流仍属于后续工作。常驻 Worker 不能仅用 `while True: run_once()` 拼接完成；必须复用带 fencing 的任务执行路径，并处理租约续期、数据库断连、关机信号和背压。
 
 ## 15. 外部进程
 
@@ -594,9 +618,13 @@ AI 建议的新电路不能直接成为 verified 模块。
 
 ## 19. PCB 自动化开发
 
+当前仓库已完成冻结 V1 板级范围内的 BoardIR-only 实现：CP-SAT 约束布局、确定性受限布线、GND 铜皮规划、FixtureBoardAdapter 回放、候选 G3/G4 证据和 API/CLI 入口均已接通。该能力生成和校验候选 BoardIR，不代表已经能够写入真实 LCEDA Pro 工程、运行原生 LCEDA DRC 或完成真实制造发布；这些操作继续经过 capability gate 并在未验证时 fail-closed。
+
 PCB 自动化不应从全板自动布线开始。推荐分层：
 
 ### 19.1 Phase 3A：初始化
+
+BoardIR 参考板、层和制造规则包已由严格模型与 fixture 提供。当前候选流程冻结板快照、规则包、能力证据和算法 seed，操作只在隔离候选中回放。
 
 - 板框。
 - 安装孔。
@@ -608,6 +636,8 @@ PCB 自动化不应从全板自动布线开始。推荐分层：
 - 连接器和机械固定对象。
 
 ### 19.2 Phase 3B：布局
+
+当前实现使用 CP-SAT 生成满足硬约束的布局，再用确定性 seed 做受限 refinement；锁定器件、courtyard、板边、keepout、thermal cluster 和连接器可达性会进入证据。它仍是 BoardIR 结果，不会直接改写注册的权威 KiCad 或 LCEDA 工程。
 
 按约束优先：
 
@@ -632,6 +662,8 @@ AI 可以解释评分和选择策略，但不能直接输出未经验证的任�
 
 ### 19.3 Phase 3C：受限布线
 
+当前实现只接受冻结 V1 网络集合，并通过 8 邻域搜索、精确铜几何检查、换层过孔上限、锁定路线和有界 negotiation 生成可回放的 `RouteNets` 操作。电源网络仍返回 topology finding，不会被伪造为窄线信号路线；复杂全板布线和原生工具 DRC 不在 BoardIR-only 路由范围内。
+
 - 只处理明确网络集合。
 - 先关键网络，再普通数字信号。
 - 每个网络类定义线宽、间距、过孔、允许层和拓扑。
@@ -642,9 +674,11 @@ AI 可以解释评分和选择策略，但不能直接输出未经验证的任�
 
 ## 20. 制造输出与嘉立创
 
+当前实现已覆盖制造规则包、BOM/CPL 交叉校验、内容寻址制品、release manifest、G4 证据和 fixture 端到端发布流程。真实 LCEDA Pro 的原生导出、原生 DRC 和真实发布仍需要版本化且通过契约验证的官方 bridge；当前机器缺少该能力时，发布任务保持阻断，不把 fixture 成功提升为真实发布成功。
+
 ### 20.1 通用制造输出
 
-Phase 4 应生成：
+发布候选必须绑定冻结 revision、锁定工具链、锁定规则包和 G3 证据。当前代码负责验证和封装以下制品；具体 native 文件生成由受能力门控制的 EDA 适配器提供：
 
 - Gerber archive。
 - Excellon 钻孔。
@@ -1079,6 +1113,8 @@ Phase 2A 的启动协调器以数据库 current revision 为准。若候选对�
 
 ### Phase 3：PCB 初始化和协同自动化
 
+状态：BoardIR-only V1 已实现。当前覆盖约束布局、受限布线、GND 铜皮规划、候选生命周期、G3/G4 证据和 API/CLI；真实 LCEDA 原生写入及原生 DRC 仍未验证。
+
 - 板框和层叠。
 - 网络类和规则区。
 - 约束布局。
@@ -1086,6 +1122,8 @@ Phase 2A 的启动协调器以数据库 current revision 为准。若候选对�
 - 外部编辑重新导入。
 
 ### Phase 4：制造和嘉立创
+
+状态：制造制品校验、BOM/CPL 交叉检查、release manifest 和 G4 已实现；真实 LCEDA 导出、原生 DRC、DFM 和制造发布仍依赖通过 capability gate 的适配器与人工复审。
 
 - 制造规则包。
 - Gerber、钻孔、BOM、CPL。
@@ -1095,8 +1133,8 @@ Phase 2A 的启动协调器以数据库 current revision 为准。若候选对�
 
 ### Phase 5：可用性和可靠性
 
-- 常驻 Worker。
-- 取消、心跳和并发。
+- 常驻 Worker、心跳和并发（已实现）。
+- 任务取消与进程树终止（Phase 5B，已实现）。
 - 完整 Web UI。
 - RBAC 和多人审批。
 - PostgreSQL 团队模式。
@@ -1123,7 +1161,7 @@ Phase 2A 的启动协调器以数据库 current revision 为准。若候选对�
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m pytest --cov=pcbflow --cov-report=term-missing
+.\.venv\Scripts\python.exe -m pytest --cov=pcbflow --cov-report=term-missing --cov-fail-under=90
 .\.venv\Scripts\pcbflow.exe doctor --json
 git diff --check
 git status --short
@@ -1253,8 +1291,11 @@ footprints are rejected by the adapter contract.
 ### 34.9 Worker leases, fencing, commits, evidence, and recovery
 
 The Worker claims one SQLite task, starts it with a fencing token, and passes
-the current clock to every start, complete, fail, and active-lease check. An
-expired token cannot transition or publish a result. Proposal execution uses a
+the current clock to every start, complete, fail, cancel, and active-lease
+check. An expired or cancelled token cannot transition or publish a result.
+Cancellation is a durable terminal task state; it clears the lease, closes an
+active attempt with `TASK_CANCELLED`, and causes a task-scoped ProcessRunner
+probe to terminate an external process tree. Proposal execution uses a
 detached Git worktree, mandatory Schema/precondition/path-limit/post-write
 parse/semantic-Diff/ERC validations, deterministic commit metadata, and a
 digest-bound evidence set. A stale worker may leave a candidate ref or
@@ -1262,17 +1303,21 @@ worktree, but the next attempt replays or repairs it from durable facts.
 
 ### 34.10 REST/CLI reference, states, errors, and examples
 
-The CLI command groups are `project`, `requirements`, `approval`, and
-`proposal`; top-level commands include `validate`, `worker --once`,
-`findings`, `evidence`, `doctor`, and `serve`. The REST API exposes project
-adoption, requirement submission, approvals, proposal create/show/diff,
-accept/reject, task lookup, and `worker:run-once`. Write requests require the
-`Idempotency-Key` header. Proposal states are `queued`, `executing`,
-`validation_failed`, `ready_for_review`, `accepted`, `rejected`, and `stale`.
-Stable error examples include `DESIGN_COMMAND_SCHEMA_INVALID`,
+The CLI command groups are `project`, `task`, `requirements`, `approval`,
+`proposal`, and `worker`; Worker execution supports `worker --once`,
+`worker --run`, and `worker health`. `task cancel TASK_ID --reason REASON
+--idempotency-key KEY` cancels a non-terminal task. Other top-level commands
+include `validate`, `findings`, `evidence`, `doctor`, and `serve`. The REST API
+exposes project adoption, requirement submission, approvals, proposal
+create/show/diff, accept/reject, task lookup, task cancellation, and
+`worker:run-once`. Write requests require the `Idempotency-Key` header.
+Proposal states are `queued`, `executing`, `validation_failed`,
+`ready_for_review`, `accepted`, `rejected`, and `stale`. Task states include
+`queued`, `leased`, `running`, `succeeded`, `retry_wait`, `failed_terminal`,
+and `cancelled`. Stable error examples include `DESIGN_COMMAND_SCHEMA_INVALID`,
 `DESIGN_COMMAND_PRECONDITION_FAILED`, `KICAD_CLI_UNAVAILABLE`,
 `CANDIDATE_VALIDATION_FAILED`, `REVISION_RECONCILIATION_REQUIRED`, and
-`STALE_LEASE`.
+`STALE_LEASE`, `TASK_CANCELLED`, and `TASK_NOT_CANCELLABLE`.
 
 ### 34.11 Test layers and fixture rules
 
@@ -1312,8 +1357,11 @@ digests, and Git ref reconciliation before changing files. Process execution is
 shell-free with a controlled environment; source paths, links, reparse points,
 tokens, and unbounded output are fenced. AI generation, arbitrary component or
 wire editing, PCB layout, manufacturing output, supplier access, Web UI,
-PostgreSQL, and resident Workers are outside Phase 2A and remain Phase 2B+ or
-later non-goals.
+PostgreSQL, and resident Workers are outside the Phase 2A controlled-change
+scope. Later increments implement the resident Worker, BoardIR-only PCB
+automation, and fixture-backed manufacturing package validation. AI generation,
+arbitrary editing, supplier access, Web UI, PostgreSQL, and verified LCEDA native
+release remain outside the implemented boundary.
 
 ### 34.14 KiCad compatibility profiles and future-major gate
 

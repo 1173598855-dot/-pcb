@@ -1,5 +1,50 @@
 # PCBFlow 项目整理报告
 
+## 2026-08-10 PCB 自动化实测完成记录
+
+BoardIR/算法、候选、G3/G4 正向 fixture、API/CLI、KiCad parity 和 release packaging 的
+实现已完成。全量 gate：Python 3.13.9、pytest 8.4.2，`832 passed, 1 skipped`，589.92 s，
+总覆盖率 `90.00%`（12611 statements，1261 misses），`--cov-fail-under=90` exit 0。
+
+真实 LCEDA 发布能力未完成：官方写桥与原生 DRC 未验证，probe/doctor 返回
+`available:false`、`write_verified:false`、`operations:[]`、`reason:lceda_pro_not_found`；
+没有 executable、profile、version 或 executable digest。唯一全量 skip 为
+`tests/contract/test_lceda_pro_adapter.py:16`，原因同上。未进行人工硬件/制造复审，也未
+验证官方 bridge；因此 fixture 发布成功不能标示为真实 LCEDA release readiness。
+
+## 2026-08-08 PCB 候选复审修复
+
+- 任务取消现在在同一数据库事务中镜像关联候选；即使候选任务仍在 queued/retry_wait，
+  候选也不会遗留为非终态。
+- 候选状态写入同时以 task fence 作为 SQL 条件，损坏的 task↔candidate 关联以
+  `PCB_CANDIDATE_NOT_FOUND` 终止；进入 `ready_for_g3` 必须回传与冻结 BoardIR 和
+  operation digest 匹配的结果。
+- capability gate 返回已验证 artifact digest，候选拒绝冻结与该证据不一致的 digest。
+  REST/CLI 对 KiCad authority 稳定返回 `PCB_CAPABILITY_GATE_BLOCKED`，并共用严格的
+  seed、net id 和 digest 校验。
+- 当前公开候选统一标注 `boardir_only`；状态或调用方 JSON 不会把它提升为 native/release。
+- 本次新鲜验证：候选/迁移/任务 `64 passed`；LCEDA capability gate `16 passed`；
+  API/CLI E2E `44 passed`；`compileall` 与 `git diff --check` 退出码均为 0。
+
+## 2026-08-07 PCB 候选增量状态
+
+本节是对下方 2026-08-03 Phase 5A 历史整理报告的增量记录。
+
+- 已实现 `pcb_candidates` 持久化状态机、项目级候选幂等键、冻结输入比较和
+  `pcb.generate_candidate` Worker 入口。
+- 候选与内部任务同事务写入；候选写入失败不会留下可领取的孤立任务。
+- Worker 按项目和候选幂等键查找候选。取消竞争会镜像为 `cancelled`，状态写入后
+  检测到租约失效会用 optimistic version 恢复旧状态；损坏任务返回
+  `PCB_CANDIDATE_NOT_FOUND`。
+- REST 和 CLI 对不存在候选返回 `PCB_CANDIDATE_NOT_FOUND`；同一候选幂等键下
+  改变 BoardIR、capability 或 seed 返回 `IDEMPOTENCY_CONFLICT`。
+- 本轮验证：候选/迁移/任务 `58 passed`；BoardIR、LCEDA gate 和相关契约
+  `68 passed, 1 skipped`；API/CLI E2E `41 passed`；unit `371 passed`；全部
+  contract `2 passed, 3 skipped`；候选模块定向覆盖率 `92%`；隔离 SQLite 上的
+  Alembic `upgrade -> downgrade base -> upgrade` 通过。
+- 原生 LCEDA Pro 写入仍未通过官方 bridge capability gate，当前 PCB 候选明确为
+  `boardir_only`，不宣称原生写入、DRC 或制造发布能力已经完成。
+
 **日期**: 2026-08-03  
 **状态**: ✅ 代码整洁，结构良好
 
@@ -140,7 +185,7 @@ pcbflow/
 - 无已知的严重 bug
 - 向后兼容性良好
 
-### ✅ 生产就绪
+### ✅ Phase 5A Worker 基线就绪（历史记录）
 - 所有核心功能已实现
 - 测试通过率 100%
 - 文档齐全
@@ -149,6 +194,6 @@ pcbflow/
 
 **PCBFlow 项目当前状态：优秀**
 
-项目代码整洁、结构合理、文档完善，已达到生产就绪标准。建议的优化项主要是增强工具链，而非修复问题。
+在 Phase 5A Worker 范围内，项目代码整洁、结构合理、文档完善，已达到生产级任务执行基线。该历史结论不涵盖真实 LCEDA 写入、原生 DRC 或制造发布；当前边界以本页顶部 2026-08-10 复核记录为准。
 
 当前无需进行代码整理或重构工作。
