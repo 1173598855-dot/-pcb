@@ -118,6 +118,13 @@ def test_router_respects_quiet_zone_exclusion_via_cap_and_locked_geometry(snapsh
 
 
 def test_fixture_adapter_rejects_missing_locked_and_colliding_route_targets(snapshot: BoardSnapshot, rulepack: ManufacturingRulePack, tmp_path: Path) -> None:
+    # 清理 .pytest-tmp 目录，防止权限冲突
+    import shutil
+    try:
+        shutil.rmtree(".pytest-tmp", ignore_errors=True)
+    except Exception:
+        pass
+
     source = tmp_path / "source"
     source.mkdir()
     (source / "expected-boardir.json").write_bytes(json.dumps(snapshot.to_canonical_dict()).encode())

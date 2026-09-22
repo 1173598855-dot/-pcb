@@ -26,6 +26,34 @@ _V1_NET_CLASSES = frozenset(
     {"signal", "quiet_signal", "logic_power", "load_power", "ground"}
 )
 
+_V1_LAYER_NAMES: dict[int, tuple[str, ...]] = {
+    2: ("F.Cu", "B.Cu"),
+    4: ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"),
+}
+
+
+def validate_layer_names(layer_count: int, layer_names: tuple[str, ...]) -> None:
+    """Enforce that layer_names exactly matches the canonical stack for the layer count."""
+    expected = _V1_LAYER_NAMES.get(layer_count)
+    if expected is None:
+        allowed = ", ".join(str(count) for count in sorted(_SUPPORTED_STACKS))
+        raise ValueError(
+            f"rule pack supports {allowed} copper layers, not {layer_count}"
+        )
+    if layer_names != expected:
+        raise ValueError(
+            f"layer names for {layer_count}-layer stack must be {expected}, got {layer_names}"
+        )
+
+
+def supported_stack(layer_count: int) -> tuple[str, ...] | None:
+    """Return the canonical copper layer names for a supported layer count."""
+    return _V1_LAYER_NAMES.get(layer_count)
+
+
+def supported_layer_counts() -> frozenset[int]:
+    return frozenset(_V1_LAYER_NAMES)
+
 
 @dataclass(frozen=True, slots=True)
 class RoutingPolicy:
@@ -66,6 +94,7 @@ class ManufacturingRulePack:
     schema_version: str
     profile_id: str
     layer_count: int
+    layer_names: tuple[str, ...]
     copper_oz: int
     max_board_width_um: int
     max_board_height_um: int
@@ -83,8 +112,12 @@ class ManufacturingRulePack:
         if self.schema_version != "1.0":
             raise ValueError("unsupported rule pack schema version")
         _require_string(self.profile_id, "rule pack profile id")
-        if self.layer_count != 2:
-            raise ValueError("V1 rule pack requires exactly two layers")
+        if self.layer_count not in _V1_LAYER_NAMES:
+            allowed = ", ".join(str(count) for count in sorted(_V1_LAYER_NAMES))
+            raise ValueError(
+                f"rule pack supports {allowed} copper layers, not {self.layer_count}"
+            )
+        validate_layer_names(self.layer_count, self.layer_names)
         if self.copper_oz != 1:
             raise ValueError("V1 rule pack requires 1 oz copper")
         _require_int(
@@ -136,6 +169,7 @@ class ManufacturingRulePack:
                     "schema_version",
                     "profile_id",
                     "layer_count",
+                    "layer_names",
                     "copper_oz",
                     "max_board_size_um",
                     "max_voltage_mv",
@@ -189,6 +223,10 @@ class ManufacturingRulePack:
             schema_version=_require_string(value["schema_version"], "schema version"),
             profile_id=_require_string(value["profile_id"], "profile id"),
             layer_count=_require_int(value["layer_count"], "layer count", minimum=1),
+            layer_names=tuple(
+                _require_string(item, "layer name item")
+                for item in _require_list(value["layer_names"], "layer names")
+            ),
             copper_oz=_require_int(value["copper_oz"], "copper weight", minimum=1),
             max_board_width_um=_require_int(
                 size["width"],
@@ -260,6 +298,7 @@ class ManufacturingRulePack:
             "schema_version": self.schema_version,
             "profile_id": self.profile_id,
             "layer_count": self.layer_count,
+            "layer_names": list(self.layer_names),
             "copper_oz": self.copper_oz,
             "max_board_size_um": {
                 "width": self.max_board_width_um,

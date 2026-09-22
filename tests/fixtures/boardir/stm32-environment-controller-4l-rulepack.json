@@ -1,8 +1,8 @@
 {
   "schema_version": "1.0",
-  "profile_id": "stm32-environment-controller-2l-v1",
-  "layer_count": 2,
-  "layer_names": ["F.Cu", "B.Cu"],
+  "profile_id": "stm32-environment-controller-4l-v1",
+  "layer_count": 4,
+  "layer_names": ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"],
   "copper_oz": 1,
   "max_board_size_um": {"width": 100000, "height": 80000},
   "max_voltage_mv": 24000,

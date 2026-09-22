@@ -15,10 +15,18 @@ RULEPACK = (
     / "boardir"
     / "stm32-environment-controller-2l-rulepack.json"
 )
+RULEPACK_4L = (
+    Path(__file__).parents[1]
+    / "fixtures"
+    / "boardir"
+    / "stm32-environment-controller-4l-rulepack.json"
+)
 
 
 def _value() -> dict[str, object]:
-    return json.loads(RULEPACK.read_bytes())
+    value = json.loads(RULEPACK.read_bytes())
+    value["layer_names"] = ["F.Cu", "B.Cu"]
+    return value
 
 
 def _load(value: dict[str, object]) -> ManufacturingRulePack:
@@ -30,6 +38,7 @@ def test_rulepack_loads_exact_v1_integer_net_class_rules() -> None:
 
     assert rulepack.profile_id == "stm32-environment-controller-2l-v1"
     assert rulepack.layer_count == 2
+    assert rulepack.layer_names == ("F.Cu", "B.Cu")
     assert rulepack.copper_oz == 1
     assert rulepack.max_board_size_um == (100_000, 80_000)
     assert rulepack.net_class("signal").min_width_um == 203
@@ -50,6 +59,14 @@ def test_rulepack_loads_exact_v1_integer_net_class_rules() -> None:
     ]
 
 
+def test_rulepack_loads_exact_v1_4_layer_stack() -> None:
+    rulepack = ManufacturingRulePack.load_json(RULEPACK_4L.read_bytes())
+
+    assert rulepack.profile_id == "stm32-environment-controller-4l-v1"
+    assert rulepack.layer_count == 4
+    assert rulepack.layer_names == ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu")
+
+
 def test_rulepack_digest_is_stable_when_net_classes_are_reordered() -> None:
     value = _value()
     reordered = dict(value)
@@ -60,7 +77,7 @@ def test_rulepack_digest_is_stable_when_net_classes_are_reordered() -> None:
 
     assert left.canonical_digest() == right.canonical_digest()
     assert left.canonical_digest() == (
-        "sha256:5a1c8217ce2237e7186d5415a83f33b145082af548d7a18b76108f90c43cf190"
+        "sha256:21db03a63f180acdb87737c79a017906cbabae147178709bbd414a7783975301"
     )
     assert left.canonical_bytes() == right.canonical_bytes()
     assert left.canonical_digest() == (
@@ -118,14 +135,25 @@ def test_v1_rulepack_rejects_out_of_scope_requests(field: str, value: bool) -> N
         _load(payload)
 
 
-def test_v1_rulepack_rejects_four_layers_and_non_integer_dimensions() -> None:
-    four_layer = _value()
-    four_layer["layer_count"] = 4
+def test_v1_rulepack_rejects_invalid_layer_count_and_wrong_layer_names() -> None:
+    three_layer = _value()
+    three_layer["layer_count"] = 3
+
+    wrong_names_2l = _value()
+    wrong_names_2l["layer_names"] = ["F.Cu", "In1.Cu", "B.Cu"]
+
+    wrong_names_4l = json.loads(RULEPACK_4L.read_bytes())
+    wrong_names_4l["layer_names"] = ["F.Cu", "B.Cu", "In1.Cu", "In2.Cu"]
+
     fractional = _value()
     fractional["max_board_size_um"]["width"] = 100_000.0  # type: ignore[index]
 
-    with pytest.raises(ValueError, match="exactly two layers"):
-        _load(four_layer)
+    with pytest.raises(ValueError, match="rule pack supports 2, 4 copper layers"):
+        _load(three_layer)
+    with pytest.raises(ValueError, match="layer names"):
+        _load(wrong_names_2l)
+    with pytest.raises(ValueError, match="layer names"):
+        _load(wrong_names_4l)
     with pytest.raises(ValueError, match="integer micrometres"):
         _load(fractional)
 
