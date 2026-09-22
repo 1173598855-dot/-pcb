@@ -168,7 +168,20 @@ class KicadBoardAdapter:
                     if "*.Cu" in pad_layers:
                         pad_layers = layers
                     net_values = _atoms(_child(pad_node, "net"))
-                    pads.append(Pad(pad_id, native_id, BoardObjectId(net_names[net_values[0]]) if net_values and net_values[0] in net_names else None, position, _um(size[0]), _um(size[1]), _um(drill[0]) if drill else 0, pad_layers))
+                    pads.append(
+                        Pad(
+                            pad_id,
+                            native_id,
+                            BoardObjectId(net_names[net_values[0]])
+                            if net_values and net_values[0] in net_names
+                            else None,
+                            position,
+                            _um(size[0]),
+                            _um(size[1]),
+                            _um(drill[0]) if drill else 0,
+                            pad_layers,
+                        )
+                    )
                     pad_ids.append(pad_id)
                     bounds_points.extend((PointUm(position.x - _um(size[0]) // 2, position.y - _um(size[1]) // 2), PointUm(position.x + _um(size[0]) // 2, position.y + _um(size[1]) // 2)))
                 fp_rect = _child(node, "fp_rect")
@@ -182,11 +195,31 @@ class KicadBoardAdapter:
             elif kind == "segment":
                 if native_id is None: self._unpreservable(kind)
                 net = (_atoms(_child(node, "net")) or [""])[0]
-                routes.append(RouteSegment(native_id, BoardObjectId(net_names[net]), _point(_child(node, "start")), _point(_child(node, "end")), _um(_atoms(_child(node, "width"))[0]), _atoms(_child(node, "layer"))[0], _locked(node)))
+                routes.append(
+                    RouteSegment(
+                        native_id,
+                        BoardObjectId(net_names[net]),
+                        _point(_child(node, "start")),
+                        _point(_child(node, "end")),
+                        _um(_atoms(_child(node, "width"))[0]),
+                        _atoms(_child(node, "layer"))[0],
+                        _locked(node),
+                    )
+                )
             elif kind == "via":
                 if native_id is None: self._unpreservable(kind)
                 net = (_atoms(_child(node, "net")) or [""])[0]
-                vias.append(Via(native_id, BoardObjectId(net_names[net]), _point(_child(node, "at")), _um(_atoms(_child(node, "size"))[0]), _um(_atoms(_child(node, "drill"))[0]), tuple(_atoms(_child(node, "layers"))), _locked(node)))
+                vias.append(
+                    Via(
+                        native_id,
+                        BoardObjectId(net_names[net]),
+                        _point(_child(node, "at")),
+                        _um(_atoms(_child(node, "size"))[0]),
+                        _um(_atoms(_child(node, "drill"))[0]),
+                        tuple(_atoms(_child(node, "layers"))),
+                        _locked(node),
+                    )
+                )
             elif kind == "zone":
                 if native_id is None: self._unpreservable(kind)
                 polygon = _child(node, "polygon")

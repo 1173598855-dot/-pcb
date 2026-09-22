@@ -494,7 +494,16 @@ class ProposalStore:
                 semantic_diff_digest=semantic_diff_digest, evidence_set_digest=evidence_set_digest,
                 result_json=result, updated_at=now, version=ChangeProposalRow.version + 1))
             if changed.rowcount != 1: raise StaleLeaseError(task_id)
-            payload = audit_payload(actor_type="service", actor_id="pcbflow", action="proposal.execute", object_type="change_proposal", object_id=proposal_id, before_digest=batch_row.canonical_digest, after_digest=review_digest, result="ready_for_review")
+            payload = audit_payload(
+                actor_type="service",
+                actor_id="pcbflow",
+                action="proposal.execute",
+                object_type="change_proposal",
+                object_id=proposal_id,
+                before_digest=batch_row.canonical_digest,
+                after_digest=review_digest,
+                result="ready_for_review",
+            )
             payload.update({"project_id": row.project_id, "task_id": task_id, "candidate_revision": candidate_revision})
             session.add(OutboxEventRow(id=new_id("evt"), aggregate_type="change_proposal", aggregate_id=proposal_id,
                 event_type="proposal.ready_for_review", payload_json=payload, created_at=now, processed_at=None, attempt_count=0, last_error_code=None))
@@ -615,7 +624,16 @@ class ProposalStore:
                 row.status = ProposalStatus.STALE.value
                 row.updated_at = now
                 row.version += 1
-                stale_payload = audit_payload(actor_type=actor_type, actor_id=actor_id, action="proposal.accept", object_type="change_proposal", object_id=proposal_id, before_digest=subject_digest, after_digest=None, result="stale")
+                stale_payload = audit_payload(
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                    action="proposal.accept",
+                    object_type="change_proposal",
+                    object_id=proposal_id,
+                    before_digest=subject_digest,
+                    after_digest=None,
+                    result="stale",
+                )
                 stale_payload.update({"project_id": row.project_id, "proposal_id": proposal_id, "base_revision": base_revision, "current_revision": project.current_revision})
                 session.add(OutboxEventRow(
                     id=new_id("evt"), aggregate_type="change_proposal",
@@ -666,7 +684,16 @@ class ProposalStore:
                 row.status = ProposalStatus.ACCEPTED.value
                 row.updated_at = now
                 row.version += 1
-                accepted_payload = audit_payload(actor_type=actor_type, actor_id=actor_id, action="proposal.accept", object_type="change_proposal", object_id=proposal_id, before_digest=subject_digest, after_digest=candidate_snapshot_digest, result="accepted")
+                accepted_payload = audit_payload(
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                    action="proposal.accept",
+                    object_type="change_proposal",
+                    object_id=proposal_id,
+                    before_digest=subject_digest,
+                    after_digest=candidate_snapshot_digest,
+                    result="accepted",
+                )
                 accepted_payload.update({"project_id": row.project_id, "proposal_id": proposal_id, "revision": candidate_revision, "snapshot_digest": candidate_snapshot_digest, "decision": "approve"})
                 session.add(OutboxEventRow(
                     id=new_id("evt"), aggregate_type="project",
@@ -731,7 +758,16 @@ class ProposalStore:
             row.status = ProposalStatus.REJECTED.value
             row.updated_at = now
             row.version += 1
-            rejected_payload = audit_payload(actor_type=actor_type, actor_id=actor_id, action="proposal.reject", object_type="change_proposal", object_id=proposal_id, before_digest=subject_digest, after_digest=None, result="rejected")
+            rejected_payload = audit_payload(
+                actor_type=actor_type,
+                actor_id=actor_id,
+                action="proposal.reject",
+                object_type="change_proposal",
+                object_id=proposal_id,
+                before_digest=subject_digest,
+                after_digest=None,
+                    result="rejected",
+                )
             rejected_payload.update({"project_id": row.project_id, "proposal_id": proposal_id, "decision": "reject"})
             session.add(OutboxEventRow(
                 id=new_id("evt"), aggregate_type="change_proposal",

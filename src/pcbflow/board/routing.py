@@ -349,7 +349,13 @@ def _validate_candidate(
     return True
 
 
-def _route_net(snapshot: BoardSnapshot, rulepack: ManufacturingRulePack, net: Net, pads: tuple[object, ...], congestion: dict[tuple[int, int, str], int]) -> tuple[list[RouteSegment], list[Via], list[tuple[PointUm, str]] | None, int]:
+def _route_net(
+    snapshot: BoardSnapshot,
+    rulepack: ManufacturingRulePack,
+    net: Net,
+    pads: tuple[object, ...],
+    congestion: dict[tuple[int, int, str], int],
+) -> tuple[list[RouteSegment], list[Via], list[tuple[PointUm, str]] | None, int]:
     # Connect each deterministic pad pair.  This creates one connected tree for
     # the V1 star-free fixture without inventing a whole-board net expansion.
     paths: list[list[tuple[PointUm, str]]] = []
@@ -400,7 +406,15 @@ def _route_net(snapshot: BoardSnapshot, rulepack: ManufacturingRulePack, net: Ne
     return segments, vias, flattened, score
 
 
-def _astar(snapshot: BoardSnapshot, rulepack: ManufacturingRulePack, net: Net, start: object, target: object, congestion: dict[tuple[int, int, str], int], max_vias: int) -> tuple[list[tuple[PointUm, str]] | None, int]:
+def _astar(
+    snapshot: BoardSnapshot,
+    rulepack: ManufacturingRulePack,
+    net: Net,
+    start: object,
+    target: object,
+    congestion: dict[tuple[int, int, str], int],
+    max_vias: int,
+) -> tuple[list[tuple[PointUm, str]] | None, int]:
     step = rulepack.routing.grid_step_um
     start_point, target_point = start.position, target.position  # type: ignore[attr-defined]
     starts = tuple((start_point, layer) for layer in snapshot.layers if layer in start.layers)  # type: ignore[attr-defined]

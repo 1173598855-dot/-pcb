@@ -434,7 +434,19 @@ class ProposalExecutor:
         command_execution_data: bytes | None = None
         candidate_revision: str | None = None
         def add(kind, data, media="application/octet-stream", verdict="pass"):
-            descriptor = self._put(data, media); evidence.append(EvidenceRegistration(descriptor, EvidenceItem(kind=kind, artifact_digest=descriptor.digest, media_type=media, verdict=verdict))); return descriptor
+            descriptor = self._put(data, media)
+            evidence.append(
+                EvidenceRegistration(
+                    descriptor,
+                    EvidenceItem(
+                        kind=kind,
+                        artifact_digest=descriptor.digest,
+                        media_type=media,
+                        verdict=verdict,
+                    ),
+                )
+            )
+            return descriptor
         def add_failed_evidence_set():
             if command_execution_data is not None and not any(
                 item.item.kind == "command_execution_log" for item in evidence
@@ -523,7 +535,12 @@ class ProposalExecutor:
                         ]
                     }
                 )
-                if project.mode is not ProjectMode.MANAGED or project.current_revision != batch.base_revision or requirements.status is not RequirementSetStatus.FROZEN or project.active_requirement_set_id != requirements.id:
+                if (
+                    project.mode is not ProjectMode.MANAGED
+                    or project.current_revision != batch.base_revision
+                    or requirements.status is not RequirementSetStatus.FROZEN
+                    or project.active_requirement_set_id != requirements.id
+                ):
                     raise TerminalTaskError("DESIGN_COMMAND_PRECONDITION_FAILED", "proposal base is no longer current")
                 if requirements.frozen_revision is None or not self._revisions.is_ancestor(project.id, requirements.frozen_revision, batch.base_revision):
                     raise TerminalTaskError("DESIGN_COMMAND_PRECONDITION_FAILED", "requirement revision is not an ancestor")
@@ -560,7 +577,23 @@ class ProposalExecutor:
                     except ValueError as error:
                         raise TerminalTaskError("PROJECT_PATH_OUTSIDE_WORKTREE", "adapter modified a path outside the worktree") from error
                 assert_project_tree_safe(workspace, max_files=self._max_files, max_bytes=self._max_bytes)
-                attributions = tuple(CommandAttribution(command_id=result.command_id, requirement_ids=next(c.provenance.requirement_ids for c in batch.commands if c.command_id == result.command_id), risk=next(c.risk for c in batch.commands if c.command_id == result.command_id), selectors=result.effects) for result in applied.command_results)
+                attributions = tuple(
+                    CommandAttribution(
+                        command_id=result.command_id,
+                        requirement_ids=next(
+                            c.provenance.requirement_ids
+                            for c in batch.commands
+                            if c.command_id == result.command_id
+                        ),
+                        risk=next(
+                            c.risk
+                            for c in batch.commands
+                            if c.command_id == result.command_id
+                        ),
+                        selectors=result.effects,
+                    )
+                    for result in applied.command_results
+                )
                 semantic = build_semantic_diff(before, after, attributions)
                 if not semantic.changes:
                     raise TerminalTaskError("DESIGN_COMMAND_NO_EFFECT", "design commands produced no semantic change")
@@ -647,7 +680,14 @@ class ProposalExecutor:
                 )
                 candidate_revision = candidate.revision
                 artifacts = tuple(item.item for item in evidence)
-                evidence_set = EvidenceSet(project_id=project.id, task_id=lease.task_id, proposal_id=proposal_id, base_revision=batch.base_revision, candidate_revision=candidate.revision, artifacts=artifacts)
+                evidence_set = EvidenceSet(
+                    project_id=project.id,
+                    task_id=lease.task_id,
+                    proposal_id=proposal_id,
+                    base_revision=batch.base_revision,
+                    candidate_revision=candidate.revision,
+                    artifacts=artifacts,
+                )
                 evidence_set_descriptor = add("proposal_evidence_set", canonical_json_bytes(evidence_set.model_dump(mode="json")), "application/json")
                 evidence_set_digest = evidence_set_descriptor.digest
                 if not all(self._artifacts.verify(item.item.artifact_digest) for item in evidence):
@@ -685,7 +725,19 @@ class ProposalExecutor:
                 self._revisions.publish_candidate_ref(project.id, f"refs/pcbflow/proposals/{proposal_id}", candidate.revision)
                 self._hit_fault(FaultPoint.AFTER_PROPOSAL_REF_BEFORE_DATABASE)
                 self._tasks.assert_active(lease.task_id, lease.lease_token, self._clock())
-                self._proposal_store.mark_ready(proposal_id, lease.task_id, lease.lease_token, self._clock(), candidate.revision, candidate.snapshot_digest, review, semantic_descriptor.digest, evidence_set_digest, result, tuple(evidence))
+                self._proposal_store.mark_ready(
+                    proposal_id,
+                    lease.task_id,
+                    lease.lease_token,
+                    self._clock(),
+                    candidate.revision,
+                    candidate.snapshot_digest,
+                    review,
+                    semantic_descriptor.digest,
+                    evidence_set_digest,
+                    result,
+                    tuple(evidence),
+                )
                 return result
         except TerminalTaskError as error:
             if _fault_active.get():
@@ -694,7 +746,17 @@ class ProposalExecutor:
             evidence_set_digest = add_failed_evidence_set().digest
             digest_map = {item.item.kind: item.item.artifact_digest for item in evidence}
             semantic_digest = digest_map.get("schematic_semantic_diff")
-            self._proposal_store.mark_validation_failed(proposal_id, lease.task_id, lease.lease_token, self._clock(), error.code, semantic_digest, evidence_set_digest, {"error_code": error.code, "artifact_digests": digest_map}, tuple(evidence))
+            self._proposal_store.mark_validation_failed(
+                proposal_id,
+                lease.task_id,
+                lease.lease_token,
+                self._clock(),
+                error.code,
+                semantic_digest,
+                evidence_set_digest,
+                {"error_code": error.code, "artifact_digests": digest_map},
+                tuple(evidence),
+            )
             raise
         except (
             KicadUnavailableError,
@@ -766,7 +828,17 @@ class ProposalExecutor:
             failed = TerminalTaskError("CANDIDATE_VALIDATION_FAILED", str(error))
             evidence_set_digest = add_failed_evidence_set().digest
             digest_map = {item.item.kind: item.item.artifact_digest for item in evidence}
-            self._proposal_store.mark_validation_failed(proposal_id, lease.task_id, lease.lease_token, self._clock(), failed.code, digest_map.get("schematic_semantic_diff"), evidence_set_digest, {"error_code": failed.code, "artifact_digests": digest_map}, tuple(evidence))
+            self._proposal_store.mark_validation_failed(
+                proposal_id,
+                lease.task_id,
+                lease.lease_token,
+                self._clock(),
+                failed.code,
+                digest_map.get("schematic_semantic_diff"),
+                evidence_set_digest,
+                {"error_code": failed.code, "artifact_digests": digest_map},
+                tuple(evidence),
+            )
             raise failed from error
 
 
