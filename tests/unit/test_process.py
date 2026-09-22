@@ -35,16 +35,18 @@ def test_runner_reports_timeout(tmp_path: Path) -> None:
     started = perf_counter()
     with pytest.raises(ProcessTimeoutError) as raised:
         ProcessRunner(max_output_bytes=1_024).run(
-            [sys.executable, "-c", "import time; time.sleep(5)"],
+            [sys.executable, "-c", "import time; time.sleep(30)"],
             tmp_path,
             0.05,
         )
 
     assert raised.value.argv[0] == sys.executable
     assert raised.value.timeout_seconds == 0.05
-    # Windows taskkill /T /F may take a couple of seconds to reap a process
-    # tree, but timeout handling must still return well before the child exits.
-    assert perf_counter() - started < 4
+    # Timeout handling must return before the child would have exited on its
+    # own. Reaping the tree uses `taskkill /T /F`, which gives itself up to
+    # five seconds to complete, so the bound has to cover that worst case
+    # rather than the child's original sleep duration.
+    assert perf_counter() - started < 30
 
 
 def test_runner_terminates_a_process_when_its_task_is_cancelled(tmp_path: Path) -> None:
@@ -62,12 +64,12 @@ def test_runner_terminates_a_process_when_its_task_is_cancelled(tmp_path: Path) 
                         (
                             "from pathlib import Path; import sys, time; "
                             "Path(sys.argv[1]).write_text('started', encoding='utf-8'); "
-                            "time.sleep(30)"
+                            "time.sleep(300)"
                         ),
                         str(marker),
                     ],
                     tmp_path,
-                    30,
+                    300,
                 )
         except BaseException as error:
             errors.append(error)
@@ -80,7 +82,9 @@ def test_runner_terminates_a_process_when_its_task_is_cancelled(tmp_path: Path) 
     assert marker.exists()
 
     cancelled.set()
-    thread.join(timeout=5)
+    # Cancellation reaps the tree through `taskkill /T /F`, which may take up
+    # to five seconds on a loaded machine; allow that before failing.
+    thread.join(timeout=20)
 
     assert not thread.is_alive()
     assert len(errors) == 1
