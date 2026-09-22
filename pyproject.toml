@@ -29,6 +29,7 @@ dev = [
 
 [project.scripts]
 pcbflow = "pcbflow.cli:app"
+pcbflow-mcp = "pcbflow.mcp_server:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
