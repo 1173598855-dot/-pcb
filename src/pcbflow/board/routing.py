@@ -196,80 +196,14 @@ class Autorouter:
             ripped_this_round: list[BoardObjectId] = []
             for net_id in tuple(sorted(unresolved, key=str)):
                 net, pads = routable[net_id]
-                # 多路筛选：先尝试已存档的候选解决方案（按得分排序）
-                sorted_candidates = sorted(candidate_archive.items(), key=lambda item: candidate_scores.get(item[0], 10**18))
-                for candidate_key, (candidate_route_segments, candidate_vias, candidate_path, candidate_raw_score) in sorted_candidates:
-                    candidate_net = candidate_key[0]
-                    candidate_round = candidate_key[1]
-                    # 检查是否超过当前轮次（可控范围扩展）
-                    if candidate_round < round_index - 1:
-                        continue
-                    if candidate_net is not net_id:
-                        continue
-                    # 计算当前候选得分
-                    via_penalty = len(candidate_vias) * 500
-                    length_penalty = sum(
-                        ((candidate_path[i + 1][0].x - candidate_path[i][0].x) ** 2 + (candidate_path[i + 1][0].y - candidate_path[i][0].y) ** 2) ** 0.5
-                        for i in range(len(candidate_path) - 1)
-                    )
-                    current_score = candidate_raw_score + via_penalty + int(length_penalty)
-                    # 检查是否已在 solutions 中
-                    if candidate_net in solutions:
-                        continue
-                    trial = replace(
-                        routing_snapshot,
-                        routes=tuple(item for item in routing_snapshot.routes if item.id not in {item.id for item in candidate_route_segments}),
-                        vias=tuple(item for item in routing_snapshot.vias if item.id not in {item.id for item in candidate_vias}),
-                    )
-                    # 验证器：快速检查可行性（网格 + 层覆盖）
-                    if not _validate_candidate(trial, net, pads, rulepack):
-                        continue
-                    paths.append(RoutePathEvidence(net_id, candidate_path, tuple(layer for _, layer in candidate_path), current_score, len(candidate_vias)))
-                    removed_baseline_ids = {item.id for item in candidate_route_segments} & original_unlocked_route_ids
-                    evidence_removed.update(removed_baseline_ids)
-                    removed_original.update(removed_baseline_ids)
-                    ripped_this_round.extend(sorted(removed_baseline_ids, key=str))
-                    # 安装
-                    routing_snapshot = replace(
-                        routing_snapshot,
-                        routes=tuple(item for item in routing_snapshot.routes if item.id not in {item.id for item in candidate_route_segments}) + tuple(candidate_route_segments),
-                        vias=routing_snapshot.vias + tuple(candidate_vias),
-                    )
-                    solutions[net_id] = (candidate_route_segments, candidate_vias, candidate_path, candidate_raw_score)
-                    # 更新候选存档（可选）
-                    candidate_archive[(net_id, round_index)] = (candidate_route_segments, candidate_vias, candidate_path, candidate_raw_score)
-                    candidate_scores[(net_id, round_index)] = current_score
-                    unconnected.discard(net_id)
-                    progress = True
-                    break
-                if progress:
-                    break
-                # 兜底机制：回退到已失败候选的重试；若无候选可回退，
-                # 则依次移除单个未锁定跨网障碍后重试（受限协商）。
-                fallback_attempted = False
+                # 受限协商：每轮只剥离一个明确障碍，顺序为
+                #   1. 同一个请求网中已归档但本轮被抢占的冲突解；
+                #   2. 明确未锁定、不属于请求集合的单条跨网障碍。
+                # 每轮只推进一个障碍，保证 actual_rounds 可复算。
+                attempt_groups: list[tuple[BoardObjectId | None, tuple[BoardObjectId, ...]]] = []
                 for candidate_net, candidate in sorted(solutions.items(), key=lambda item: str(item[0])):
                     if candidate_net != net_id:
-                        continue
-                    if candidate_net in unconnected:
-                        fallback_attempted = True
-                        trial = replace(
-                            routing_snapshot,
-                            routes=tuple(item for item in routing_snapshot.routes if item.net_id != candidate_net),
-                            vias=tuple(item for item in routing_snapshot.vias if item.net_id != candidate_net),
-                        )
-                        route_segments, route_vias, path, score = _route_net(trial, rulepack, net, pads, congestion)
-                        if path is None:
-                            continue
-                        paths.append(RoutePathEvidence(net_id, tuple(point for point, _ in path), tuple(layer for _, layer in path), score, len(route_vias)))
-                        install(net_id, (route_segments, route_vias, path, score))
-                        evidence_removed.update({item.id for item in route_segments} & original_unlocked_route_ids)
-                        removed_original.update({item.id for item in route_segments} & original_unlocked_route_ids)
-                        unconnected.discard(net_id)
-                        progress = True
-                        break
-                if progress:
-                    break
-                # 单障碍受限协商：仅剥离一个明确未锁定的非请求网障碍。
+                        attempt_groups.append((candidate_net, tuple(item.id for item in candidate[0])))
                 for obstacle in sorted(
                     (
                         item for item in routing_snapshot.routes
@@ -279,31 +213,60 @@ class Autorouter:
                     ),
                     key=lambda item: str(item.id),
                 ):
+                    attempt_groups.append((None, (obstacle.id,)))
+                attempt_groups.sort(key=lambda item: (item[0] is None, tuple(str(value) for value in item[1])))
+                for candidate_net, obstacle_ids in attempt_groups:
+                    obstacle_set = set(obstacle_ids)
+                    # 目标网自己的未锁定旧几何本轮一并替换（不算跨网扩张）。
+                    own_unlocked = {
+                        item.id
+                        for item in routing_snapshot.routes
+                        if item.net_id == net_id
+                        and not item.route_lock
+                        and item.id in original_unlocked_route_ids
+                    }
+                    strip = obstacle_set | own_unlocked
                     trial = replace(
                         routing_snapshot,
-                        routes=tuple(item for item in routing_snapshot.routes if item.id != obstacle.id),
-                        vias=tuple(item for item in routing_snapshot.vias if item.id != obstacle.id),
+                        routes=tuple(item for item in routing_snapshot.routes if item.id not in strip),
+                        vias=tuple(item for item in routing_snapshot.vias if item.id not in strip),
                     )
                     route_segments, route_vias, path, score = _route_net(trial, rulepack, net, pads, congestion)
                     if path is None:
                         continue
-                    paths.append(RoutePathEvidence(net_id, tuple(point for point, _ in path), tuple(layer for _, layer in path), score, len(route_vias)))
+                    # 每轮最多剥离一个跨网障碍；本网旧线替换不计入该上限。
+                    cross_net = sorted(obstacle_set & original_unlocked_route_ids, key=str)
+                    if len(cross_net) > 1:
+                        continue
+                    ripped = sorted(set(cross_net) | own_unlocked, key=str)
                     routing_snapshot = trial
-                    removed_original.add(obstacle.id)
-                    evidence_removed.add(obstacle.id)
-                    ripped_this_round.append(obstacle.id)
+                    removed_original.update(ripped)
+                    evidence_removed.update(ripped)
+                    ripped_this_round.extend(ripped)
+                    if candidate_net is not None and candidate_net in solutions:
+                        solutions.pop(candidate_net, None)
+                    paths.append(RoutePathEvidence(net_id, tuple(point for point, _ in path), tuple(layer for _, layer in path), score, len(route_vias)))
                     install(net_id, (route_segments, route_vias, path, score))
                     unconnected.discard(net_id)
                     findings = [item for item in findings if not (item.rule_id == "PCB_ROUTE_UNROUTABLE" and item.subject == str(net_id))]
+                    if candidate_net is not None:
+                        candidate_info = routable.get(candidate_net)
+                        if candidate_info is not None:
+                            reroute_segments, reroute_vias, reroute_path, reroute_score = _route_net(
+                                routing_snapshot, rulepack, candidate_info[0], candidate_info[1], congestion
+                            )
+                            if reroute_path is not None:
+                                paths.append(RoutePathEvidence(candidate_net, tuple(point for point, _ in reroute_path), tuple(layer for _, layer in reroute_path), reroute_score, len(reroute_vias)))
+                                install(candidate_net, (reroute_segments, reroute_vias, reroute_path, reroute_score))
+                                unconnected.discard(candidate_net)
+                                findings = [item for item in findings if not (item.rule_id == "PCB_ROUTE_UNROUTABLE" and item.subject == str(candidate_net))]
                     progress = True
                     break
                 if progress:
                     break
-                if fallback_attempted:
-                    break
-            rounds.append(RoutingRoundEvidence(round_index, requested, score_now(), tuple(sorted(set(ripped_this_round), key=str))))
             if not progress:
                 break
+            rounds.append(RoutingRoundEvidence(round_index, requested, score_now(), tuple(sorted(set(ripped_this_round), key=str))))
 
         segments = [item for net_id in sorted(solutions, key=str) for item in solutions[net_id][0]]
         vias = [item for net_id in sorted(solutions, key=str) for item in solutions[net_id][1]]
