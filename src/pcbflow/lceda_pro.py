@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 import re
 from typing import Protocol
 
+from pcbflow.canonical import hash_file
 from pcbflow.eda import EdaCapability
 from pcbflow.domain import EdaOperation, RequestInvalidError
 from pcbflow.process import ProcessPort, ProcessTimeoutError
@@ -227,11 +227,7 @@ class LcedaProAdapter:
 
     @staticmethod
     def _hash_executable(executable: Path) -> str:
-        digest = hashlib.sha256()
-        with executable.open("rb") as stream:
-            while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
-        return f"sha256:{digest.hexdigest()}"
+        return hash_file(executable)
 
     @classmethod
     def _executable_matches(cls, executable: Path, expected_digest: str) -> bool:

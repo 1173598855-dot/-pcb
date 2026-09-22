@@ -32,6 +32,7 @@ from pcbflow.domain import Project, ProjectMode, new_id, utc_now
 from pcbflow.observability import MetricName, Metrics, audit_payload, log_event
 from pcbflow.process import ProcessPort, ProcessResult
 from pcbflow.repositories import IdempotencyConflictError, ProjectRepository
+from pcbflow.workspaces import _remove_readonly_entry
 from pcbflow.revision_store import ProjectRevisionStore
 from pcbflow.workspaces import (
     WorkspaceCopier,
@@ -100,15 +101,6 @@ class ProjectNotManagedError(RuntimeError):
 class CandidateRevision:
     revision: str
     snapshot_digest: str
-
-
-def _remove_readonly_entry(
-    function: Callable[[str], object], path: str, error: BaseException
-) -> None:
-    if not isinstance(error, PermissionError):
-        raise error
-    os.chmod(path, stat.S_IWRITE)
-    function(path)
 
 
 def _strip_revision(revision: str) -> str:

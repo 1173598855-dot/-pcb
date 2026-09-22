@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -9,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
+from pcbflow.canonical import hash_file
 from pcbflow.domain import NormalizedFinding, ValidationReport
 from pcbflow.kicad_compatibility import (
     KicadCompatibilityProfile,
@@ -547,11 +547,7 @@ class KicadCli:
 
     @staticmethod
     def _hash_executable(executable: Path) -> str:
-        digest = hashlib.sha256()
-        with executable.open("rb") as stream:
-            while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
-        return f"sha256:{digest.hexdigest()}"
+        return hash_file(executable)
 
     @staticmethod
     def _executable_matches(executable: Path, expected_digest: str) -> bool:

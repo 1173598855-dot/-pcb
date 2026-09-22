@@ -5,6 +5,7 @@ import os
 import shutil
 import stat
 from contextlib import contextmanager
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterator
 
@@ -86,7 +87,7 @@ def _same_entry(left: os.stat_result, right: os.stat_result) -> bool:
 
 
 def _remove_readonly_entry(
-    function, path: str, error: BaseException
+    function: Callable[[str], object], path: str, error: BaseException
 ) -> None:
     if not isinstance(error, PermissionError):
         raise error
