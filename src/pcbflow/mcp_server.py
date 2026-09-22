@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -16,6 +18,44 @@ from mcp.types import CallToolResult, ListToolsResult, Tool
 logger = logging.getLogger(__name__)
 
 ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+_HTTP_TIMEOUT_SECONDS = 30.0
+_HEALTH_TIMEOUT_SECONDS = 5.0
+
+
+def _post_json_sync(
+    url: str, payload: Dict[str, Any], headers: Dict[str, str], label: str
+) -> Dict[str, Any]:
+    """POST ``payload`` as JSON and decode the JSON response.
+
+    Uses the standard library so the server keeps working without pulling an
+    extra HTTP client dependency; the blocking call is dispatched to a worker
+    thread by :func:`_post_json`.
+    """
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"{label} API error {error.code}: {detail}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"{label} API unreachable: {error.reason}") from error
+    except TimeoutError as error:
+        raise RuntimeError(
+            f"{label} API timed out after {_HTTP_TIMEOUT_SECONDS}s"
+        ) from error
+
+
+async def _post_json(
+    url: str, payload: Dict[str, Any], headers: Dict[str, str], label: str
+) -> Dict[str, Any]:
+    return await asyncio.to_thread(_post_json_sync, url, payload, headers, label)
 
 
 class CollaborationPriority(Enum):
@@ -76,6 +116,8 @@ class CircuitBreakerState:
 
 
 class MultiModelRouter:
+    _DEFAULT_BREAKER_THRESHOLD = 5
+
     def __init__(self, chains: Dict[str, CollaborationChain]) -> None:
         self._chains = chains
         self._health: Dict[str, ModelHealthState] = {}
@@ -241,7 +283,6 @@ class MultiModelRouter:
         task: Dict[str, Any],
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        url = model.endpoint_url
         api_key = os.environ.get(model.api_key_env, "default")
         payload: Dict[str, Any] = {
             "model": model.model_name,
@@ -249,17 +290,16 @@ class MultiModelRouter:
             "max_tokens": model.max_tokens,
             "temperature": model.temperature,
         }
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
 
-        loop = asyncio.get_event_loop()
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=30.0) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    raise RuntimeError(f"Local model API error {resp.status}: {text}")
-                result: Dict[str, Any] = await resp.json()
-                result["model"] = model.name
-                return result
+        result = await _post_json(
+            model.endpoint_url, payload, headers, "Local model"
+        )
+        result["model"] = model.name
+        return result
 
     async def _call_azure(
         self,
@@ -267,9 +307,6 @@ class MultiModelRouter:
         task: Dict[str, Any],
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        import aiohttp
-
-        url = model.endpoint_url
         api_key = os.environ.get(model.api_key_env, "")
         payload: Dict[str, Any] = {
             "model": model.model_name,
@@ -277,16 +314,16 @@ class MultiModelRouter:
             "max_tokens": model.max_tokens,
             "temperature": model.temperature,
         }
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=30.0) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    raise RuntimeError(f"Azure model API error {resp.status}: {text}")
-                result: Dict[str, Any] = await resp.json()
-                result["model"] = model.name
-                return result
+        result = await _post_json(
+            model.endpoint_url, payload, headers, "Azure model"
+        )
+        result["model"] = model.name
+        return result
 
     def _build_messages(
         self,
@@ -333,15 +370,22 @@ class MultiModelRouter:
         return state.healthy
 
     async def _check_health(self, model: ModelConfig) -> bool:
-        if model.health_check_url:
-            try:
-                import aiohttp
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(model.health_check_url, timeout=5.0) as resp:
-                        return resp.status == 200
-            except Exception:
-                return False
-        return True
+        if not model.health_check_url:
+            return True
+        return await asyncio.to_thread(
+            self._check_health_sync, model.health_check_url
+        )
+
+    @staticmethod
+    def _check_health_sync(url: str) -> bool:
+        request = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(
+                request, timeout=_HEALTH_TIMEOUT_SECONDS
+            ) as response:
+                return response.status == 200
+        except Exception:
+            return False
 
     async def _record_success(self, model_name: str, chain_name: str) -> None:
         async with self._lock:
@@ -360,13 +404,21 @@ class MultiModelRouter:
         self, model_name: str, chain_name: str, error: Exception
     ) -> None:
         now = time.monotonic()
+        chain = self._chains.get(chain_name)
+        if chain is not None and not chain.enable_circuit_breaker:
+            return
+        threshold = (
+            chain.circuit_breaker_threshold
+            if chain is not None
+            else self._DEFAULT_BREAKER_THRESHOLD
+        )
         async with self._lock:
             state = self._circuit_breakers.get(chain_name)
             if state is None:
                 state = CircuitBreakerState()
             state.failure_count += 1
             state.last_failure = now
-            if state.failure_count >= chain.max_attempts:
+            if state.failure_count >= threshold:
                 state.state = "open"
             self._circuit_breakers[chain_name] = state
 

@@ -367,3 +367,39 @@ def test_quiet_signal_path_avoids_prohibited_zone_geometry(snapshot: BoardSnapsh
 
     assert result.findings == ()
     assert all(not prohibited.contains(point) for point in result.evidence.selected_paths[0].points)
+
+
+def _snapshot_4l() -> BoardSnapshot:
+    return BoardSnapshot.load_json(
+        (FIXTURE_ROOT / "stm32-environment-controller-4l-v1.json").read_bytes()
+    )
+
+
+def _rulepack_4l() -> ManufacturingRulePack:
+    return ManufacturingRulePack.load_json(
+        (FIXTURE_ROOT / "stm32-environment-controller-4l-rulepack.json").read_bytes()
+    )
+
+
+def test_router_routes_on_a_four_layer_stack() -> None:
+    snapshot = _snapshot_4l()
+    rulepack = _rulepack_4l()
+
+    assert BoardRuleChecker().check(snapshot, rulepack) == ()
+
+    result = Autorouter().route(snapshot, rulepack, ("GPIO",), seed=7)
+
+    assert result.findings == ()
+    assert result.segments
+    assert all(segment.layer in snapshot.layers for segment in result.segments)
+    assert all(via.layers for via in result.vias)
+
+
+def test_four_layer_routing_is_deterministic() -> None:
+    snapshot = _snapshot_4l()
+    rulepack = _rulepack_4l()
+
+    first = Autorouter().route(snapshot, rulepack, ("GPIO",), seed=7)
+    second = Autorouter().route(snapshot, rulepack, ("GPIO",), seed=7)
+
+    assert first == second

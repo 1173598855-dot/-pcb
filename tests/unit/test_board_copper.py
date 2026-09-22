@@ -33,6 +33,18 @@ def _rulepack() -> ManufacturingRulePack:
     )
 
 
+def _snapshot_4l() -> BoardSnapshot:
+    return BoardSnapshot.load_json(
+        (FIXTURE_ROOT / "stm32-environment-controller-4l-v1.json").read_bytes()
+    )
+
+
+def _rulepack_4l() -> ManufacturingRulePack:
+    return ManufacturingRulePack.load_json(
+        (FIXTURE_ROOT / "stm32-environment-controller-4l-rulepack.json").read_bytes()
+    )
+
+
 def _snapshot_with_ground_pad() -> BoardSnapshot:
     snapshot = _snapshot()
     pads = tuple(
@@ -273,4 +285,37 @@ def test_board_checker_rejects_copper_in_sensitive_quiet_keepout() -> None:
     assert any(
         item.rule_id == "PCB_KEEPOUT_COPPER_ZONE" and item.subject == "zone_gnd_bad_quiet"
         for item in findings
+    )
+
+
+def test_four_layer_copper_plan_pours_every_layer_and_stitches_the_stack() -> None:
+    snapshot = _snapshot_4l()
+    rulepack = _rulepack_4l()
+
+    assert BoardRuleChecker().check(snapshot, rulepack) == ()
+
+    result = CopperPlanner().plan(snapshot, rulepack)
+
+    assert {zone.layer for zone in result.zones} == {
+        "F.Cu",
+        "In1.Cu",
+        "In2.Cu",
+        "B.Cu",
+    }
+    assert result.vias, "four-layer board must still get ground stitching vias"
+    # Stitching vias must span every ground layer the point is covered by,
+    # which on this fixture includes the inner layers.
+    assert all(via.net_id == BoardObjectId("GND") for via in result.vias)
+    assert any(len(via.layers) == 4 for via in result.vias)
+    for via in result.vias:
+        assert 2 <= len(via.layers) <= 4
+        assert set(via.layers) <= set(snapshot.layers)
+
+
+def test_four_layer_copper_plan_is_deterministic() -> None:
+    snapshot = _snapshot_4l()
+    rulepack = _rulepack_4l()
+
+    assert CopperPlanner().plan(snapshot, rulepack) == CopperPlanner().plan(
+        snapshot, rulepack
     )

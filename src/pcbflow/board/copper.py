@@ -628,15 +628,22 @@ def _stitching_vias(
     for point in candidates:
         if len(result) >= policy.max_vias:
             break
-        if not all(
-            any(
+        # A stitching via only makes sense where it actually connects copper:
+        # collect the ground layers whose zone covers this point and require
+        # at least two of them. Demanding every layer in the stack would make
+        # inner layers without a ground pour (or any board with more than two
+        # layers) produce no stitching at all.
+        covered = tuple(
+            layer
+            for layer in policy.layers
+            if any(
                 zone.net_id == _GND
                 and zone.layer == layer
                 and _rect_contains_circle(zone.bounds, point, via_radius)
                 for zone in all_zones
             )
-            for layer in policy.layers
-        ):
+        )
+        if len(covered) < 2:
             continue
         if _stitching_point_blocked(point, snapshot, rulepack, policy, result):
             continue
@@ -649,7 +656,7 @@ def _stitching_vias(
                 position=point,
                 diameter_um=policy.via_diameter_um,
                 hole_diameter_um=policy.via_hole_diameter_um,
-                layers=policy.layers,
+                layers=covered,
                 route_lock=False,
             )
         )

@@ -36,7 +36,7 @@ def validate_layer_names(layer_count: int, layer_names: tuple[str, ...]) -> None
     """Enforce that layer_names exactly matches the canonical stack for the layer count."""
     expected = _V1_LAYER_NAMES.get(layer_count)
     if expected is None:
-        allowed = ", ".join(str(count) for count in sorted(_SUPPORTED_STACKS))
+        allowed = ", ".join(str(count) for count in sorted(_V1_LAYER_NAMES))
         raise ValueError(
             f"rule pack supports {allowed} copper layers, not {layer_count}"
         )
