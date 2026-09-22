@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -12,7 +12,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from pcbflow.artifacts import ArtifactDescriptor, StagedArtifact
-from pcbflow.cancellation import TaskCancelledError
 from pcbflow.design_tables import (
     OutboxEventRow,
     PcbCandidateRow,
@@ -29,7 +28,6 @@ from pcbflow.eda import (
 )
 from pcbflow.domain import (
     Evidence,
-    Finding,
     NormalizedFinding,
     Project,
     ProjectMode,
@@ -50,133 +48,22 @@ from pcbflow.tables import (
     TaskRow,
 )
 from pcbflow.workspaces import assert_supported_entry
-
-
-class ProjectNotFoundError(LookupError):
-    pass
-
-
-class IdempotencyConflictError(RuntimeError):
-    pass
-
-
-class RevisionConflictError(RuntimeError):
-    def __init__(self, expected: str | None, actual: str | None) -> None:
-        super().__init__(f"expected {expected}, found {actual}")
-        self.expected = expected
-        self.actual = actual
-
-
-class TaskNotFoundError(LookupError):
-    pass
-
-
-class StaleLeaseError(RuntimeError):
-    pass
-
-
-class TaskNotCancellableError(RuntimeError):
-    def __init__(self, task_id: str, status: str) -> None:
-        super().__init__(f"task {task_id} cannot be cancelled from {status}")
-        self.task_id = task_id
-        self.status = status
-
-
-class EvidenceConflictError(RuntimeError):
-    pass
-
-
-def _utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
-def _assert_active_fence(
-    session: Session, task_id: str, lease_token: str, now: datetime
-) -> None:
-    cancelled = session.scalar(
-        select(TaskRow.id).where(
-            TaskRow.id == task_id,
-            TaskRow.status == TaskStatus.CANCELLED.value,
-        )
-    )
-    if cancelled is not None:
-        raise TaskCancelledError(task_id)
-    active = session.scalar(
-        select(TaskRow.id).where(
-            TaskRow.id == task_id,
-            TaskRow.lease_token == lease_token,
-            TaskRow.status == TaskStatus.RUNNING.value,
-            TaskRow.lease_expires_at.is_not(None),
-            TaskRow.lease_expires_at > now,
-        )
-    )
-    if active is None:
-        raise StaleLeaseError(task_id)
-
-
-def _project(row: ProjectRow) -> Project:
-    return Project(
-        id=row.id,
-        name=row.name,
-        source_path=Path(row.source_path),
-        created_at=_utc(row.created_at),
-        mode=ProjectMode(row.mode),
-        managed_repo_key=row.managed_repo_key,
-        current_revision=row.current_revision,
-        project_snapshot_digest=row.project_snapshot_digest,
-        active_requirement_set_id=row.active_requirement_set_id,
-        adoption_idempotency_key=row.adoption_idempotency_key,
-        adoption_input_digest=row.adoption_input_digest,
-        managed_at=_utc(row.managed_at) if row.managed_at is not None else None,
-        version=row.version,
-    )
-
-
-def _task(row: TaskRow) -> Task:
-    return Task(
-        id=row.id,
-        project_id=row.project_id,
-        kind=row.kind,
-        payload=dict(row.payload_json),
-        result=dict(row.result_json) if row.result_json is not None else None,
-        status=TaskStatus(row.status),
-        attempt_count=row.attempt_count,
-        last_error_code=row.last_error_code,
-        cancelled_at=(
-            _utc(row.cancelled_at) if row.cancelled_at is not None else None
-        ),
-        cancellation_reason=row.cancellation_reason,
-        created_at=_utc(row.created_at),
-        updated_at=_utc(row.updated_at),
-    )
-
-
-def _evidence(row: EvidenceRow) -> Evidence:
-    return Evidence(
-        id=row.id,
-        project_id=row.project_id,
-        task_id=row.task_id,
-        kind=row.kind,
-        artifact_digest=row.artifact_digest,
-        subject=row.subject,
-        verdict=row.verdict,
-        created_at=_utc(row.created_at),
-    )
-
-
-def _finding(row: FindingRow) -> Finding:
-    return Finding(
-        id=row.id,
-        project_id=row.project_id,
-        task_id=row.task_id,
-        evidence_id=row.evidence_id,
-        rule_id=row.rule_id,
-        severity=row.severity,
-        subject=row.subject,
-        message=row.message,
-        status=row.status,
-        created_at=_utc(row.created_at),
-    )
+from pcbflow.repository_errors import (
+    EvidenceConflictError,
+    IdempotencyConflictError,
+    ProjectNotFoundError,
+    RevisionConflictError,
+    StaleLeaseError,
+    TaskNotCancellableError,
+    TaskNotFoundError,
+)
+from pcbflow.repository_mapping import (
+    assert_active_fence as _assert_active_fence,
+    evidence as _evidence,
+    finding as _finding,
+    project as _project,
+    task as _task,
+)
 
 
 class ProjectRepository:
