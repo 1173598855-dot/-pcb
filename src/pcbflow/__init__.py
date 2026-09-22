@@ -20,6 +20,11 @@ from pcbflow.kicad_export import (
     KicadExportUnavailableError,
     KicadManufacturingExporter,
 )
+from pcbflow.release_packaging import (
+    PackagedRelease,
+    ReleasePackageError,
+    package_kicad_release,
+)
 
 # Board adapter exports
 from pcbflow.board.adapter import (
@@ -87,6 +92,10 @@ __all__ = [
     "KicadExportResult",
     "KicadExportUnavailableError",
     "KicadManufacturingExporter",
+    # Release packaging
+    "PackagedRelease",
+    "ReleasePackageError",
+    "package_kicad_release",
     # Board adapter
     "BoardSemanticDiff",
     "BoardSemanticMismatchError",
