@@ -18,12 +18,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from pcbflow.approvals import ApprovalDigestMismatchError, GateDecisionStore
 from pcbflow.artifacts import ArtifactDescriptor, ContentAddressedStore, StagedArtifact
 from pcbflow.board.adapter import CandidateWorkspace, PcbEdaAdapter, ReleaseArtifacts
-from pcbflow.board.ir import BoardSnapshot
-from pcbflow.board.rulepack import ManufacturingRulePack
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.cancellation import TaskCancelledError
 from pcbflow.design_tables import GateDecisionRow, PcbCandidateRow
-from pcbflow.domain import EdaKind, EdaOperation, NormalizedFinding, ProjectMode, RequestInvalidError, Task, TaskLease, TaskStatus, ValidationReport, new_id, utc_now
+from pcbflow.domain import EdaKind, EdaOperation, NormalizedFinding, ProjectMode, RequestInvalidError, Task, TaskLease, ValidationReport, new_id, utc_now
 from pcbflow.eda import validate_idempotency_key
 from pcbflow.lceda_pro import LcedaProCapabilityError
 from pcbflow.manufacturing import (

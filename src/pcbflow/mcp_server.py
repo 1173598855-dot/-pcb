@@ -5,15 +5,13 @@ import json
 import logging
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 from mcp.server.mcpserver import MCPServer
-from mcp.types import Tool, CallToolResult, ListToolsResult
-
-from pcbflow.domain import new_id, utc_now
+from mcp.types import CallToolResult, ListToolsResult, Tool
 
 logger = logging.getLogger(__name__)
 

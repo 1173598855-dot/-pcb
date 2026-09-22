@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, replace
-from typing import Iterable
 
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.domain import NormalizedFinding

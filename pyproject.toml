@@ -36,7 +36,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --basetemp=.pytest-tmp"
+addopts = "-ra --strict-markers"
 markers = [
   "kicad: requires a real supported kicad-cli",
   "lceda_pro: requires a verified official LCEDA Pro automation bridge",

@@ -6,18 +6,15 @@ import json
 import hashlib
 import time
 from contextvars import ContextVar
-from sqlalchemy import select, text, update
-from sqlalchemy.orm import Session
 from pathlib import Path
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, Protocol
-from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict
 
 from pcbflow.artifacts import ArtifactDescriptor
 from pcbflow.canonical import canonical_digest, canonical_json_bytes
-from pcbflow.commands import ValidationKind, evaluate_precondition, PreconditionContext
+from pcbflow.commands import ValidationKind, evaluate_precondition
 from pcbflow.commands import load_command_batch
 from pcbflow.component_bindings import (
     ComponentModuleBindingDigestMismatchError,
@@ -36,7 +33,7 @@ from pcbflow.tasks import TerminalTaskError
 from pcbflow.repositories import StaleLeaseError, TaskRepository
 from pcbflow.domain import TaskLease
 from pcbflow.revisions import RevisionService
-from pcbflow.schematic.adapter import CstSchematicAdapter, CommandResult
+from pcbflow.schematic.adapter import CstSchematicAdapter
 from pcbflow.schematic.diff import CommandAttribution, build_semantic_diff, semantic_diff_bytes
 from pcbflow.schematic.semantic import SchematicDocument, object_ref_key
 from pcbflow.kicad import (
@@ -48,15 +45,12 @@ from pcbflow.kicad import (
     KicadOperationUnsupportedError,
     parse_kicad_report,
     KicadUnavailableError,
-    KicadProjectNotFoundError,
-    KicadToolError,
+    KicadOperationUnsupportedError,
 )
 from pcbflow.kicad_compatibility import profile_for_major
 from pcbflow.repositories import ProjectRepository
 from pcbflow.validation import assert_project_tree_safe
-from pcbflow.design_tables import GateDecisionRow, OutboxEventRow, ProjectRevisionRow, ChangeProposalRow, DesignCommandBatchRow, RequirementSetRow
-from pcbflow.tables import ArtifactRow, EvidenceRow, ProjectRow
-from pcbflow.domain import ProjectMode, new_id
+from pcbflow.domain import ProjectMode
 from pcbflow.observability import MetricName, Metrics, bind_log_context
 
 
