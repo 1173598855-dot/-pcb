@@ -13,6 +13,13 @@ from pcbflow.lceda_pro import LcedaProAdapter, LcedaProCapabilityError
 from pcbflow.repositories import EvidenceRepository, ProjectRepository, TaskRepository
 from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.canonical import canonical_json_bytes
+from pcbflow.kicad_export import (
+    KicadExportError,
+    KicadExportRequest,
+    KicadExportResult,
+    KicadExportUnavailableError,
+    KicadManufacturingExporter,
+)
 
 # Board adapter exports
 from pcbflow.board.adapter import (
@@ -74,6 +81,12 @@ __all__ = [
     "ContentAddressedStore",
     # Canonical
     "canonical_json_bytes",
+    # KiCad export
+    "KicadExportError",
+    "KicadExportRequest",
+    "KicadExportResult",
+    "KicadExportUnavailableError",
+    "KicadManufacturingExporter",
     # Board adapter
     "BoardSemanticDiff",
     "BoardSemanticMismatchError",
