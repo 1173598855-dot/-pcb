@@ -60,6 +60,20 @@ class RoutingResult:
 _Solution = tuple[list[RouteSegment], list[Via], list[tuple[PointUm, str]], int]
 
 
+def _score_solution(solution: _Solution) -> int:
+    segments, vias, path, raw_score = solution
+    via_penalty = len(vias) * 500
+    length_penalty = sum(
+        ((path[i + 1][0].x - path[i][0].x) ** 2 + (path[i + 1][0].y - path[i][0].y) ** 2) ** 0.5
+        for i in range(len(path) - 1)
+    )
+    return raw_score + via_penalty + int(length_penalty)
+
+
+def _multi_candidate_score(solutions: dict[BoardObjectId, _Solution], requested: tuple[BoardObjectId, ...]) -> int:
+    return sum(_score_solution(solutions[net_id]) for net_id in requested if net_id in solutions)
+
+
 class Autorouter:
     """A deliberately narrow deterministic two-layer BoardIR router."""
 
@@ -92,9 +106,12 @@ class Autorouter:
         routable: dict[BoardObjectId, tuple[Net, tuple[object, ...]]] = {}
         routing_snapshot = snapshot
         solutions: dict[BoardObjectId, _Solution] = {}
+        candidate_archive: dict[tuple[BoardObjectId, int], _Solution] = {}
+        candidate_scores: dict[tuple[BoardObjectId, int], int] = {}
 
         def score_now() -> int:
-            return sum(item[3] for item in solutions.values())
+            return sum(_score_solution(item) for item in solutions.values())
+
 
         def install(net_id: BoardObjectId, value: _Solution) -> None:
             nonlocal routing_snapshot
@@ -124,9 +141,10 @@ class Autorouter:
                 vias=routing_snapshot.vias + tuple(value[1]),
             )
             solutions[net_id] = value
+            paths.append(RoutePathEvidence(net_id, tuple(p[0] for p in value[2]), tuple(l for _, l in value[2]), value[3], len(value[1])))
             _record_congestion(congestion, value[2])
 
-        # Negotiation is intentionally bounded.  The initial round replaces only
+        # Negotiation is intentionally bounded. The initial round replaces only
         # existing unlocked geometry on a selected requested net; no other net is
         # silently brought into scope.
         for net_id in requested:
@@ -159,8 +177,10 @@ class Autorouter:
                 findings.append(_finding("PCB_ROUTE_UNROUTABLE", net_id, "no legal constrained route exists"))
                 unconnected.add(net_id)
                 continue
-            paths.append(RoutePathEvidence(net_id, tuple(point for point, _ in path), tuple(layer for _, layer in path), score, len(route_vias)))
-            install(net_id, (route_segments, route_vias, path, score))
+            solution = (route_segments, route_vias, path, score)
+            install(net_id, solution)
+            candidate_archive[(net_id, 1)] = solution
+            candidate_scores[(net_id, 1)] = score
 
         # A failed request is retried only after a single explicit, unlocked,
         # cross-net obstacle has demonstrably made a legal path available.  This
@@ -176,65 +196,110 @@ class Autorouter:
             ripped_this_round: list[BoardObjectId] = []
             for net_id in tuple(sorted(unresolved, key=str)):
                 net, pads = routable[net_id]
-                candidate_groups: list[tuple[BoardObjectId | None, tuple[BoardObjectId, ...]]] = []
-                for candidate_net, candidate in sorted(solutions.items(), key=lambda item: str(item[0])):
-                    if candidate_net != net_id:
-                        candidate_groups.append((candidate_net, tuple(item.id for item in candidate[0])))
-                for obstacle in tuple(item for item in routing_snapshot.routes if not item.route_lock and item.net_id not in requested):
-                    candidate_groups.append((None, (obstacle.id,)))
-                candidate_groups.sort(key=lambda item: tuple(str(value) for value in item[1]))
-                for candidate_net, obstacle_ids in candidate_groups:
-                    obstacle_set = set(obstacle_ids)
+                # 多路筛选：先尝试已存档的候选解决方案（按得分排序）
+                sorted_candidates = sorted(candidate_archive.items(), key=lambda item: candidate_scores.get(item[0], 10**18))
+                for candidate_key, (candidate_route_segments, candidate_vias, candidate_path, candidate_raw_score) in sorted_candidates:
+                    candidate_net = candidate_key[0]
+                    candidate_round = candidate_key[1]
+                    # 检查是否超过当前轮次（可控范围扩展）
+                    if candidate_round < round_index - 1:
+                        continue
+                    if candidate_net is not net_id:
+                        continue
+                    # 计算当前候选得分
+                    via_penalty = len(candidate_vias) * 500
+                    length_penalty = sum(
+                        ((candidate_path[i + 1][0].x - candidate_path[i][0].x) ** 2 + (candidate_path[i + 1][0].y - candidate_path[i][0].y) ** 2) ** 0.5
+                        for i in range(len(candidate_path) - 1)
+                    )
+                    current_score = candidate_raw_score + via_penalty + int(length_penalty)
+                    # 检查是否已在 solutions 中
+                    if candidate_net in solutions:
+                        continue
                     trial = replace(
                         routing_snapshot,
-                        routes=tuple(item for item in routing_snapshot.routes if item.id not in obstacle_set),
-                        vias=tuple(item for item in routing_snapshot.vias if item.id not in obstacle_set),
+                        routes=tuple(item for item in routing_snapshot.routes if item.id not in {item.id for item in candidate_route_segments}),
+                        vias=tuple(item for item in routing_snapshot.vias if item.id not in {item.id for item in candidate_vias}),
+                    )
+                    # 验证器：快速检查可行性（网格 + 层覆盖）
+                    if not _validate_candidate(trial, net, pads, rulepack):
+                        continue
+                    paths.append(RoutePathEvidence(net_id, candidate_path, tuple(layer for _, layer in candidate_path), current_score, len(candidate_vias)))
+                    removed_baseline_ids = {item.id for item in candidate_route_segments} & original_unlocked_route_ids
+                    evidence_removed.update(removed_baseline_ids)
+                    removed_original.update(removed_baseline_ids)
+                    ripped_this_round.extend(sorted(removed_baseline_ids, key=str))
+                    # 安装
+                    routing_snapshot = replace(
+                        routing_snapshot,
+                        routes=tuple(item for item in routing_snapshot.routes if item.id not in {item.id for item in candidate_route_segments}) + tuple(candidate_route_segments),
+                        vias=routing_snapshot.vias + tuple(candidate_vias),
+                    )
+                    solutions[net_id] = (candidate_route_segments, candidate_vias, candidate_path, candidate_raw_score)
+                    # 更新候选存档（可选）
+                    candidate_archive[(net_id, round_index)] = (candidate_route_segments, candidate_vias, candidate_path, candidate_raw_score)
+                    candidate_scores[(net_id, round_index)] = current_score
+                    unconnected.discard(net_id)
+                    progress = True
+                    break
+                if progress:
+                    break
+                # 兜底机制：回退到已失败候选的重试；若无候选可回退，
+                # 则依次移除单个未锁定跨网障碍后重试（受限协商）。
+                fallback_attempted = False
+                for candidate_net, candidate in sorted(solutions.items(), key=lambda item: str(item[0])):
+                    if candidate_net != net_id:
+                        continue
+                    if candidate_net in unconnected:
+                        fallback_attempted = True
+                        trial = replace(
+                            routing_snapshot,
+                            routes=tuple(item for item in routing_snapshot.routes if item.net_id != candidate_net),
+                            vias=tuple(item for item in routing_snapshot.vias if item.net_id != candidate_net),
+                        )
+                        route_segments, route_vias, path, score = _route_net(trial, rulepack, net, pads, congestion)
+                        if path is None:
+                            continue
+                        paths.append(RoutePathEvidence(net_id, tuple(point for point, _ in path), tuple(layer for _, layer in path), score, len(route_vias)))
+                        install(net_id, (route_segments, route_vias, path, score))
+                        evidence_removed.update({item.id for item in route_segments} & original_unlocked_route_ids)
+                        removed_original.update({item.id for item in route_segments} & original_unlocked_route_ids)
+                        unconnected.discard(net_id)
+                        progress = True
+                        break
+                if progress:
+                    break
+                # 单障碍受限协商：仅剥离一个明确未锁定的非请求网障碍。
+                for obstacle in sorted(
+                    (
+                        item for item in routing_snapshot.routes
+                        if not item.route_lock
+                        and item.id in original_unlocked_route_ids
+                        and item.net_id not in requested
+                    ),
+                    key=lambda item: str(item.id),
+                ):
+                    trial = replace(
+                        routing_snapshot,
+                        routes=tuple(item for item in routing_snapshot.routes if item.id != obstacle.id),
+                        vias=tuple(item for item in routing_snapshot.vias if item.id != obstacle.id),
                     )
                     route_segments, route_vias, path, score = _route_net(trial, rulepack, net, pads, congestion)
                     if path is None:
                         continue
                     paths.append(RoutePathEvidence(net_id, tuple(point for point, _ in path), tuple(layer for _, layer in path), score, len(route_vias)))
-                    removed_baseline_ids = obstacle_set & original_unlocked_route_ids
-                    evidence_removed.update(removed_baseline_ids)
-                    removed_original.update(removed_baseline_ids)
-                    ripped_this_round.extend(sorted(removed_baseline_ids, key=str))
-                    if candidate_net is not None:
-                        solutions.pop(candidate_net, None)
-                        unresolved.append(candidate_net)
                     routing_snapshot = trial
-                    own_existing_ids = tuple(
-                        item.id for item in routing_snapshot.routes
-                        if item.net_id == net_id
-                        and not item.route_lock
-                        and item.id in original_unlocked_route_ids
-                    )
-                    ripped_this_round.extend(sorted(own_existing_ids, key=str))
+                    removed_original.add(obstacle.id)
+                    evidence_removed.add(obstacle.id)
+                    ripped_this_round.append(obstacle.id)
                     install(net_id, (route_segments, route_vias, path, score))
-                    findings = [item for item in findings if not (item.rule_id == "PCB_ROUTE_UNROUTABLE" and item.subject == str(net_id))]
                     unconnected.discard(net_id)
-                    if candidate_net is not None:
-                        unconnected.add(candidate_net)
-                        if not any(item.rule_id == "PCB_ROUTE_UNROUTABLE" and item.subject == str(candidate_net) for item in findings):
-                            findings.append(_finding("PCB_ROUTE_UNROUTABLE", candidate_net, "no legal constrained route exists"))
-                    unresolved.remove(net_id)
-                    if candidate_net is not None:
-                        candidate_info = routable[candidate_net]
-                        reroute_segments, reroute_vias, reroute_path, reroute_score = _route_net(
-                            routing_snapshot, rulepack, candidate_info[0], candidate_info[1], congestion
-                        )
-                        if reroute_path is not None:
-                            paths.append(RoutePathEvidence(
-                                candidate_net,
-                                tuple(point for point, _ in reroute_path),
-                                tuple(layer for _, layer in reroute_path),
-                                reroute_score,
-                                len(reroute_vias),
-                            ))
-                            install(candidate_net, (reroute_segments, reroute_vias, reroute_path, reroute_score))
-                            unconnected.discard(candidate_net)
-                            unresolved.remove(candidate_net)
-                            findings = [item for item in findings if not (item.rule_id == "PCB_ROUTE_UNROUTABLE" and item.subject == str(candidate_net))]
+                    findings = [item for item in findings if not (item.rule_id == "PCB_ROUTE_UNROUTABLE" and item.subject == str(net_id))]
                     progress = True
+                    break
+                if progress:
+                    break
+                if fallback_attempted:
                     break
             rounds.append(RoutingRoundEvidence(round_index, requested, score_now(), tuple(sorted(set(ripped_this_round), key=str))))
             if not progress:
@@ -284,6 +349,21 @@ class Autorouter:
             )
             return RoutingResult((), (), (), failed, rejected_evidence, locked)
         return RoutingResult((operation,), tuple(segments), tuple(vias), tuple(findings), evidence, locked)
+
+
+def _validate_candidate(
+    snapshot: BoardSnapshot,
+    net: Net,
+    pads: tuple[object, ...],
+    rulepack: ManufacturingRulePack,
+) -> bool:
+    """Validate candidate endpoints and layer coverage before installation."""
+    if not pads or not any(candidate.layers for candidate in pads):
+        return False
+    for pad in pads:
+        if not any(layer in snapshot.layers for layer in pad.layers):  # type: ignore[attr-defined]
+            return False
+    return True
 
 
 def _route_net(snapshot: BoardSnapshot, rulepack: ManufacturingRulePack, net: Net, pads: tuple[object, ...], congestion: dict[tuple[int, int, str], int]) -> tuple[list[RouteSegment], list[Via], list[tuple[PointUm, str]] | None, int]:
