@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "stm32-environment-controller-2l-v1",
+  "layer_count": 2,
+  "copper_oz": 1,
+  "max_board_size_um": {"width": 100000, "height": 80000},
+  "max_voltage_mv": 24000,
+  "net_classes": [
+    {"id": "signal", "min_width_um": 203, "clearance_um": 203, "min_via_diameter_um": 508, "min_via_hole_um": 254},
+    {"id": "quiet_signal", "min_width_um": 203, "clearance_um": 203, "min_via_diameter_um": 508, "min_via_hole_um": 254},
+    {"id": "logic_power", "min_width_um": 508, "clearance_um": 203, "min_via_diameter_um": 762, "min_via_hole_um": 381},
+    {"id": "load_power", "min_width_um": 2032, "clearance_um": 508, "min_via_diameter_um": 1016, "min_via_hole_um": 508},
+    {"id": "ground", "min_width_um": 508, "clearance_um": 203, "min_via_diameter_um": 762, "min_via_hole_um": 381}
+  ],
+  "routing": {
+    "grid_step_um": 1000,
+    "edge_clearance_um": 203,
+    "max_vias_per_net": 2,
+    "max_retry_rounds": 3
+  },
+  "copper": {
+    "edge_clearance_um": 203,
+    "stitching_pitch_um": 10000,
+    "max_stitching_vias": 16,
+    "thermal_spoke_count": 4,
+    "thermal_spoke_width_um": 254,
+    "thermal_gap_um": 203,
+    "min_island_area_um2": 1000000
+  },
+  "scope": {
+    "high_voltage": false,
+    "rf_impedance_controlled": false,
+    "high_speed_differential": false,
+    "blind_buried_vias": false,
+    "unrestricted_full_board_routing": false
+  }
+}

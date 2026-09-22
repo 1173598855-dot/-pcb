@@ -82,6 +82,28 @@ class ProjectRevisionRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ProjectEdaAuthorityRow(Base):
+    __tablename__ = "project_eda_authorities"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "idempotency_key",
+            name="uq_project_eda_authority_replay",
+        ),
+    )
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    eda_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    eda_profile_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    board_profile_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    rulepack_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    canonical_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class GateDecisionRow(Base):
     __tablename__ = "gate_decisions"
     __table_args__ = (
@@ -188,6 +210,35 @@ class ChangeProposalRow(Base):
     )
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class PcbCandidateRow(Base):
+    __tablename__ = "pcb_candidates"
+    __table_args__ = (
+        Index("ix_pcb_candidates_project_status", "project_id", "status"),
+        UniqueConstraint("project_id", "idempotency_key", name="uq_pcb_candidate_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, unique=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    base_revision: Mapped[str] = mapped_column(String(80), nullable=False)
+    base_snapshot_digest: Mapped[str | None] = mapped_column(String(71), nullable=True)
+    board_snapshot_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+    rulepack_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+    capability_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+    authority_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+    operations_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    operations_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+    algorithm_evidence_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    accepted_revision: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

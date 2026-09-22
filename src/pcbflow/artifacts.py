@@ -51,6 +51,8 @@ class StagedArtifact:
     digest: str
     size: int
     media_type: str
+    _published_path: Path | None = None
+    _published_new: bool = False
 
     def publish(self) -> ArtifactDescriptor:
         return self._store._publish_staged(self)
@@ -59,6 +61,14 @@ class StagedArtifact:
         if self._temporary_path is not None:
             self._temporary_path.unlink(missing_ok=True)
             self._temporary_path = None
+
+    def rollback(self) -> None:
+        """Remove a newly linked target when publication has not committed."""
+        if self._published_new and self._published_path is not None:
+            self._published_path.unlink(missing_ok=True)
+        self._published_path = None
+        self._published_new = False
+        self.discard()
 
 
 class ContentAddressedStore:
@@ -131,10 +141,14 @@ class ContentAddressedStore:
             raise RuntimeError("staged artifact has already been published or discarded")
         target = self._path(staged.digest)
         target.parent.mkdir(parents=True, exist_ok=True)
+        created = False
         try:
             os.link(staged._temporary_path, target)
+            created = True
         except FileExistsError:
             self._verify_existing(target, staged.digest, staged.size)
+        staged._published_path = target
+        staged._published_new = created
         staged._temporary_path.unlink(missing_ok=True)
         staged._temporary_path = None
         return ArtifactDescriptor(staged.digest, staged.size, staged.media_type, target)

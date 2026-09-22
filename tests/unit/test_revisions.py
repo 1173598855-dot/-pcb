@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 from datetime import UTC, datetime
+import os
 from pathlib import Path
 import shutil
 from threading import Event, Thread
@@ -352,6 +353,8 @@ def test_read_source_head_uses_controlled_git_configuration(tmp_path: Path) -> N
     assert "core.autocrlf=false" in runner.argv
     assert any(value.startswith("core.attributesFile=") for value in runner.argv)
     assert any(value.startswith("core.hooksPath=") for value in runner.argv)
+    if os.name == "nt":
+        assert "core.longpaths=true" in runner.argv
 
 
 def test_windows_file_lock_retries_contention_beyond_primitive_limit(

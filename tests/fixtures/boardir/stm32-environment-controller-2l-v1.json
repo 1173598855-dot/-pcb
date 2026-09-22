@@ -1,0 +1,91 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "stm32-environment-controller-2l-v1",
+  "copper_oz": 1,
+  "outline": [
+    {"x": 0, "y": 0},
+    {"x": 100000, "y": 0},
+    {"x": 100000, "y": 80000},
+    {"x": 0, "y": 80000}
+  ],
+  "layers": ["F.Cu", "B.Cu"],
+  "net_classes": [
+    {"id": "signal", "min_width_um": 203, "clearance_um": 203, "min_via_diameter_um": 508, "min_via_hole_um": 254},
+    {"id": "quiet_signal", "min_width_um": 203, "clearance_um": 203, "min_via_diameter_um": 508, "min_via_hole_um": 254},
+    {"id": "logic_power", "min_width_um": 508, "clearance_um": 203, "min_via_diameter_um": 762, "min_via_hole_um": 381},
+    {"id": "load_power", "min_width_um": 2032, "clearance_um": 508, "min_via_diameter_um": 1016, "min_via_hole_um": 508},
+    {"id": "ground", "min_width_um": 508, "clearance_um": 203, "min_via_diameter_um": 762, "min_via_hole_um": 381}
+  ],
+  "nets": [
+    {"id": "GND", "net_class": "ground"},
+    {"id": "5V", "net_class": "logic_power"},
+    {"id": "3V3", "net_class": "logic_power"},
+    {"id": "RELAY_LOAD", "net_class": "load_power"},
+    {"id": "MOS_LOAD", "net_class": "load_power"},
+    {"id": "I2C", "net_class": "quiet_signal"},
+    {"id": "GPIO", "net_class": "signal"}
+  ],
+  "keepouts": [
+    {"id": "ko_esp_antenna", "kind": "esp_antenna", "bounds": {"x": 88000, "y": 8000, "width": 12000, "height": 15000}, "layers": ["F.Cu", "B.Cu"], "prohibited": ["route", "via", "copper_zone", "footprint"]},
+    {"id": "ko_crystal_near_field", "kind": "crystal_near_field", "bounds": {"x": 43000, "y": 33000, "width": 8000, "height": 6000}, "layers": ["F.Cu", "B.Cu"], "prohibited": ["unrelated_route", "via", "copper_zone", "footprint"]},
+    {"id": "ko_adc_i2c_quiet", "kind": "quiet_zone", "bounds": {"x": 35000, "y": 50000, "width": 25000, "height": 10000}, "layers": ["F.Cu", "B.Cu"], "prohibited": ["load_power_route", "footprint"]},
+    {"id": "ko_power_zone", "kind": "power_zone", "bounds": {"x": 10000, "y": 60000, "width": 80000, "height": 18000}, "layers": ["F.Cu", "B.Cu"], "prohibited": ["quiet_signal_route"]},
+    {"id": "ko_mounting_hole_1", "kind": "mechanical", "bounds": {"x": 1000, "y": 1000, "width": 6000, "height": 6000}, "layers": ["F.Cu", "B.Cu"], "prohibited": ["route", "via", "copper_zone", "footprint"]},
+    {"id": "ko_mounting_hole_2", "kind": "mechanical", "bounds": {"x": 93000, "y": 1000, "width": 6000, "height": 6000}, "layers": ["F.Cu", "B.Cu"], "prohibited": ["route", "via", "copper_zone", "footprint"]},
+    {"id": "ko_mounting_hole_3", "kind": "mechanical", "bounds": {"x": 1000, "y": 73000, "width": 6000, "height": 6000}, "layers": ["F.Cu", "B.Cu"], "prohibited": ["route", "via", "copper_zone", "footprint"]},
+    {"id": "ko_mounting_hole_4", "kind": "mechanical", "bounds": {"x": 93000, "y": 73000, "width": 6000, "height": 6000}, "layers": ["F.Cu", "B.Cu"], "prohibited": ["route", "via", "copper_zone", "footprint"]},
+    {"id": "ko_connector_mechanical", "kind": "mechanical", "bounds": {"x": 7500, "y": 0, "width": 12000, "height": 1500}, "layers": ["F.Cu", "B.Cu"], "prohibited": ["route", "via", "copper_zone", "footprint"]}
+  ],
+  "footprints": [
+    {"id": "J_USB_C", "position": {"x": 13000, "y": 4000}, "width_um": 10000, "height_um": 6000, "layer": "F.Cu", "pad_ids": ["pad_J_USB_C"], "keepout_ids": ["ko_connector_mechanical"], "placement_lock": true},
+    {"id": "U_MCU", "position": {"x": 50000, "y": 40000}, "width_um": 18000, "height_um": 18000, "layer": "F.Cu", "pad_ids": ["pad_U_MCU"], "keepout_ids": ["ko_crystal_near_field"], "placement_lock": false},
+    {"id": "U_WIFI", "position": {"x": 85000, "y": 14000}, "width_um": 12000, "height_um": 18000, "layer": "F.Cu", "pad_ids": ["pad_U_WIFI"], "keepout_ids": ["ko_esp_antenna"], "placement_lock": true},
+    {"id": "OLED1", "position": {"x": 50000, "y": 8000}, "width_um": 26000, "height_um": 10000, "layer": "F.Cu", "pad_ids": ["pad_OLED1"], "keepout_ids": [], "placement_lock": true},
+    {"id": "K1", "position": {"x": 20000, "y": 68000}, "width_um": 14000, "height_um": 10000, "layer": "F.Cu", "pad_ids": ["pad_K1"], "keepout_ids": ["ko_power_zone"], "placement_lock": false},
+    {"id": "K2", "position": {"x": 36000, "y": 68000}, "width_um": 14000, "height_um": 10000, "layer": "F.Cu", "pad_ids": ["pad_K2"], "keepout_ids": ["ko_power_zone"], "placement_lock": false},
+    {"id": "Q1", "position": {"x": 55000, "y": 68000}, "width_um": 6000, "height_um": 6000, "layer": "F.Cu", "pad_ids": ["pad_Q1"], "keepout_ids": ["ko_power_zone"], "placement_lock": false},
+    {"id": "Q2", "position": {"x": 65000, "y": 68000}, "width_um": 6000, "height_um": 6000, "layer": "F.Cu", "pad_ids": ["pad_Q2"], "keepout_ids": ["ko_power_zone"], "placement_lock": false},
+    {"id": "J_RELAY_OUT", "position": {"x": 82000, "y": 68000}, "width_um": 12000, "height_um": 8000, "layer": "F.Cu", "pad_ids": ["pad_J_RELAY_OUT"], "keepout_ids": ["ko_power_zone"], "placement_lock": true},
+    {"id": "J_MOS_OUT", "position": {"x": 82000, "y": 54000}, "width_um": 12000, "height_um": 8000, "layer": "F.Cu", "pad_ids": ["pad_J_MOS_OUT"], "keepout_ids": [], "placement_lock": true},
+    {"id": "J_SWD", "position": {"x": 15000, "y": 30000}, "width_um": 10000, "height_um": 5000, "layer": "F.Cu", "pad_ids": ["pad_J_SWD"], "keepout_ids": [], "placement_lock": true},
+    {"id": "J_UART", "position": {"x": 15000, "y": 42000}, "width_um": 10000, "height_um": 5000, "layer": "F.Cu", "pad_ids": ["pad_J_UART"], "keepout_ids": [], "placement_lock": true},
+    {"id": "MH1", "position": {"x": 4000, "y": 4000}, "width_um": 6000, "height_um": 6000, "layer": "F.Cu", "pad_ids": ["pad_MH1"], "keepout_ids": ["ko_mounting_hole_1"], "placement_lock": true},
+    {"id": "MH2", "position": {"x": 96000, "y": 4000}, "width_um": 6000, "height_um": 6000, "layer": "F.Cu", "pad_ids": ["pad_MH2"], "keepout_ids": ["ko_mounting_hole_2"], "placement_lock": true},
+    {"id": "MH3", "position": {"x": 4000, "y": 76000}, "width_um": 6000, "height_um": 6000, "layer": "F.Cu", "pad_ids": ["pad_MH3"], "keepout_ids": ["ko_mounting_hole_3"], "placement_lock": true},
+    {"id": "MH4", "position": {"x": 96000, "y": 76000}, "width_um": 6000, "height_um": 6000, "layer": "F.Cu", "pad_ids": ["pad_MH4"], "keepout_ids": ["ko_mounting_hole_4"], "placement_lock": true}
+  ],
+  "pads": [
+    {"id": "pad_J_USB_C", "footprint_id": "J_USB_C", "net_id": "5V", "position": {"x": 13000, "y": 4000}, "size_x_um": 1200, "size_y_um": 1800, "hole_diameter_um": 0, "layers": ["F.Cu"]},
+    {"id": "pad_U_MCU", "footprint_id": "U_MCU", "net_id": "3V3", "position": {"x": 50000, "y": 40000}, "size_x_um": 1000, "size_y_um": 1000, "hole_diameter_um": 0, "layers": ["F.Cu"]},
+    {"id": "pad_U_WIFI", "footprint_id": "U_WIFI", "net_id": "3V3", "position": {"x": 85000, "y": 14000}, "size_x_um": 1800, "size_y_um": 1800, "hole_diameter_um": 900, "layers": ["F.Cu", "B.Cu"]},
+    {"id": "pad_OLED1", "footprint_id": "OLED1", "net_id": "I2C", "position": {"x": 50000, "y": 8000}, "size_x_um": 1800, "size_y_um": 1800, "hole_diameter_um": 900, "layers": ["F.Cu", "B.Cu"]},
+    {"id": "pad_K1", "footprint_id": "K1", "net_id": "RELAY_LOAD", "position": {"x": 20000, "y": 68000}, "size_x_um": 2200, "size_y_um": 2200, "hole_diameter_um": 1100, "layers": ["F.Cu", "B.Cu"]},
+    {"id": "pad_K2", "footprint_id": "K2", "net_id": "RELAY_LOAD", "position": {"x": 36000, "y": 68000}, "size_x_um": 2200, "size_y_um": 2200, "hole_diameter_um": 1100, "layers": ["F.Cu", "B.Cu"]},
+    {"id": "pad_Q1", "footprint_id": "Q1", "net_id": "MOS_LOAD", "position": {"x": 55000, "y": 68000}, "size_x_um": 1800, "size_y_um": 1800, "hole_diameter_um": 0, "layers": ["F.Cu"]},
+    {"id": "pad_Q2", "footprint_id": "Q2", "net_id": "MOS_LOAD", "position": {"x": 65000, "y": 68000}, "size_x_um": 1800, "size_y_um": 1800, "hole_diameter_um": 0, "layers": ["F.Cu"]},
+    {"id": "pad_J_RELAY_OUT", "footprint_id": "J_RELAY_OUT", "net_id": "RELAY_LOAD", "position": {"x": 82000, "y": 68000}, "size_x_um": 2400, "size_y_um": 2400, "hole_diameter_um": 1200, "layers": ["F.Cu", "B.Cu"]},
+    {"id": "pad_J_MOS_OUT", "footprint_id": "J_MOS_OUT", "net_id": "MOS_LOAD", "position": {"x": 82000, "y": 54000}, "size_x_um": 2400, "size_y_um": 2400, "hole_diameter_um": 1200, "layers": ["F.Cu", "B.Cu"]},
+    {"id": "pad_J_SWD", "footprint_id": "J_SWD", "net_id": "GPIO", "position": {"x": 15000, "y": 30000}, "size_x_um": 1800, "size_y_um": 1800, "hole_diameter_um": 900, "layers": ["F.Cu", "B.Cu"]},
+    {"id": "pad_J_UART", "footprint_id": "J_UART", "net_id": "GPIO", "position": {"x": 15000, "y": 42000}, "size_x_um": 1800, "size_y_um": 1800, "hole_diameter_um": 900, "layers": ["F.Cu", "B.Cu"]},
+    {"id": "pad_MH1", "footprint_id": "MH1", "net_id": null, "position": {"x": 4000, "y": 4000}, "size_x_um": 5000, "size_y_um": 5000, "hole_diameter_um": 3200, "layers": ["F.Cu", "B.Cu"]},
+    {"id": "pad_MH2", "footprint_id": "MH2", "net_id": null, "position": {"x": 96000, "y": 4000}, "size_x_um": 5000, "size_y_um": 5000, "hole_diameter_um": 3200, "layers": ["F.Cu", "B.Cu"]},
+    {"id": "pad_MH3", "footprint_id": "MH3", "net_id": null, "position": {"x": 4000, "y": 76000}, "size_x_um": 5000, "size_y_um": 5000, "hole_diameter_um": 3200, "layers": ["F.Cu", "B.Cu"]},
+    {"id": "pad_MH4", "footprint_id": "MH4", "net_id": null, "position": {"x": 96000, "y": 76000}, "size_x_um": 5000, "size_y_um": 5000, "hole_diameter_um": 3200, "layers": ["F.Cu", "B.Cu"]}
+  ],
+  "routes": [
+    {"id": "route_5v", "net_id": "5V", "start": {"x": 13000, "y": 4000}, "end": {"x": 25000, "y": 4000}, "width_um": 508, "layer": "F.Cu", "route_lock": true},
+    {"id": "route_relay_load", "net_id": "RELAY_LOAD", "start": {"x": 20000, "y": 68000}, "end": {"x": 36000, "y": 68000}, "width_um": 2032, "layer": "F.Cu", "route_lock": true},
+    {"id": "route_i2c", "net_id": "I2C", "start": {"x": 50000, "y": 48000}, "end": {"x": 50000, "y": 56000}, "width_um": 203, "layer": "F.Cu", "route_lock": false},
+    {"id": "route_gpio", "net_id": "GPIO", "start": {"x": 15000, "y": 30000}, "end": {"x": 25000, "y": 30000}, "width_um": 203, "layer": "B.Cu", "route_lock": false}
+  ],
+  "vias": [
+    {"id": "via_gnd_1", "net_id": "GND", "position": {"x": 30000, "y": 25000}, "diameter_um": 762, "hole_diameter_um": 381, "layers": ["F.Cu", "B.Cu"], "route_lock": false}
+  ],
+  "copper_zones": [
+    {"id": "zone_gnd_top", "net_id": "GND", "layer": "F.Cu", "bounds": {"x": 10000, "y": 18000, "width": 20000, "height": 10000}, "clearance_um": 203, "route_lock": true},
+    {"id": "zone_gnd_bottom", "net_id": "GND", "layer": "B.Cu", "bounds": {"x": 10000, "y": 18000, "width": 20000, "height": 10000}, "clearance_um": 203, "route_lock": true}
+  ],
+  "opaque_nodes": [
+    {"id": "opaque_lceda_design_rule_1", "native_type": "lceda.custom_rule", "payload": {"mode": "preserve", "native_revision": 1}}
+  ]
+}

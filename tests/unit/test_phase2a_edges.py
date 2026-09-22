@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from pcbflow.repositories import (
     IdempotencyConflictError,
     ProjectNotFoundError,
     RevisionConflictError,
+    TaskNotCancellableError,
 )
 from pcbflow.requirement_store import RequirementSetNotFoundError
 from pcbflow.requirements import RequirementsBlockedError
@@ -60,6 +62,7 @@ from pcbflow.proposal_store import ProposalNotFoundError
         (RequirementSetNotFoundError("requirement"), "REQUIREMENT_SET_NOT_FOUND"),
         (ProposalNotFoundError("proposal"), "PROPOSAL_NOT_FOUND"),
         (GitOperationError(("git", "show"), 1), "GIT_OPERATION_FAILED"),
+        (TaskNotCancellableError("task", "succeeded"), "TASK_NOT_CANCELLABLE"),
         (OSError("unreadable"), "INPUT_FILE_INVALID"),
         (ValueError("invalid"), "REQUEST_INVALID"),
     ],
@@ -77,6 +80,7 @@ def test_cli_error_mapping_is_stable(error: BaseException, code: str) -> None:
         RevisionProjectNotManagedError("project"),
         ProjectWorktreeDirtyError("project"),
         CandidateNotReviewableError("candidate"),
+        TaskNotCancellableError("task", "succeeded"),
         RevisionReconciliationRequiredError("project"),
         GitOperationError(("git", "show"), 1),
     ],
@@ -235,12 +239,108 @@ def test_cli_preflight_rejects_invalid_write_options() -> None:
         assert result.exit_code == 2, result.output
         assert code in result.output
 
-    worker = runner.invoke(cli.app, ["worker"])
-    # Worker now requires subcommand with worker_app structure
-    # Exit code 2 means missing subcommand, which is expected
-    assert worker.exit_code in (0, 1, 2)  # Success, failure, or missing subcommand
-    # Should not contain the old error message
-    assert "only --once is supported" not in worker.output
+
+def test_worker_group_exposes_execution_options_and_health_subcommand() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(cli.app, ["worker", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--once" in result.output
+    assert "--run" in result.output
+    assert "health" in result.output
+
+
+def test_worker_execution_options_cannot_be_combined_with_subcommand() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(cli.app, ["worker", "--once", "health"])
+
+    assert result.exit_code == 2, result.output
+    assert "INVALID_ARGUMENT" in result.output
+
+
+def test_worker_health_reads_the_persisted_default_state(tmp_path: Path) -> None:
+    state = {
+        "status": "healthy",
+        "worker_id": "resident-worker",
+        "state": "EXECUTING",
+        "started_at": "2026-08-04T00:00:00+00:00",
+        "uptime_seconds": 42.0,
+        "slots_total": 2,
+        "slots_active": 1,
+        "slots_available": 1,
+        "tasks_completed": 9,
+        "tasks_failed": 1,
+        "tasks_active": 1,
+        "backoff_attempts": 0,
+    }
+    (tmp_path / "worker-state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["worker", "health", "--json"],
+        env={"PCBFLOW_DATA_DIR": str(tmp_path)},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == state
+
+
+def test_resident_worker_waits_for_active_tasks_before_idle_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeContainer:
+        disposed = False
+
+        def dispose(self) -> None:
+            self.disposed = True
+
+    class FakeWorker:
+        instance: "FakeWorker | None" = None
+
+        def __init__(self, _container) -> None:
+            self.worker_id = "test-worker"
+            self.started_at = datetime.now(UTC)
+            self.completed_count = 1
+            self.failed_count = 0
+            self.shutdown_requested = False
+            self.active_tasks = {"task-active": object()}
+            self.cycles = 0
+            self.graceful_shutdown_calls = 0
+            FakeWorker.instance = self
+
+        def run_one_cycle(self):
+            self.cycles += 1
+            if self.cycles == 1:
+                return SimpleNamespace(claimed=True)
+            if self.cycles == 2:
+                return SimpleNamespace(claimed=False)
+            self.active_tasks.clear()
+            return SimpleNamespace(claimed=False)
+
+        def request_shutdown(self) -> None:
+            self.shutdown_requested = True
+
+        def shutdown_gracefully(self) -> bool:
+            self.graceful_shutdown_calls += 1
+            self.shutdown_requested = True
+            return True
+
+    container = FakeContainer()
+    monkeypatch.setattr(cli, "_build", lambda: container)
+    monkeypatch.setattr("pcbflow.worker_service.WorkerService", FakeWorker)
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["worker", "--run", "--exit-when-idle", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert FakeWorker.instance is not None
+    assert FakeWorker.instance.cycles == 3
+    assert FakeWorker.instance.graceful_shutdown_calls == 1
+    assert container.disposed
 
 
 def test_module_entrypoint_shows_help(monkeypatch) -> None:

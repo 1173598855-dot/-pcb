@@ -1,23 +1,39 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from pcbflow.artifacts import ArtifactDescriptor
-from pcbflow.design_tables import OutboxEventRow, ProjectRevisionRow
+from pcbflow.artifacts import ArtifactDescriptor, StagedArtifact
+from pcbflow.cancellation import TaskCancelledError
+from pcbflow.design_tables import (
+    OutboxEventRow,
+    PcbCandidateRow,
+    ProjectEdaAuthorityRow,
+    ProjectRevisionRow,
+)
+from pcbflow.eda import (
+    EdaAuthorityConflictError,
+    ProjectEdaAuthorityInput,
+    authority_digest,
+    registration_input_digest,
+    validate_authority_input,
+    validate_idempotency_key,
+)
 from pcbflow.domain import (
     Evidence,
     Finding,
     NormalizedFinding,
     Project,
     ProjectMode,
+    RequestInvalidError,
     Task,
     TaskLease,
     TaskStatus,
@@ -59,6 +75,13 @@ class StaleLeaseError(RuntimeError):
     pass
 
 
+class TaskNotCancellableError(RuntimeError):
+    def __init__(self, task_id: str, status: str) -> None:
+        super().__init__(f"task {task_id} cannot be cancelled from {status}")
+        self.task_id = task_id
+        self.status = status
+
+
 class EvidenceConflictError(RuntimeError):
     pass
 
@@ -70,6 +93,14 @@ def _utc(value: datetime) -> datetime:
 def _assert_active_fence(
     session: Session, task_id: str, lease_token: str, now: datetime
 ) -> None:
+    cancelled = session.scalar(
+        select(TaskRow.id).where(
+            TaskRow.id == task_id,
+            TaskRow.status == TaskStatus.CANCELLED.value,
+        )
+    )
+    if cancelled is not None:
+        raise TaskCancelledError(task_id)
     active = session.scalar(
         select(TaskRow.id).where(
             TaskRow.id == task_id,
@@ -111,6 +142,10 @@ def _task(row: TaskRow) -> Task:
         status=TaskStatus(row.status),
         attempt_count=row.attempt_count,
         last_error_code=row.last_error_code,
+        cancelled_at=(
+            _utc(row.cancelled_at) if row.cancelled_at is not None else None
+        ),
+        cancellation_reason=row.cancellation_reason,
         created_at=_utc(row.created_at),
         updated_at=_utc(row.updated_at),
     )
@@ -155,14 +190,22 @@ class ProjectRepository:
         return project
 
     def create_with_status(
-        self, name: str, source_path: Path, idempotency_key: str
+        self,
+        name: str,
+        source_path: Path,
+        idempotency_key: str,
+        authority: ProjectEdaAuthorityInput | None = None,
     ) -> tuple[Project, bool]:
         assert_supported_entry(source_path)
         resolved = source_path.resolve(strict=True)
         if not resolved.is_dir():
             raise ValueError("project source must be a directory")
+        validate_idempotency_key(idempotency_key)
+        if authority is not None:
+            validate_authority_input(authority)
         try:
             with self._sessions.begin() as session:
+                session.execute(text("BEGIN IMMEDIATE"))
                 row = session.scalar(
                     select(ProjectRow).where(
                         ProjectRow.idempotency_key == idempotency_key
@@ -171,16 +214,36 @@ class ProjectRepository:
                 if row is not None:
                     if row.name != name or Path(row.source_path) != resolved:
                         raise IdempotencyConflictError(idempotency_key)
+                    self._assert_registration_replay(
+                        row, name, resolved, authority, idempotency_key
+                    )
                     return _project(row), False
                 row = ProjectRow(
                     id=new_id("prj"),
                     name=name,
                     source_path=str(resolved),
                     idempotency_key=idempotency_key,
+                    registration_input_digest=registration_input_digest(
+                        name, resolved, authority
+                    ),
                     created_at=utc_now(),
                 )
                 session.add(row)
                 session.flush()
+                if authority is not None:
+                    session.add(
+                        ProjectEdaAuthorityRow(
+                            project_id=row.id,
+                            eda_kind=authority.eda_kind.value,
+                            eda_profile_id=authority.eda_profile_id,
+                            board_profile_id=authority.board_profile_id,
+                            rulepack_digest=authority.rulepack_digest,
+                            idempotency_key=idempotency_key,
+                            canonical_digest=authority_digest(row.id, authority),
+                            created_at=utc_now(),
+                        )
+                    )
+                    session.flush()
             return _project(row), True
         except IntegrityError:
             # A concurrent creator may win between the read and the insert.
@@ -195,7 +258,27 @@ class ProjectRepository:
                     raise
                 if row.name != name or Path(row.source_path) != resolved:
                     raise IdempotencyConflictError(idempotency_key)
+                self._assert_registration_replay(
+                    row, name, resolved, authority, idempotency_key
+                )
                 return _project(row), False
+
+    @staticmethod
+    def _assert_registration_replay(
+        project: ProjectRow,
+        name: str,
+        source_path: Path,
+        authority: ProjectEdaAuthorityInput | None,
+        idempotency_key: str,
+    ) -> None:
+        if project.registration_input_digest is None:
+            raise IdempotencyConflictError(idempotency_key)
+        if project.registration_input_digest != registration_input_digest(
+            name, source_path, authority
+        ):
+            raise EdaAuthorityConflictError(
+                "project creation replay changed the EDA authority tuple"
+            )
 
     def get(self, project_id: str) -> Project:
         with self._sessions() as session:
@@ -467,41 +550,11 @@ class TaskRepository:
         idempotency_key: str,
         project_id: str | None,
     ) -> Task:
-        json.dumps(payload, sort_keys=True, allow_nan=False)
         try:
             with self._sessions.begin() as session:
-                row = session.scalar(
-                    select(TaskRow).where(TaskRow.idempotency_key == idempotency_key)
+                return self.enqueue_in_session(
+                    session, kind, payload, idempotency_key, project_id
                 )
-                if row is not None:
-                    if (
-                        row.kind != kind
-                        or row.project_id != project_id
-                        or row.payload_json != payload
-                    ):
-                        raise IdempotencyConflictError(idempotency_key)
-                    return _task(row)
-                now = utc_now()
-                row = TaskRow(
-                    id=new_id("tsk"),
-                    project_id=project_id,
-                    kind=kind,
-                    payload_json=payload,
-                    result_json=None,
-                    status=TaskStatus.QUEUED.value,
-                    idempotency_key=idempotency_key,
-                    lease_owner=None,
-                    lease_token=None,
-                    lease_expires_at=None,
-                    next_attempt_at=None,
-                    last_error_code=None,
-                    attempt_count=0,
-                    created_at=now,
-                    updated_at=now,
-                    version=1,
-                )
-                session.add(row)
-            return _task(row)
         except IntegrityError:
             with self._sessions() as session:
                 row = session.scalar(
@@ -517,12 +570,186 @@ class TaskRepository:
                     raise IdempotencyConflictError(idempotency_key)
                 return _task(row)
 
+    def enqueue_in_session(
+        self,
+        session: Session,
+        kind: str,
+        payload: dict[str, Any],
+        idempotency_key: str,
+        project_id: str | None,
+    ) -> Task:
+        """在调用方事务中创建任务，供需要原子写入的工作流复用。"""
+        json.dumps(payload, sort_keys=True, allow_nan=False)
+        row = session.scalar(
+            select(TaskRow).where(TaskRow.idempotency_key == idempotency_key)
+        )
+        if row is not None:
+            if (
+                row.kind != kind
+                or row.project_id != project_id
+                or row.payload_json != payload
+            ):
+                raise IdempotencyConflictError(idempotency_key)
+            return _task(row)
+        now = utc_now()
+        row = TaskRow(
+            id=new_id("tsk"),
+            project_id=project_id,
+            kind=kind,
+            payload_json=payload,
+            result_json=None,
+            status=TaskStatus.QUEUED.value,
+            idempotency_key=idempotency_key,
+            lease_owner=None,
+            lease_token=None,
+            lease_expires_at=None,
+            next_attempt_at=None,
+            last_error_code=None,
+            cancelled_at=None,
+            cancellation_reason=None,
+            attempt_count=0,
+            created_at=now,
+            updated_at=now,
+            version=1,
+        )
+        session.add(row)
+        # 先落库任务以满足候选表的外键，同时仍由外层事务统一提交。
+        session.flush()
+        return _task(row)
+
     def get(self, task_id: str) -> Task:
         with self._sessions() as session:
             row = session.get(TaskRow, task_id)
             if row is None:
                 raise TaskNotFoundError(task_id)
             return _task(row)
+
+    def is_cancelled(self, task_id: str) -> bool:
+        with self._sessions() as session:
+            status = session.scalar(
+                select(TaskRow.status).where(TaskRow.id == task_id)
+            )
+        return status == TaskStatus.CANCELLED.value
+
+    def cancel(self, task_id: str, reason: str, now: datetime) -> Task:
+        cancellation_reason = reason.strip()
+        if not cancellation_reason:
+            raise RequestInvalidError("cancellation reason must not be empty")
+        if len(cancellation_reason) > 1000:
+            raise RequestInvalidError("cancellation reason must not exceed 1000 characters")
+        cancellable = {
+            TaskStatus.QUEUED.value,
+            TaskStatus.RETRY_WAIT.value,
+            TaskStatus.LEASED.value,
+            TaskStatus.RUNNING.value,
+        }
+        for _attempt in range(3):
+            with self._sessions.begin() as session:
+                row = session.get(TaskRow, task_id)
+                if row is None:
+                    raise TaskNotFoundError(task_id)
+                if row.status == TaskStatus.CANCELLED.value:
+                    self._mirror_cancelled_candidate(session, task_id, now)
+                    return _task(row)
+                if row.status not in cancellable:
+                    raise TaskNotCancellableError(task_id, row.status)
+                lease_token = row.lease_token
+                changed = session.execute(
+                    update(TaskRow)
+                    .where(
+                        TaskRow.id == task_id,
+                        TaskRow.version == row.version,
+                        TaskRow.status.in_(cancellable),
+                    )
+                    .values(
+                        status=TaskStatus.CANCELLED.value,
+                        result_json=None,
+                        lease_owner=None,
+                        lease_token=None,
+                        lease_expires_at=None,
+                        next_attempt_at=None,
+                        last_error_code="TASK_CANCELLED",
+                        cancelled_at=now,
+                        cancellation_reason=cancellation_reason,
+                        updated_at=now,
+                        version=row.version + 1,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                if changed.rowcount != 1:
+                    continue
+                if lease_token is not None:
+                    session.execute(
+                        update(TaskAttemptRow)
+                        .where(
+                            TaskAttemptRow.task_id == task_id,
+                            TaskAttemptRow.lease_token == lease_token,
+                            TaskAttemptRow.finished_at.is_(None),
+                        )
+                        .values(
+                            finished_at=now,
+                            outcome="cancelled",
+                            error_code="TASK_CANCELLED",
+                        )
+                    )
+                self._mirror_cancelled_candidate(session, task_id, now)
+            return self.get(task_id)
+        raise TaskNotCancellableError(task_id, "concurrent_update")
+
+    @staticmethod
+    def _mirror_cancelled_candidate(
+        session: Session, task_id: str, now: datetime
+    ) -> None:
+        """Keep a durable PCB candidate terminal when its task is cancelled."""
+        session.execute(
+            update(PcbCandidateRow)
+            .where(
+                PcbCandidateRow.task_id == task_id,
+                PcbCandidateRow.status.not_in(
+                    {"released", "cancelled"}
+                ),
+            )
+            .values(
+                status="cancelled",
+                last_error_code="TASK_CANCELLED",
+                updated_at=now,
+                version=PcbCandidateRow.version + 1,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        active_release_statuses = {"release_pending", "ready_for_g4"}
+        release_candidates = session.scalars(
+            select(PcbCandidateRow).where(
+                PcbCandidateRow.status.in_(active_release_statuses)
+            )
+        ).all()
+        for candidate in release_candidates:
+            result = dict(candidate.result_json or {})
+            release = result.get("release")
+            if not isinstance(release, dict) or release.get("task_id") != task_id:
+                continue
+            result["release"] = {
+                "task_id": task_id,
+                "idempotency_key": release.get("idempotency_key"),
+                "status": "cancelled",
+                "error_code": "TASK_CANCELLED",
+            }
+            session.execute(
+                update(PcbCandidateRow)
+                .where(
+                    PcbCandidateRow.id == candidate.id,
+                    PcbCandidateRow.status.in_(active_release_statuses),
+                    PcbCandidateRow.version == candidate.version,
+                )
+                .values(
+                    status="cancelled",
+                    result_json=result,
+                    last_error_code="TASK_CANCELLED",
+                    updated_at=now,
+                    version=candidate.version + 1,
+                )
+                .execution_options(synchronize_session=False)
+            )
 
     @staticmethod
     def _claimable(now: datetime):
@@ -750,17 +977,7 @@ class TaskRepository:
 
     def assert_active(self, task_id: str, lease_token: str, now: datetime) -> None:
         with self._sessions() as session:
-            active = session.scalar(
-                select(TaskRow.id).where(
-                    TaskRow.id == task_id,
-                    TaskRow.lease_token == lease_token,
-                    TaskRow.status == TaskStatus.RUNNING.value,
-                    TaskRow.lease_expires_at.is_not(None),
-                    TaskRow.lease_expires_at > now,
-                )
-            )
-        if active is None:
-            raise StaleLeaseError(task_id)
+            _assert_active_fence(session, task_id, lease_token, now)
 
     def _finish_attempt(
         self,
@@ -809,6 +1026,133 @@ class TaskRepository:
 class EvidenceRepository:
     def __init__(self, sessions: sessionmaker[Session]) -> None:
         self._sessions = sessions
+
+    def add_reports_and_findings(
+        self,
+        *,
+        project_id: str,
+        task_id: str,
+        reports: Mapping[str, tuple[ArtifactDescriptor, str, str]],
+        findings: Mapping[str, tuple[NormalizedFinding, ...]],
+        lease_token: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Evidence]:
+        """Persist a complete evidence batch under one lease-fenced transaction."""
+        if not reports:
+            raise EvidenceConflictError("evidence batch must contain a report")
+        timestamp = now or utc_now()
+        rows: dict[str, EvidenceRow] = {}
+        with self._sessions.begin() as session:
+            # Serialize publication with cancellation and lease takeover. The
+            # fence is checked again before any durable row is written.
+            session.execute(text("BEGIN IMMEDIATE"))
+            fence_now = max(timestamp, utc_now())
+            if lease_token is not None:
+                _assert_active_fence(session, task_id, lease_token, fence_now)
+            for kind, (descriptor, subject, verdict) in reports.items():
+                artifact = session.get(ArtifactRow, descriptor.digest)
+                if artifact is None:
+                    session.add(
+                        ArtifactRow(
+                            digest=descriptor.digest,
+                            size=descriptor.size,
+                            media_type=descriptor.media_type,
+                            storage_path=str(descriptor.path),
+                            created_at=timestamp,
+                        )
+                    )
+                elif (
+                    artifact.size != descriptor.size
+                    or artifact.media_type != descriptor.media_type
+                    or Path(artifact.storage_path) != descriptor.path
+                ):
+                    raise EvidenceConflictError(descriptor.digest)
+
+                row = session.scalar(
+                    select(EvidenceRow).where(
+                        EvidenceRow.task_id == task_id,
+                        EvidenceRow.kind == kind,
+                    )
+                )
+                if row is not None:
+                    if (
+                        row.project_id != project_id
+                        or row.artifact_digest != descriptor.digest
+                        or row.subject != subject
+                        or row.verdict != verdict
+                    ):
+                        raise EvidenceConflictError(f"{task_id}:{kind}")
+                else:
+                    row = EvidenceRow(
+                        id=new_id("evd"),
+                        project_id=project_id,
+                        task_id=task_id,
+                        kind=kind,
+                        artifact_digest=descriptor.digest,
+                        subject=subject,
+                        verdict=verdict,
+                        created_at=timestamp,
+                    )
+                    session.add(row)
+                rows[kind] = row
+
+            session.flush()
+            for kind, finding_values in findings.items():
+                evidence = rows.get(kind)
+                if evidence is None:
+                    raise EvidenceConflictError(f"{task_id}:{kind}")
+                for finding in finding_values:
+                    row = session.scalar(
+                        select(FindingRow).where(
+                            FindingRow.evidence_id == evidence.id,
+                            FindingRow.rule_id == finding.rule_id,
+                            FindingRow.subject == finding.subject,
+                            FindingRow.message == finding.message,
+                        )
+                    )
+                    if row is None:
+                        session.add(
+                            FindingRow(
+                                id=new_id("fnd"),
+                                project_id=project_id,
+                                task_id=task_id,
+                                evidence_id=evidence.id,
+                                rule_id=finding.rule_id,
+                                severity=finding.severity,
+                                subject=finding.subject,
+                                message=finding.message,
+                                status="open",
+                                created_at=timestamp,
+                            )
+                        )
+                    elif row.severity != finding.severity:
+                        raise EvidenceConflictError(finding.rule_id)
+            session.flush()
+            return {kind: _evidence(row) for kind, row in rows.items()}
+
+    def settle_publication(
+        self,
+        descriptors: Sequence[ArtifactDescriptor],
+        staged: Sequence[StagedArtifact],
+    ) -> None:
+        """Safely settle published evidence objects against durable rows."""
+        if len(descriptors) != len(staged):
+            raise ValueError("evidence publication descriptor/staging mismatch")
+        pairs = tuple(zip(descriptors, staged, strict=True))
+        for descriptor, artifact in pairs:
+            if (
+                descriptor.digest != artifact.digest
+                or descriptor.size != artifact.size
+                or descriptor.media_type != artifact.media_type
+            ):
+                raise ValueError("evidence publication descriptor/staging mismatch")
+        with self._sessions.begin() as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            for descriptor, artifact in pairs:
+                if session.get(ArtifactRow, descriptor.digest) is not None:
+                    artifact.discard()
+                else:
+                    artifact.rollback()
 
     def add_report(
         self,
@@ -886,6 +1230,54 @@ class EvidenceRepository:
         with self._sessions() as session:
             row = session.get(ArtifactRow, digest)
             return row.media_type if row is not None else None
+
+    def evidence_set_matches_registered_artifacts(
+        self,
+        *,
+        project_id: str,
+        task_id: str,
+        subject: str,
+        evidence_set_kind: str,
+        evidence_set_digest: str,
+        evidence_set_media_type: str,
+        items: Mapping[str, tuple[str, str, str]],
+    ) -> bool:
+        """Verify the durable evidence rows and artifact media types for a set."""
+        required_kinds = set(items) | {evidence_set_kind}
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(EvidenceRow).where(
+                    EvidenceRow.project_id == project_id,
+                    EvidenceRow.task_id == task_id,
+                )
+            ).all()
+            by_kind = {row.kind: row for row in rows}
+            if set(by_kind) != required_kinds or len(rows) != len(required_kinds):
+                return False
+            evidence_set_row = by_kind[evidence_set_kind]
+            evidence_set_artifact = session.get(
+                ArtifactRow, evidence_set_row.artifact_digest
+            )
+            if (
+                evidence_set_row.artifact_digest != evidence_set_digest
+                or evidence_set_row.subject != subject
+                or evidence_set_row.verdict != "pass"
+                or evidence_set_artifact is None
+                or evidence_set_artifact.media_type != evidence_set_media_type
+            ):
+                return False
+            for kind, (digest, media_type, verdict) in items.items():
+                row = by_kind[kind]
+                artifact = session.get(ArtifactRow, row.artifact_digest)
+                if (
+                    row.artifact_digest != digest
+                    or row.subject != subject
+                    or row.verdict != verdict
+                    or artifact is None
+                    or artifact.media_type != media_type
+                ):
+                    return False
+        return True
 
 
 class FindingRepository:

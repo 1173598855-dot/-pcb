@@ -10,8 +10,9 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from pcbflow.domain import utc_now
+from pcbflow.domain import TaskLease, TaskStatus, utc_now
 from pcbflow.observability import bind_log_context
+from pcbflow.worker_health import get_worker_health, write_worker_health_state
 
 if TYPE_CHECKING:
     from pcbflow.container import Container
@@ -68,6 +69,16 @@ class WorkerService:
         # Start lease renewal thread if slots > 0
         if container.settings.worker_slots > 0:
             self._start_lease_renewal_thread()
+        self._publish_health_state()
+
+    def _publish_health_state(self) -> None:
+        try:
+            write_worker_health_state(
+                self.container.settings.worker_state_file,
+                get_worker_health(self),
+            )
+        except Exception:
+            logger.exception("worker.health_state_write_failed")
 
     def _generate_worker_id(self) -> str:
         if self.container.settings.worker_id:
@@ -136,6 +147,7 @@ class WorkerService:
         self.state = WorkerState.STOPPING
         self._stop_lease_renewal_thread()
         logger.info("worker.shutdown_requested active_tasks=%d", len(self.active_tasks))
+        self._publish_health_state()
 
     def shutdown_gracefully(self) -> bool:
         """Wait for active tasks to complete. Returns True if clean, False if forced."""
@@ -152,11 +164,13 @@ class WorkerService:
                     list(self.active_tasks.keys()),
                 )
                 self.state = WorkerState.STOPPED
+                self._publish_health_state()
                 return False
 
             time.sleep(0.5)
 
         self.state = WorkerState.STOPPED
+        self._publish_health_state()
         return True
 
     def _backoff_sleep(self) -> None:
@@ -174,14 +188,33 @@ class WorkerService:
         """Check if there's an available execution slot."""
         return len(self.active_tasks) < self.container.settings.worker_slots
 
-    def _execute_task_in_thread(self, task_id: str) -> None:
+    def _execute_task_in_thread(self, lease: TaskLease) -> None:
         """Execute a task in the current thread (to be called from worker thread)."""
+        task_id = lease.task_id
         try:
-            # Execute task using existing task execution logic
-            self.container.worker.run_once()
-
-            self.completed_count += 1
-            logger.info("task.completed task_id=%s", task_id)
+            self.container.worker.run_claimed(lease)
+            processed = self.container.tasks.get(task_id)
+            if processed.status is TaskStatus.SUCCEEDED:
+                self.completed_count += 1
+                logger.info("task.completed task_id=%s", task_id)
+            elif processed.status in {
+                TaskStatus.RETRY_WAIT,
+                TaskStatus.FAILED_TERMINAL,
+            }:
+                self.failed_count += 1
+                logger.warning(
+                    "task.failed task_id=%s error_code=%s",
+                    task_id,
+                    processed.last_error_code,
+                )
+            elif processed.status is TaskStatus.CANCELLED:
+                logger.info("task.cancelled task_id=%s", task_id)
+            else:
+                logger.warning(
+                    "task.execution_unresolved task_id=%s status=%s",
+                    task_id,
+                    processed.status.value,
+                )
 
         except Exception as error:
             self.failed_count += 1
@@ -191,6 +224,7 @@ class WorkerService:
             # Remove from active tasks
             if task_id in self.active_tasks:
                 del self.active_tasks[task_id]
+            self._publish_health_state()
 
     def run_one_cycle(self) -> CycleResult:
         """
@@ -244,7 +278,7 @@ class WorkerService:
             if self.container.settings.worker_slots == 1:
                 self.state = WorkerState.EXECUTING
                 self.active_tasks[task.task_id] = execution
-                self._execute_task_in_thread(task.task_id)
+                self._execute_task_in_thread(task)
                 duration = time.time() - start
                 self.state = WorkerState.IDLE
                 return CycleResult(claimed=True, task_id=task.task_id, duration_seconds=duration)
@@ -252,7 +286,7 @@ class WorkerService:
             # For slots>1, execute in thread
             thread = threading.Thread(
                 target=self._execute_task_in_thread,
-                args=(task.task_id,),
+                args=(task,),
                 name=f"task-{task.task_id}",
                 daemon=False,
             )
@@ -278,3 +312,4 @@ class WorkerService:
         finally:
             if not self.active_tasks:
                 self.state = WorkerState.IDLE
+            self._publish_health_state()

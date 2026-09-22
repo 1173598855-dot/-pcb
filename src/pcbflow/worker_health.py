@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 if TYPE_CHECKING:
     from pcbflow.worker_service import WorkerService
@@ -79,3 +82,25 @@ def get_worker_metrics(worker: WorkerService) -> WorkerMetrics:
         worker_tasks_failed_total=worker.failed_count,
         worker_backoff_attempts_current=worker._backoff_attempts,
     )
+
+
+def write_worker_health_state(path: Path, health: WorkerHealth) -> None:
+    """Atomically publish a worker health snapshot for external readers."""
+    temporary_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary_path.write_text(
+            json.dumps(asdict(health), ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def read_worker_health_state(path: Path) -> dict[str, object]:
+    """Read a previously published worker health snapshot."""
+    with path.open(encoding="utf-8") as state_file:
+        state = json.load(state_file)
+    if not isinstance(state, dict):
+        raise ValueError("worker state must be a JSON object")
+    return state

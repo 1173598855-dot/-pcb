@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pcbflow.canonical import canonical_digest, canonical_json_bytes
+from pcbflow.canonical import canonical_digest, canonical_json_bytes, sha256_digest
 
 
 def test_canonical_json_is_utf8_sorted_compact_and_stable() -> None:
@@ -16,6 +16,12 @@ def test_canonical_json_is_utf8_sorted_compact_and_stable() -> None:
     )
     assert canonical_digest(left) == canonical_digest(right)
     assert canonical_digest(left).startswith("sha256:")
+
+
+def test_sha256_digest_hashes_exact_bytes() -> None:
+    assert sha256_digest(b"PCBFlow\x00canonical") == (
+        "sha256:628e002e9f8acbf117d027ce2d6bdfd1c7930c6ec73b79a4d06c53375aad3898"
+    )
 
 
 def test_canonical_json_rejects_non_finite_numbers() -> None:

@@ -1,10 +1,12 @@
 import os
 import sys
 from pathlib import Path
-from time import perf_counter
+from threading import Event, Thread
+from time import monotonic, perf_counter, sleep
 
 import pytest
 
+from pcbflow.cancellation import TaskCancelledError, task_cancellation_scope
 from pcbflow.process import ProcessRunner, ProcessTimeoutError
 
 
@@ -43,6 +45,90 @@ def test_runner_reports_timeout(tmp_path: Path) -> None:
     # Windows taskkill /T /F may take a couple of seconds to reap a process
     # tree, but timeout handling must still return well before the child exits.
     assert perf_counter() - started < 4
+
+
+def test_runner_terminates_a_process_when_its_task_is_cancelled(tmp_path: Path) -> None:
+    cancelled = Event()
+    marker = tmp_path / "child-started"
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            with task_cancellation_scope(cancelled.is_set):
+                ProcessRunner(max_output_bytes=1_024).run(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "from pathlib import Path; import sys, time; "
+                            "Path(sys.argv[1]).write_text('started', encoding='utf-8'); "
+                            "time.sleep(30)"
+                        ),
+                        str(marker),
+                    ],
+                    tmp_path,
+                    30,
+                )
+        except BaseException as error:
+            errors.append(error)
+
+    thread = Thread(target=run)
+    thread.start()
+    deadline = monotonic() + 2
+    while not marker.exists() and monotonic() < deadline:
+        sleep(0.01)
+    assert marker.exists()
+
+    cancelled.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], TaskCancelledError)
+
+
+def test_runner_reaps_process_when_cancellation_probe_raises(tmp_path: Path) -> None:
+    heartbeat = tmp_path / "child-heartbeat"
+    stop = tmp_path / "child-stop"
+
+    def broken_checker() -> bool:
+        if heartbeat.exists():
+            raise RuntimeError("cancellation state is unavailable")
+        return False
+
+    try:
+        with pytest.raises(RuntimeError, match="cancellation state"):
+            with task_cancellation_scope(broken_checker):
+                ProcessRunner(max_output_bytes=1_024).run(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "from pathlib import Path\n"
+                            "import sys\n"
+                            "import time\n"
+                            "heartbeat = Path(sys.argv[1])\n"
+                            "stop = Path(sys.argv[2])\n"
+                            "while not stop.exists():\n"
+                            "    heartbeat.write_text(str(time.monotonic()), encoding='utf-8')\n"
+                            "    time.sleep(0.01)\n"
+                        ),
+                        str(heartbeat),
+                        str(stop),
+                    ],
+                    tmp_path,
+                    30,
+                )
+
+        deadline = monotonic() + 2
+        while not heartbeat.exists() and monotonic() < deadline:
+            sleep(0.01)
+        assert heartbeat.exists()
+        before = heartbeat.read_text(encoding="utf-8")
+        sleep(0.15)
+        assert heartbeat.read_text(encoding="utf-8") == before
+    finally:
+        stop.write_text("stop", encoding="utf-8")
 
 
 def test_runner_rejects_empty_command(tmp_path: Path) -> None:

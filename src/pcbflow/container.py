@@ -11,17 +11,37 @@ from alembic.config import Config
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from pcbflow.approvals import ApprovalService, GateDecisionStore
+from pcbflow.approvals import ApprovalService, GateDecisionStore, PcbApprovalService
 from pcbflow.artifacts import ContentAddressedStore
+from pcbflow.board.adapter import PcbEdaAdapter
+from pcbflow.board.kicad_adapter import KicadBoardAdapter
 from pcbflow.component_binding_store import ComponentModuleBindingStore
 from pcbflow.component_bindings import ComponentModuleBindingService
 from pcbflow.component_store import ComponentRevisionStore
 from pcbflow.components import ComponentRevisionService
 from pcbflow.config import Settings
 from pcbflow.db import create_engine_and_session
+from pcbflow.eda_authority_store import ProjectEdaAuthorityStore
 from pcbflow.domain import new_id, utc_now
 from pcbflow.observability import Metrics
 from pcbflow.kicad import KicadCli, KicadPort
+from pcbflow.lceda_pro import LcedaProAdapter
+from pcbflow.pcb_workflow import (
+    LCEDA_CAPABILITY_TASK_KIND,
+    CapabilityGateService,
+    CapabilityProbeTaskHandler,
+)
+from pcbflow.pcb_candidates import (
+    PCB_GENERATE_CANDIDATE_TASK_KIND,
+    PcbCandidateExecutionTaskHandler,
+    PcbCandidateStore,
+)
+from pcbflow.pcb_release import (
+    PCB_EXPORT_RELEASE_TASK_KIND,
+    PcbReleaseApprovalService,
+    PcbReleaseService,
+    PcbReleaseTaskHandler,
+)
 from pcbflow.process import ProcessRunner
 from pcbflow.proposal_store import CommandBatchStore, ProposalStore
 from pcbflow.proposals import (
@@ -58,6 +78,7 @@ class Container:
     engine: Engine
     sessions: sessionmaker[Session]
     projects: ProjectRepository
+    eda_authorities: ProjectEdaAuthorityStore
     revision_store: ProjectRevisionStore
     revisions: RevisionService
     requirement_store: RequirementStore
@@ -77,6 +98,14 @@ class Container:
     components: ComponentRevisionService
     component_module_bindings: ComponentModuleBindingService
     kicad: KicadPort
+    kicad_board_adapter: KicadBoardAdapter
+    lceda_pro: LcedaProAdapter
+    pcb_adapter: PcbEdaAdapter
+    capability_gate: CapabilityGateService
+    pcb_candidates: PcbCandidateStore
+    pcb_approvals: PcbApprovalService
+    pcb_release: PcbReleaseService
+    pcb_release_approvals: PcbReleaseApprovalService
     validation: ValidationService
     worker: Worker
     proposal_executor: ProposalExecutor
@@ -102,6 +131,7 @@ def build_container(
     metrics: Metrics | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     faults: FaultInjector | None = None,
+    pcb_adapter_override: PcbEdaAdapter | None = None,
 ) -> Container:
     settings.ensure_directories()
     _run_migrations(settings.database_url)
@@ -110,6 +140,7 @@ def build_container(
     fault_injector = faults if faults is not None else NoFaults()
 
     projects = ProjectRepository(sessions)
+    eda_authorities = ProjectEdaAuthorityStore(sessions)
     tasks = TaskRepository(
         sessions,
         max_attempts=settings.task_retry_max_attempts,
@@ -165,14 +196,22 @@ def build_container(
         gate_decisions,
         reconciler,
     )
-    kicad = KicadCli(
+    if kicad_override is None:
+        selected_kicad: KicadPort = KicadCli(
+            runner,
+            KicadCli.locate(settings.kicad_cli),
+            settings.process_timeout_seconds,
+            max_design_file_bytes=settings.max_kicad_design_file_bytes,
+            max_report_bytes=settings.max_kicad_report_bytes,
+        )
+    else:
+        selected_kicad = kicad_override
+    lceda_pro = LcedaProAdapter(
         runner,
-        KicadCli.locate(settings.kicad_cli),
+        LcedaProAdapter.locate(settings.lceda_pro_executable),
         settings.process_timeout_seconds,
-        max_design_file_bytes=settings.max_kicad_design_file_bytes,
-        max_report_bytes=settings.max_kicad_report_bytes,
+        configured_bridge=settings.lceda_pro_official_bridge,
     )
-    selected_kicad: KicadPort = kicad_override if kicad_override is not None else kicad
     module_catalog = (FileModuleCatalog(settings.module_catalog_dir, max_files=settings.max_project_files, max_bytes=settings.max_project_bytes) if settings.module_catalog_dir is not None else None)
     component_module_bindings = ComponentModuleBindingService(
         component_store, component_module_binding_store, module_catalog
@@ -212,11 +251,67 @@ def build_container(
         max_files=settings.max_project_files,
         max_bytes=settings.max_project_bytes,
     )
+    capability_handler = CapabilityProbeTaskHandler(
+        eda_authorities, tasks, evidence, artifacts, lceda_pro
+    )
+    capability_gate = CapabilityGateService(
+        projects, eda_authorities, tasks, evidence, artifacts
+    )
+    pcb_candidates = PcbCandidateStore(
+        sessions,
+        tasks,
+        eda_authorities,
+        projects,
+        capability_gate,
+        evidence,
+        revisions,
+    )
+    pcb_adapter: PcbEdaAdapter = (
+        pcb_adapter_override if pcb_adapter_override is not None else lceda_pro
+    )
+    pcb_candidate_handler = PcbCandidateExecutionTaskHandler(
+        pcb_candidates,
+        projects,
+        tasks,
+        evidence,
+        findings,
+        artifacts,
+        capability_gate,
+        pcb_adapter,
+        settings.workspaces_dir,
+        revisions,
+        clock,
+    )
+    pcb_approvals = PcbApprovalService(
+        pcb_candidates, gate_decisions, artifacts, sessions
+    )
+    pcb_release = PcbReleaseService(pcb_candidates, capability_gate)
+    pcb_release_handler = PcbReleaseTaskHandler(
+        pcb_candidates,
+        projects,
+        tasks,
+        evidence,
+        artifacts,
+        capability_gate,
+        pcb_adapter,
+        settings.workspaces_dir,
+        revisions,
+        clock,
+    )
+    pcb_release_approvals = PcbReleaseApprovalService(
+        pcb_candidates, gate_decisions, artifacts, sessions
+    )
     validation = ValidationService(projects, tasks)
     worker = Worker(
         tasks,
         new_id("wrk"),
-        {VALIDATION_TASK_KIND: handler, DESIGN_PROPOSAL_TASK_KIND: proposal_executor},
+        {
+            VALIDATION_TASK_KIND: handler,
+            DESIGN_PROPOSAL_TASK_KIND: proposal_executor,
+            LCEDA_CAPABILITY_TASK_KIND: capability_handler,
+            PCB_GENERATE_CANDIDATE_TASK_KIND: pcb_candidate_handler,
+            PCB_EXPORT_RELEASE_TASK_KIND: pcb_release_handler,
+        },
         clock,
         settings.task_lease_seconds,
     )
@@ -225,6 +320,7 @@ def build_container(
         engine=engine,
         sessions=sessions,
         projects=projects,
+        eda_authorities=eda_authorities,
         revision_store=revision_store,
         revisions=revisions,
         requirement_store=requirement_store,
@@ -244,6 +340,14 @@ def build_container(
         components=components,
         component_module_bindings=component_module_bindings,
         kicad=selected_kicad,
+        kicad_board_adapter=KicadBoardAdapter(selected_kicad),
+        lceda_pro=lceda_pro,
+        pcb_adapter=pcb_adapter,
+        capability_gate=capability_gate,
+        pcb_candidates=pcb_candidates,
+        pcb_approvals=pcb_approvals,
+        pcb_release=pcb_release,
+        pcb_release_approvals=pcb_release_approvals,
         validation=validation,
         worker=worker,
         proposal_executor=proposal_executor,

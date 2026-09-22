@@ -4,9 +4,12 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Mapping, Protocol, Sequence
+
+from pcbflow.cancellation import TaskCancelledError, current_cancellation_checker
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,13 +126,23 @@ class ProcessRunner:
         stderr_thread.start()
 
         try:
-            returncode = process.wait(timeout=timeout_seconds)
+            checker = current_cancellation_checker()
+            returncode = (
+                process.wait(timeout=timeout_seconds)
+                if checker is None
+                else self._wait_for_cancellable_process(
+                    process, timeout_seconds, checker
+                )
+            )
+        except TaskCancelledError:
+            self._terminate_and_reap(process, process_env, stdout_thread, stderr_thread)
+            raise
         except subprocess.TimeoutExpired as error:
-            self._terminate_tree(process, process_env)
-            process.wait()
-            stdout_thread.join()
-            stderr_thread.join()
+            self._terminate_and_reap(process, process_env, stdout_thread, stderr_thread)
             raise ProcessTimeoutError(argv, timeout_seconds) from error
+        except BaseException:
+            self._terminate_and_reap(process, process_env, stdout_thread, stderr_thread)
+            raise
 
         stdout_thread.join()
         stderr_thread.join()
@@ -142,6 +155,36 @@ class ProcessRunner:
             stdout_bytes=stdout.bytes(),
             stderr_bytes=stderr.bytes(),
         )
+
+    @staticmethod
+    def _wait_for_cancellable_process(
+        process: subprocess.Popen[bytes],
+        timeout_seconds: float,
+        checker,
+    ) -> int:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if checker():
+                raise TaskCancelledError()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process.args, timeout_seconds)
+            try:
+                return process.wait(timeout=min(0.05, remaining))
+            except subprocess.TimeoutExpired:
+                continue
+
+    @staticmethod
+    def _terminate_and_reap(
+        process: subprocess.Popen[bytes],
+        process_env: Mapping[str, str],
+        stdout_thread: threading.Thread,
+        stderr_thread: threading.Thread,
+    ) -> None:
+        ProcessRunner._terminate_tree(process, process_env)
+        process.wait()
+        stdout_thread.join()
+        stderr_thread.join()
 
     @staticmethod
     def _terminate_tree(

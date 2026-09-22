@@ -21,6 +21,19 @@ class ProjectMode(StrEnum):
     MANAGED = "managed"
 
 
+class EdaKind(StrEnum):
+    KICAD = "kicad"
+    LCEDA_PRO = "lceda_pro"
+
+
+class EdaOperation(StrEnum):
+    SNAPSHOT = "snapshot"
+    CREATE_CANDIDATE = "create_candidate"
+    APPLY_OPERATIONS = "apply_operations"
+    RUN_DRC = "run_drc"
+    EXPORT_RELEASE = "export_release"
+
+
 class RequestInvalidError(ValueError):
     """An expected request or state-transition rejection."""
 
@@ -61,6 +74,7 @@ class TaskStatus(StrEnum):
     SUCCEEDED = "succeeded"
     RETRY_WAIT = "retry_wait"
     FAILED_TERMINAL = "failed_terminal"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +87,8 @@ class Task:
     status: TaskStatus
     attempt_count: int
     last_error_code: str | None
+    cancelled_at: datetime | None
+    cancellation_reason: str | None
     created_at: datetime
     updated_at: datetime
 

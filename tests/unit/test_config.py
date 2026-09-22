@@ -29,6 +29,22 @@ def test_settings_accept_explicit_kicad_cli(tmp_path: Path) -> None:
     assert settings.kicad_cli == executable.resolve()
 
 
+def test_settings_accept_explicit_lceda_pro_paths(tmp_path: Path) -> None:
+    executable = tmp_path / "lceda-pro.exe"
+    bridge = tmp_path / "official-bridge.exe"
+
+    settings = Settings.from_env(
+        {
+            "PCBFLOW_DATA_DIR": str(tmp_path / "data"),
+            "PCBFLOW_LCEDA_PRO_EXECUTABLE": str(executable),
+            "PCBFLOW_LCEDA_PRO_OFFICIAL_BRIDGE": str(bridge),
+        }
+    )
+
+    assert settings.lceda_pro_executable == executable.resolve()
+    assert settings.lceda_pro_official_bridge == bridge.resolve()
+
+
 def test_settings_create_runtime_directories(tmp_path: Path) -> None:
     settings = Settings.from_env({"PCBFLOW_DATA_DIR": str(tmp_path / "runtime")})
 
@@ -276,6 +292,20 @@ def test_worker_settings_parse_from_environment(tmp_path: Path) -> None:
     assert settings.worker_heartbeat_seconds == 45
     assert settings.worker_shutdown_timeout_seconds == 600
     assert settings.worker_id == "test-worker-1"
+
+
+def test_worker_settings_adapt_default_heartbeat_to_a_short_lease(
+    tmp_path: Path,
+) -> None:
+    settings = Settings.from_env(
+        {
+            "PCBFLOW_DATA_DIR": str(tmp_path),
+            "PCBFLOW_TASK_LEASE_SECONDS": "30",
+            "PCBFLOW_PROCESS_TIMEOUT_SECONDS": "20",
+        }
+    )
+
+    assert settings.worker_heartbeat_seconds == 10
 
 
 def test_worker_settings_reject_invalid_slot_count(tmp_path: Path) -> None:

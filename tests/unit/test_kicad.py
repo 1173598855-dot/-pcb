@@ -126,6 +126,22 @@ def test_locate_prefers_explicit_existing_path(tmp_path: Path) -> None:
     assert KicadCli.locate(executable) == executable.resolve()
 
 
+def test_locate_treats_an_unreadable_configured_path_as_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured = tmp_path / "blocked-kicad-cli.exe"
+    original_is_file = Path.is_file
+
+    def deny_configured_path(path: Path) -> bool:
+        if path == configured.resolve():
+            raise PermissionError("access denied")
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", deny_configured_path)
+
+    assert KicadCli.locate(configured) is None
+
+
 def test_locate_selects_highest_registered_numeric_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

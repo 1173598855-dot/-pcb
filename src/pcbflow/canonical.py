@@ -14,5 +14,9 @@ def canonical_json_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def sha256_digest(value: bytes) -> str:
+    return f"sha256:{hashlib.sha256(value).hexdigest()}"
+
+
 def canonical_digest(value: object) -> str:
-    return f"sha256:{hashlib.sha256(canonical_json_bytes(value)).hexdigest()}"
+    return sha256_digest(canonical_json_bytes(value))

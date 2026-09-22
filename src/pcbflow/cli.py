@@ -22,6 +22,18 @@ from pcbflow.component_bindings import (
 from pcbflow.component_store import ComponentRevisionNotFoundError
 from pcbflow.config import Settings
 from pcbflow.container import Container, build_container
+from pcbflow.eda import (
+    EdaAuthorityConflictError,
+    ProjectEdaAuthorityInput,
+    validate_authority_input,
+)
+from pcbflow.lceda_pro import LcedaProCapabilityError
+from pcbflow.pcb_candidates import (
+    PcbCandidateNotFoundError,
+    PcbCandidateNotReviewableError,
+    validate_candidate_public_inputs,
+)
+from pcbflow.domain import EdaKind, utc_now
 from pcbflow.observability import ensure_trace_id
 from pcbflow.proposal_store import ProposalNotFoundError
 from pcbflow.proposals import (
@@ -32,6 +44,8 @@ from pcbflow.repositories import (
     IdempotencyConflictError,
     ProjectNotFoundError,
     RevisionConflictError,
+    TaskNotCancellableError,
+    TaskNotFoundError,
 )
 from pcbflow.requirement_store import RequirementSetNotFoundError
 from pcbflow.requirements import RequirementSet, RequirementsBlockedError
@@ -41,7 +55,7 @@ from pcbflow.revisions import (
     ProjectWorktreeDirtyError,
 )
 from pcbflow.schematic.modules import ModuleRevisionNotFoundError
-from pcbflow.worker_health import get_worker_health
+from pcbflow.worker_health import read_worker_health_state
 
 app = typer.Typer(no_args_is_help=True)
 project_app = typer.Typer(no_args_is_help=True)
@@ -50,7 +64,11 @@ requirements_app = typer.Typer(no_args_is_help=True)
 approval_app = typer.Typer(no_args_is_help=True)
 proposal_app = typer.Typer(no_args_is_help=True)
 component_app = typer.Typer(no_args_is_help=True)
-worker_app = typer.Typer(no_args_is_help=True)
+worker_app = typer.Typer(no_args_is_help=True, invoke_without_command=True)
+eda_app = typer.Typer(no_args_is_help=True)
+pcb_app = typer.Typer(no_args_is_help=True)
+pcb_candidate_app = typer.Typer(no_args_is_help=True)
+pcb_release_app = typer.Typer(no_args_is_help=True)
 app.add_typer(project_app, name="project")
 app.add_typer(task_app, name="task")
 app.add_typer(requirements_app, name="requirements")
@@ -58,6 +76,10 @@ app.add_typer(approval_app, name="approval")
 app.add_typer(proposal_app, name="proposal")
 app.add_typer(component_app, name="component")
 app.add_typer(worker_app, name="worker")
+app.add_typer(eda_app, name="eda")
+app.add_typer(pcb_app, name="pcb")
+pcb_app.add_typer(pcb_candidate_app, name="candidate")
+pcb_app.add_typer(pcb_release_app, name="release")
 
 
 class CliInputError(ValueError):
@@ -67,8 +89,23 @@ class CliInputError(ValueError):
 
 
 def _cli_error(error: BaseException) -> tuple[str, str]:
+    if isinstance(error, LcedaProCapabilityError):
+        return error.code, "LCEDA Pro write capability is unverified"
+    if isinstance(error, PcbCandidateNotReviewableError):
+        return "PCB_CANDIDATE_NOT_REVIEWABLE", "the PCB candidate is not reviewable"
+    if isinstance(error, PcbCandidateNotFoundError):
+        return "PCB_CANDIDATE_NOT_FOUND", "PCB candidate not found"
+    if isinstance(error, Exception) and str(error) == "PCB_CANDIDATE_STALE":
+        return "PCB_CANDIDATE_STALE", "the PCB candidate base revision is stale"
+    if isinstance(error, Exception) and str(error) == "PCB_CAPABILITY_GATE_BLOCKED":
+        return "PCB_CAPABILITY_GATE_BLOCKED", "the PCB candidate capability gate is blocked"
     if isinstance(error, CliInputError):
         return error.code, str(error)
+    if isinstance(error, EdaAuthorityConflictError):
+        return (
+            "EDA_AUTHORITY_CONFLICT",
+            "the project EDA authority is already immutable",
+        )
     if isinstance(error, IdempotencyConflictError):
         return (
             "IDEMPOTENCY_CONFLICT",
@@ -88,6 +125,8 @@ def _cli_error(error: BaseException) -> tuple[str, str]:
         return "PROJECT_WORKTREE_DIRTY", "the recorded project snapshot is dirty"
     if isinstance(error, CandidateNotReviewableError):
         return "CANDIDATE_NOT_REVIEWABLE", "the proposal candidate is not reviewable"
+    if isinstance(error, TaskNotCancellableError):
+        return "TASK_NOT_CANCELLABLE", "the task is already in a terminal state"
     if isinstance(error, DesignCommandSchemaError):
         return "DESIGN_COMMAND_SCHEMA_INVALID", "the design command batch is invalid"
     if isinstance(error, ComponentRevisionNotFoundError):
@@ -107,10 +146,18 @@ def _cli_error(error: BaseException) -> tuple[str, str]:
             "component revision already has a different module binding for this KiCad major",
         )
     if isinstance(
-        error, (ProjectNotFoundError, RequirementSetNotFoundError, ProposalNotFoundError)
+        error,
+        (
+            ProjectNotFoundError,
+            TaskNotFoundError,
+            RequirementSetNotFoundError,
+            ProposalNotFoundError,
+        ),
     ):
         if isinstance(error, ProjectNotFoundError):
             return "PROJECT_NOT_FOUND", "project not found"
+        if isinstance(error, TaskNotFoundError):
+            return "TASK_NOT_FOUND", "task not found"
         if isinstance(error, RequirementSetNotFoundError):
             return "REQUIREMENT_SET_NOT_FOUND", "requirement set not found"
         return "PROPOSAL_NOT_FOUND", "proposal not found"
@@ -200,6 +247,38 @@ def _requirement_view(value: RequirementSet) -> dict[str, object]:
     return result
 
 
+def _authority_input(
+    eda_kind: str | None,
+    eda_profile_id: str | None,
+    board_profile_id: str | None,
+    rulepack_digest: str | None,
+) -> ProjectEdaAuthorityInput | None:
+    values = (eda_kind, eda_profile_id, board_profile_id, rulepack_digest)
+    if all(value is None for value in values):
+        return None
+    if any(value is None for value in values):
+        raise CliInputError(
+            "EDA_AUTHORITY_INVALID", "EDA authority options must be complete"
+        )
+    assert eda_kind is not None
+    assert eda_profile_id is not None
+    assert board_profile_id is not None
+    assert rulepack_digest is not None
+    try:
+        kind = EdaKind(eda_kind)
+    except ValueError as error:
+        raise CliInputError("EDA_AUTHORITY_INVALID", "unsupported EDA kind") from error
+    try:
+        return validate_authority_input(ProjectEdaAuthorityInput(
+            eda_kind=kind,
+            eda_profile_id=eda_profile_id,
+            board_profile_id=board_profile_id,
+            rulepack_digest=rulepack_digest,
+        ))
+    except ValueError as error:
+        raise CliInputError("EDA_AUTHORITY_INVALID", str(error)) from error
+
+
 @app.command()
 def doctor(
     json_output: Annotated[bool, typer.Option("--json")] = False,
@@ -208,7 +287,7 @@ def doctor(
     try:
         capability = container.kicad.probe()
         _emit(
-            {"kicad_cli": capability},
+            {"kicad_cli": capability, "lceda_pro": container.lceda_pro.probe()},
             json_output,
             "KiCad CLI available" if capability.available else "KiCad CLI unavailable",
         )
@@ -221,12 +300,204 @@ def project_add(
     path: Path,
     name: Annotated[str, typer.Option("--name")],
     idempotency_key: Annotated[str, typer.Option("--idempotency-key")],
+    eda_kind: Annotated[str | None, typer.Option("--eda-kind")] = None,
+    eda_profile_id: Annotated[str | None, typer.Option("--eda-profile-id")] = None,
+    board_profile_id: Annotated[str | None, typer.Option("--board-profile-id")] = None,
+    rulepack_digest: Annotated[str | None, typer.Option("--rulepack-digest")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     container = _build()
     try:
-        project = container.projects.create(name, path, idempotency_key)
+        authority = _authority_input(
+            eda_kind, eda_profile_id, board_profile_id, rulepack_digest
+        )
+        project, created = container.projects.create_with_status(
+            name, path, idempotency_key, authority
+        )
+    except Exception as error:
+        _abort(error)
+    else:
         _emit(project, json_output, project.id)
+    finally:
+        container.dispose()
+
+
+@eda_app.command("probe")
+def eda_probe(
+    eda_name: str,
+    project_id: Annotated[str | None, typer.Argument()] = None,
+    idempotency_key: Annotated[str | None, typer.Option("--idempotency-key")] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    if eda_name != "lceda-pro":
+        raise typer.BadParameter("only lceda-pro is supported", param_hint="eda_name")
+    container = _build()
+    try:
+        try:
+            if project_id is not None:
+                if idempotency_key is None:
+                    raise CliInputError(
+                        "IDEMPOTENCY_KEY_REQUIRED", "idempotency key is required"
+                    )
+                task = container.capability_gate.enqueue(project_id, idempotency_key)
+                _emit(task, json_output, f"{task.id}: {task.status.value}")
+                return
+            capability = container.lceda_pro.probe()
+            _emit(
+                capability,
+                json_output,
+                "LCEDA Pro write capability verified"
+                if capability.write_verified
+                else "LCEDA Pro write capability unverified",
+            )
+        except Exception as error:
+            _abort(error)
+    finally:
+        container.dispose()
+
+
+@pcb_candidate_app.command("create")
+def pcb_candidate_create(
+    project_id: str,
+    seed: Annotated[int, typer.Option("--seed")] = 0,
+    net_ids: Annotated[list[str] | None, typer.Option("--net-id")] = None,
+    board_snapshot_digest: Annotated[str | None, typer.Option("--board-snapshot-digest")] = None,
+    capability_digest: Annotated[str | None, typer.Option("--capability-digest")] = None,
+    idempotency_key: Annotated[str | None, typer.Option("--idempotency-key")] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    if not idempotency_key:
+        _abort(CliInputError("IDEMPOTENCY_KEY_REQUIRED", "idempotency key is required"))
+    try:
+        validate_candidate_public_inputs(
+            seed=seed,
+            net_ids=net_ids,
+            board_snapshot_digest=board_snapshot_digest,
+            capability_digest=capability_digest,
+        )
+    except Exception as error:
+        _abort(error)
+    container = _build()
+    try:
+        try:
+            candidates = getattr(container, "pcb_candidates", None)
+            if candidates is None:
+                raise CliInputError("PCB_CAPABILITY_GATE_BLOCKED", "PCB candidate service is unavailable")
+            candidate = candidates.create_from_public_inputs(
+                project_id=project_id,
+                seed=seed,
+                net_ids=net_ids,
+                board_snapshot_digest=board_snapshot_digest,
+                capability_digest=capability_digest,
+                idempotency_key=idempotency_key,
+            )
+        except Exception as error:
+            _abort(error)
+        _emit(candidate, json_output, f"{candidate.id}: {candidate.status.value}")
+    finally:
+        container.dispose()
+
+
+@pcb_candidate_app.command("show")
+def pcb_candidate_show(
+    candidate_id: str,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    container = _build()
+    try:
+        try:
+            candidates = getattr(container, "pcb_candidates", None)
+            if candidates is None:
+                raise CliInputError("PCB_CAPABILITY_GATE_BLOCKED", "PCB candidate service is unavailable")
+            candidate = candidates.get(candidate_id)
+        except Exception as error:
+            _abort(error)
+        _emit(candidate, json_output, f"{candidate.id}: {candidate.status.value}")
+    finally:
+        container.dispose()
+
+
+@pcb_candidate_app.command("approve-g3")
+def pcb_candidate_approve_g3(
+    candidate_id: str,
+    candidate_digest: Annotated[str, typer.Option("--candidate-digest")],
+    idempotency_key: Annotated[str, typer.Option("--idempotency-key")],
+    actor_id: Annotated[str, typer.Option("--actor-id")],
+    comment: Annotated[str, typer.Option("--comment")],
+    approve: Annotated[bool, typer.Option("--approve")] = False,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    container = _build()
+    try:
+        try:
+            approvals = getattr(container, "pcb_approvals", None)
+            if approvals is None:
+                raise CliInputError(
+                    "PCB_CAPABILITY_GATE_BLOCKED",
+                    "PCB approval service is unavailable",
+                )
+            result = approvals.decide_g3(
+                candidate_id=candidate_id,
+                candidate_digest=candidate_digest,
+                idempotency_key=idempotency_key,
+                actor_id=actor_id,
+                decision="approve" if approve else "reject",
+                comment=comment,
+            )
+        except Exception as error:
+            _abort(error)
+        _emit(result, json_output, f"{result.id}: {result.status.value}")
+    finally:
+        container.dispose()
+
+
+@pcb_release_app.command("export")
+def pcb_release_export(
+    candidate_id: str,
+    idempotency_key: Annotated[str, typer.Option("--idempotency-key")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    container = _build()
+    try:
+        try:
+            release = getattr(container, "pcb_release", None)
+            if release is None:
+                raise CliInputError("PCB_RELEASE_CAPABILITY_BLOCKED", "PCB release service is unavailable")
+            task = release.enqueue_export(candidate_id, idempotency_key)
+        except Exception as error:
+            _abort(error)
+        _emit(task, json_output, f"{task.id}: {task.status.value}")
+    finally:
+        container.dispose()
+
+
+@pcb_release_app.command("approve-g4")
+def pcb_release_approve_g4(
+    candidate_id: str,
+    manifest_digest: Annotated[str, typer.Option("--manifest-digest")],
+    idempotency_key: Annotated[str, typer.Option("--idempotency-key")],
+    actor_id: Annotated[str, typer.Option("--actor-id")],
+    comment: Annotated[str, typer.Option("--comment")],
+    approve: Annotated[bool, typer.Option("--approve")] = False,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    container = _build()
+    try:
+        try:
+            approvals = getattr(container, "pcb_release_approvals", None)
+            if approvals is None:
+                raise CliInputError("PCB_RELEASE_CAPABILITY_BLOCKED", "G4 approval service is unavailable")
+            candidate = approvals.decide_g4(
+                candidate_id=candidate_id,
+                manifest_digest=manifest_digest,
+                idempotency_key=idempotency_key,
+                actor_id=actor_id,
+                decision="approve" if approve else "reject",
+                comment=comment,
+            )
+        except Exception as error:
+            _abort(error)
+        _emit(candidate, json_output, f"{candidate.id}: {candidate.status.value}")
     finally:
         container.dispose()
 
@@ -624,8 +895,9 @@ def validate_project(
         container.dispose()
 
 
-@app.command("worker")
+@worker_app.callback(invoke_without_command=True)
 def run_worker(
+    context: typer.Context,
     once: Annotated[bool, typer.Option("--once")] = False,
     run: Annotated[bool, typer.Option("--run")] = False,
     exit_when_idle: Annotated[bool, typer.Option("--exit-when-idle")] = False,
@@ -634,6 +906,16 @@ def run_worker(
     """Execute worker tasks. Use --once for single task, --run for resident mode."""
     import signal
     import sys
+
+    if context.invoked_subcommand is not None:
+        if once or run or exit_when_idle or json_output:
+            _abort(
+                CliInputError(
+                    "INVALID_ARGUMENT",
+                    "worker execution options cannot be used with a subcommand",
+                )
+            )
+        return
 
     if once and run:
         raise CliInputError(
@@ -669,7 +951,7 @@ def run_worker(
         while not worker.shutdown_requested:
             result = worker.run_one_cycle()
 
-            if exit_when_idle and not result.claimed:
+            if exit_when_idle and not result.claimed and not worker.active_tasks:
                 break
 
         duration_seconds = (datetime.now(UTC) - worker.started_at).total_seconds()
@@ -699,6 +981,8 @@ def run_worker(
             worker.request_shutdown()
         sys.exit(0)
     finally:
+        if worker:
+            worker.shutdown_gracefully()
         container.dispose()
 
 
@@ -713,6 +997,51 @@ def task_show(
         _emit(task, json_output, f"{task.id}: {task.status.value}")
     finally:
         container.dispose()
+
+
+@project_app.command("eda-authority")
+def project_eda_authority(
+    project_id: str,
+    eda_kind: Annotated[str, typer.Option("--eda-kind")],
+    eda_profile_id: Annotated[str, typer.Option("--eda-profile-id")],
+    board_profile_id: Annotated[str, typer.Option("--board-profile-id")],
+    rulepack_digest: Annotated[str, typer.Option("--rulepack-digest")],
+    idempotency_key: Annotated[str, typer.Option("--idempotency-key")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    container = _build()
+    try:
+        authority = _authority_input(
+            eda_kind, eda_profile_id, board_profile_id, rulepack_digest
+        )
+        assert authority is not None
+        configured = container.eda_authorities.configure(
+            project_id, authority, idempotency_key
+        )
+    except Exception as error:
+        _abort(error)
+    else:
+        _emit(configured, json_output, configured.project_id)
+    finally:
+        container.dispose()
+
+
+@task_app.command("cancel")
+def task_cancel(
+    task_id: str,
+    reason: Annotated[str, typer.Option("--reason")],
+    idempotency_key: Annotated[str, typer.Option("--idempotency-key")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    del idempotency_key
+    container = _build()
+    try:
+        task = container.tasks.cancel(task_id, reason, utc_now())
+    except Exception as error:
+        _abort(error)
+    finally:
+        container.dispose()
+    _emit(task, json_output, f"{task.id}: {task.status.value}")
 
 
 @app.command("findings")
@@ -749,32 +1078,23 @@ def worker_health(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Check worker health status. Use --file to read from worker state file."""
-    if worker_file:
-        # Read health from persisted worker state file
-        import json as jsonlib
-        from pathlib import Path
+    state_path = (
+        Path(worker_file) if worker_file else Settings.from_env().worker_state_file
+    )
+    if not state_path.exists():
+        code = "FILE_NOT_FOUND" if worker_file else "WORKER_STATE_UNAVAILABLE"
+        _abort(CliInputError(code, f"worker state file not found: {state_path}"))
 
-        state_path = Path(worker_file)
-        if not state_path.exists():
-            _abort(CliInputError("FILE_NOT_FOUND", f"worker state file not found: {worker_file}"))
-
-        try:
-            with state_path.open("r") as f:
-                state = jsonlib.load(f)
-            _emit(state, json_output, f"Worker {state.get('worker_id', 'unknown')}: {state.get('status', 'unknown')}")
-        except Exception as error:
-            _abort(CliInputError("FILE_READ_ERROR", f"failed to read worker state: {error}"))
-    else:
-        # Check current environment health
-        container = _build()
-        try:
-            from pcbflow.worker_service import WorkerService
-
-            worker = WorkerService(container)
-            health = get_worker_health(worker)
-            _emit(health, json_output, f"Worker {health.worker_id}: {health.status}")
-        finally:
-            container.dispose()
+    try:
+        state = read_worker_health_state(state_path)
+        _emit(
+            state,
+            json_output,
+            f"Worker {state.get('worker_id', 'unknown')}: "
+            f"{state.get('status', 'unknown')}",
+        )
+    except Exception as error:
+        _abort(CliInputError("FILE_READ_ERROR", f"failed to read worker state: {error}"))
 
 
 @app.command("serve")

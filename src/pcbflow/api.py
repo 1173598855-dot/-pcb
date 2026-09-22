@@ -9,9 +9,16 @@ from fastapi import FastAPI, Header, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
-from pcbflow.approvals import ApprovalDigestMismatchError
+from pcbflow.approvals import ApprovalDigestMismatchError, ApprovalDigestMismatchError
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.commands import DesignCommandSchemaError, load_command_batch
 from pcbflow.component_binding_store import ComponentModuleBindingConflictError
@@ -22,7 +29,19 @@ from pcbflow.component_bindings import (
 from pcbflow.component_store import ComponentRevisionNotFoundError
 from pcbflow.config import Settings
 from pcbflow.container import Container, build_container
-from pcbflow.domain import RequestInvalidError, new_id
+from pcbflow.eda import (
+    EdaAuthorityConflictError,
+    ProjectEdaAuthorityInput,
+    validate_authority_input,
+    validate_idempotency_key,
+)
+from pcbflow.lceda_pro import LcedaProCapabilityError
+from pcbflow.pcb_candidates import (
+    PcbCandidateNotFoundError,
+    PcbCandidateNotReviewableError,
+    validate_candidate_public_inputs,
+)
+from pcbflow.domain import EdaKind, RequestInvalidError, new_id, utc_now
 from pcbflow.observability import bind_log_context
 from pcbflow.proposal_store import ProposalNotFoundError
 from pcbflow.proposals import (
@@ -34,6 +53,7 @@ from pcbflow.repositories import (
     IdempotencyConflictError,
     ProjectNotFoundError,
     RevisionConflictError,
+    TaskNotCancellableError,
     TaskNotFoundError,
 )
 from pcbflow.requirement_store import RequirementSetNotFoundError
@@ -57,6 +77,56 @@ class StrictRequest(BaseModel):
 class CreateProjectRequest(StrictRequest):
     name: str = Field(min_length=1)
     source_path: str = Field(min_length=1)
+    eda_kind: Literal["kicad", "lceda_pro"] | None = None
+    eda_profile_id: str | None = Field(default=None, min_length=1, max_length=128)
+    board_profile_id: str | None = Field(
+        default=None, min_length=1, max_length=128
+    )
+    rulepack_digest: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def require_complete_authority_tuple(self):
+        values = (
+            self.eda_kind,
+            self.eda_profile_id,
+            self.board_profile_id,
+            self.rulepack_digest,
+        )
+        if any(value is not None for value in values) and any(
+            value is None for value in values
+        ):
+            raise ValueError("EDA authority tuple must be complete")
+        return self
+
+    def authority_input(self) -> ProjectEdaAuthorityInput | None:
+        if self.eda_kind is None:
+            return None
+        assert self.eda_profile_id is not None
+        assert self.board_profile_id is not None
+        assert self.rulepack_digest is not None
+        return validate_authority_input(ProjectEdaAuthorityInput(
+            eda_kind=EdaKind(self.eda_kind),
+            eda_profile_id=self.eda_profile_id,
+            board_profile_id=self.board_profile_id,
+            rulepack_digest=self.rulepack_digest,
+        ))
+
+
+class ConfigureEdaAuthorityRequest(StrictRequest):
+    eda_kind: Literal["kicad", "lceda_pro"]
+    eda_profile_id: str = Field(min_length=1, max_length=128)
+    board_profile_id: str = Field(min_length=1, max_length=128)
+    rulepack_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+    def authority_input(self) -> ProjectEdaAuthorityInput:
+        return validate_authority_input(ProjectEdaAuthorityInput(
+            eda_kind=EdaKind(self.eda_kind),
+            eda_profile_id=self.eda_profile_id,
+            board_profile_id=self.board_profile_id,
+            rulepack_digest=self.rulepack_digest,
+        ))
 
 
 class CreateComponentRevisionRequest(StrictRequest):
@@ -91,6 +161,62 @@ class AcceptProposalRequest(StrictRequest):
 class RejectProposalRequest(StrictRequest):
     actor: ActorRequest
     reason: str = Field(min_length=1)
+
+
+class CancelTaskRequest(StrictRequest):
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("reason")
+    @classmethod
+    def require_nonblank_reason(cls, reason: str) -> str:
+        normalized = reason.strip()
+        if not normalized:
+            raise ValueError("reason must not be blank")
+        return normalized
+
+
+class CreatePcbCandidateRequest(StrictRequest):
+    seed: int = Field(default=0, ge=0)
+    net_ids: list[str] = Field(default_factory=list, max_length=256)
+    board_snapshot_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    capability_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+
+    @field_validator("net_ids")
+    @classmethod
+    def validate_net_ids(cls, values: list[str]) -> list[str]:
+        if any(not value or value != value.strip() for value in values):
+            raise ValueError("net_ids must contain nonblank trimmed strings")
+        if len(values) != len(set(values)):
+            raise ValueError("net_ids must be unique")
+        return values
+
+    @model_validator(mode="after")
+    def validate_shared_candidate_inputs(self) -> "CreatePcbCandidateRequest":
+        validate_candidate_public_inputs(
+            seed=self.seed,
+            net_ids=self.net_ids,
+            board_snapshot_digest=self.board_snapshot_digest,
+            capability_digest=self.capability_digest,
+        )
+        return self
+
+
+class DecidePcbG3Request(StrictRequest):
+    candidate_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    decision: Literal["approve", "reject"]
+    actor: ActorRequest
+    comment: str = Field(min_length=1)
+
+
+class ExportPcbReleaseRequest(StrictRequest):
+    pass
+
+
+class DecidePcbG4Request(StrictRequest):
+    manifest_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    decision: Literal["approve", "reject"]
+    actor: ActorRequest
+    comment: str = Field(min_length=1)
 
 
 class ApiError(RuntimeError):
@@ -256,6 +382,63 @@ def _with_authenticated_actor(batch, actor_type: str, actor_id: str):
 def _mapped_domain_error(
     error: BaseException,
 ) -> tuple[int, str, str, bool, dict[str, object], list[str]]:
+    if isinstance(error, LcedaProCapabilityError):
+        return (
+            422,
+            error.code,
+            "LCEDA Pro write capability is unverified",
+            False,
+            {},
+            ["complete the verified official bridge contract before requesting writes"],
+        )
+    if isinstance(error, PcbCandidateNotReviewableError):
+        return (
+            409,
+            "PCB_CANDIDATE_NOT_REVIEWABLE",
+            "the PCB candidate is not reviewable",
+            False,
+            {},
+            ["wait for a ready_for_g3 candidate and refresh its evidence"],
+        )
+    if isinstance(error, RequestInvalidError) and str(error) == "PCB_CANDIDATE_STALE":
+        return (
+            409,
+            "PCB_CANDIDATE_STALE",
+            "the PCB candidate base revision is stale",
+            False,
+            {},
+            ["refresh the project revision and retry candidate creation"],
+        )
+    if isinstance(error, RequestInvalidError) and str(error) == "PCB_CAPABILITY_GATE_BLOCKED":
+        return (
+            422,
+            "PCB_CAPABILITY_GATE_BLOCKED",
+            "the PCB candidate capability gate is blocked",
+            False,
+            {},
+            ["configure a frozen LCEDA Pro authority and verified BoardIR/capability evidence"],
+        )
+    if isinstance(error, RequestInvalidError) and str(error) in {
+        "PCB_RELEASE_ALREADY_REQUESTED",
+        "PCB_RELEASE_RETRY_KEY_REQUIRED",
+    }:
+        return (
+            409,
+            str(error),
+            "the PCB release request conflicts with an existing release attempt",
+            False,
+            {},
+            ["use the existing release task or provide a new idempotency key after failure"],
+        )
+    if isinstance(error, EdaAuthorityConflictError):
+        return (
+            409,
+            "EDA_AUTHORITY_CONFLICT",
+            "the project EDA authority is already immutable",
+            False,
+            {},
+            ["reuse the frozen authority tuple for this project"],
+        )
     if isinstance(error, RequirementsBlockedError):
         return (
             422,
@@ -311,6 +494,15 @@ def _mapped_domain_error(
             False,
             {},
             ["inspect the proposal and wait for a ready-for-review candidate"],
+        )
+    if isinstance(error, TaskNotCancellableError):
+        return (
+            409,
+            "TASK_NOT_CANCELLABLE",
+            "the task is already in a terminal state",
+            False,
+            {"task_id": error.task_id, "status": error.status},
+            ["inspect the task state instead of requesting cancellation"],
         )
     if isinstance(error, RevisionReconciliationRequiredError):
         return (
@@ -432,10 +624,20 @@ def create_app(container: Container | None = None) -> FastAPI:
         ProposalProjectNotManagedError,
         ProjectWorktreeDirtyError,
         CandidateNotReviewableError,
+        PcbCandidateNotReviewableError,
+        TaskNotCancellableError,
         RevisionReconciliationRequiredError,
         GitOperationError,
     ):
         app.add_exception_handler(exception_type, handle_domain_error)
+
+    @app.exception_handler(PcbCandidateNotFoundError)
+    async def handle_pcb_candidate_not_found(
+        request: Request, error: PcbCandidateNotFoundError
+    ) -> JSONResponse:
+        return _error_response(
+            request, 404, "PCB_CANDIDATE_NOT_FOUND", "PCB candidate not found"
+        )
 
     @app.exception_handler(ProjectNotFoundError)
     async def handle_project_not_found(
@@ -548,12 +750,17 @@ def create_app(container: Container | None = None) -> FastAPI:
                 "LOCAL_SOURCE_PATHS_DISABLED",
                 "local source paths are disabled in remote mode",
             )
+        authority_input = payload.authority_input()
+        validate_idempotency_key(idempotency_key)
         try:
             project, created = services.projects.create_with_status(
                 payload.name,
                 Path(payload.source_path),
                 idempotency_key,
+                authority_input,
             )
+        except RequestInvalidError:
+            raise
         except (OSError, ValueError) as error:
             raise ApiError(
                 422,
@@ -568,6 +775,138 @@ def create_app(container: Container | None = None) -> FastAPI:
     @app.get("/api/v1/projects")
     def list_projects():
         return jsonable_encoder(services.projects.list())
+
+    @app.post("/api/v1/projects/{project_id}/pcb-candidates", status_code=202)
+    def create_pcb_candidate(
+        project_id: str,
+        payload: CreatePcbCandidateRequest,
+        response: Response,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
+    ):
+        """Queue a BoardIR-only candidate; native LCEDA writes are never performed here."""
+        candidates = getattr(services, "pcb_candidates", None)
+        if candidates is None:
+            raise ApiError(
+                422,
+                "PCB_CAPABILITY_GATE_BLOCKED",
+                "PCB candidate service is unavailable",
+                actions=["configure the candidate lifecycle service before retrying"],
+            )
+        try:
+            result = candidates.create_from_public_inputs(
+                project_id=project_id,
+                seed=payload.seed,
+                net_ids=payload.net_ids,
+                board_snapshot_digest=payload.board_snapshot_digest,
+                capability_digest=payload.capability_digest,
+                idempotency_key=idempotency_key,
+            )
+        except LcedaProCapabilityError as error:
+            raise ApiError(
+                422,
+                "PCB_CAPABILITY_GATE_BLOCKED",
+                "LCEDA Pro write capability is unverified",
+                actions=["run the LCEDA Pro capability probe and retry"],
+            ) from error
+        response.status_code = 202
+        return jsonable_encoder(result)
+
+    @app.get("/api/v1/pcb-candidates/{candidate_id}")
+    def get_pcb_candidate(candidate_id: str):
+        candidates = getattr(services, "pcb_candidates", None)
+        if candidates is None:
+            raise ApiError(422, "PCB_CAPABILITY_GATE_BLOCKED", "PCB candidate service is unavailable")
+        return jsonable_encoder(candidates.get(candidate_id))
+
+    @app.post("/api/v1/pcb-candidates/{candidate_id}:approve-g3")
+    def decide_pcb_g3(
+        candidate_id: str,
+        payload: DecidePcbG3Request,
+        request: Request,
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", min_length=1)
+        ],
+    ):
+        approvals = getattr(services, "pcb_approvals", None)
+        if approvals is None:
+            raise ApiError(
+                422,
+                "PCB_CAPABILITY_GATE_BLOCKED",
+                "PCB approval service is unavailable",
+            )
+        actor_type, actor_id = _request_actor(request, payload.actor)
+        if actor_type != "human":
+            raise RequestInvalidError("G3 decisions require a human actor")
+        return jsonable_encoder(
+            approvals.decide_g3(
+                candidate_id=candidate_id,
+                candidate_digest=payload.candidate_digest,
+                idempotency_key=idempotency_key,
+                actor_id=actor_id,
+                decision=payload.decision,
+                comment=payload.comment,
+            )
+        )
+
+    @app.post("/api/v1/pcb-candidates/{candidate_id}:export-release", status_code=202)
+    def export_pcb_release(
+        candidate_id: str,
+        payload: ExportPcbReleaseRequest,
+        response: Response,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
+    ):
+        del payload
+        releases = getattr(services, "pcb_release", None)
+        if releases is None:
+            raise ApiError(422, "PCB_RELEASE_CAPABILITY_BLOCKED", "PCB release service is unavailable")
+        task = releases.enqueue_export(candidate_id, idempotency_key)
+        response.status_code = 202
+        return jsonable_encoder(task)
+
+    @app.post("/api/v1/pcb-candidates/{candidate_id}:approve-g4")
+    def decide_pcb_g4(
+        candidate_id: str,
+        payload: DecidePcbG4Request,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
+    ):
+        approvals = getattr(services, "pcb_release_approvals", None)
+        if approvals is None:
+            raise ApiError(422, "PCB_RELEASE_CAPABILITY_BLOCKED", "G4 approval service is unavailable")
+        actor_type, actor_id = _request_actor(request, payload.actor)
+        if actor_type != "human":
+            raise RequestInvalidError("G4 decisions require a human actor")
+        return jsonable_encoder(
+            approvals.decide_g4(
+                candidate_id=candidate_id,
+                manifest_digest=payload.manifest_digest,
+                idempotency_key=idempotency_key,
+                actor_id=actor_id,
+                decision=payload.decision,
+                comment=payload.comment,
+            )
+        )
+
+    @app.post(
+        "/api/v1/projects/{project_id}/eda-authority", status_code=201
+    )
+    def configure_eda_authority(
+        project_id: str,
+        payload: ConfigureEdaAuthorityRequest,
+        response: Response,
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", min_length=1)
+        ],
+    ):
+        existing = services.eda_authorities.find_by_project_id(project_id)
+        authority = services.eda_authorities.configure(
+            project_id,
+            payload.authority_input(),
+            idempotency_key,
+        )
+        if existing is not None:
+            response.status_code = 200
+        return jsonable_encoder(authority)
 
     @app.post("/api/v1/component-revisions", status_code=201)
     def import_component_revision(
@@ -840,9 +1179,35 @@ def create_app(container: Container | None = None) -> FastAPI:
             services.validation.enqueue(project_id, idempotency_key)
         )
 
+    @app.post(
+        "/api/v1/projects/{project_id}/eda-capability-probes", status_code=202
+    )
+    def enqueue_lceda_capability_probe(
+        project_id: str,
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", min_length=1)
+        ],
+    ):
+        return jsonable_encoder(
+            services.capability_gate.enqueue(project_id, idempotency_key)
+        )
+
     @app.get("/api/v1/tasks/{task_id}")
     def get_task(task_id: str):
         return jsonable_encoder(services.tasks.get(task_id))
+
+    @app.post("/api/v1/tasks/{task_id}:cancel")
+    def cancel_task(
+        task_id: str,
+        payload: CancelTaskRequest,
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", min_length=1)
+        ],
+    ):
+        del idempotency_key
+        return jsonable_encoder(
+            services.tasks.cancel(task_id, payload.reason, utc_now())
+        )
 
     @app.post("/api/v1/worker:run-once")
     def run_worker_once() -> dict[str, bool]:

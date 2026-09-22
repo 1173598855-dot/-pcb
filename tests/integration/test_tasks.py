@@ -4,15 +4,18 @@ from threading import Barrier, Event, Lock
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from pcbflow.domain import TaskLease, TaskStatus
+from pcbflow.cancellation import TaskCancelledError
+from pcbflow.domain import RequestInvalidError, TaskLease, TaskStatus
 from pcbflow.repositories import (
     IdempotencyConflictError,
     StaleLeaseError,
+    TaskNotCancellableError,
     TaskRepository,
 )
-from pcbflow.tables import TaskRow
+from pcbflow.tables import TaskAttemptRow, TaskRow
 from pcbflow.tasks import RetryableTaskError, TerminalTaskError, Worker
 
 NOW = datetime(2026, 7, 29, 1, 0, tzinfo=UTC)
@@ -294,6 +297,26 @@ def test_worker_survives_stale_lease_during_start(
     assert worker.run_once()
     assert not started
     assert task_repository.get(task.id).status is TaskStatus.LEASED
+
+
+def test_worker_executes_a_preclaimed_lease(
+    task_repository: TaskRepository,
+) -> None:
+    task = task_repository.enqueue("double", {"value": 4}, "preclaimed-double", None)
+    lease = task_repository.claim_next("resident-worker", NOW, 30)
+    assert lease is not None
+    worker = Worker(
+        task_repository,
+        "worker-a",
+        {"double": lambda claimed: {"value": int(claimed.payload["value"]) * 2}},
+        lambda: NOW,
+        30,
+    )
+
+    assert worker.run_claimed(lease)
+    processed = task_repository.get(task.id)
+    assert processed.status is TaskStatus.SUCCEEDED
+    assert processed.result == {"value": 8}
 
 
 def test_worker_renews_its_lease_while_a_handler_is_running(
@@ -674,3 +697,191 @@ def test_worker_fences_unexpected_handler_and_completion_failures(
         assert repository.complete_calls == [("task-edge", {"ok": True})]
     else:
         assert repository.complete_calls == []
+
+
+def test_cancel_queued_and_retrying_tasks_are_terminal_and_not_claimable(
+    task_repository: TaskRepository,
+) -> None:
+    queued = task_repository.enqueue("queued", {}, "cancel-queued", None)
+    cancelled_at = NOW + timedelta(seconds=1)
+
+    cancelled = task_repository.cancel(
+        queued.id, "operator requested cancellation", cancelled_at
+    )
+
+    assert cancelled.status is TaskStatus.CANCELLED
+    assert cancelled.last_error_code == "TASK_CANCELLED"
+    assert cancelled.cancelled_at == cancelled_at
+    assert cancelled.cancellation_reason == "operator requested cancellation"
+    assert cancelled.result is None
+    assert task_repository.claim_next("worker-a", NOW + timedelta(days=1), 30) is None
+
+    replayed = task_repository.cancel(
+        queued.id, "a later reason must not replace the first", cancelled_at + timedelta(seconds=1)
+    )
+    assert replayed == cancelled
+
+    retrying = task_repository.enqueue("retry", {}, "cancel-retry", None)
+    lease = task_repository.claim_next("worker-a", NOW, 30)
+    assert lease is not None and lease.task_id == retrying.id
+    task_repository.fail(retrying.id, lease.lease_token, "TOOL_BUSY", True, NOW)
+
+    canceled_retry = task_repository.cancel(
+        retrying.id, "operator cancelled retry", NOW + timedelta(seconds=1)
+    )
+    assert canceled_retry.status is TaskStatus.CANCELLED
+    assert task_repository.claim_next("worker-b", NOW + timedelta(days=1), 30) is None
+
+
+def test_cancel_strips_reason_before_persisting(
+    task_repository: TaskRepository,
+) -> None:
+    task = task_repository.enqueue("queued", {}, "cancel-normalized-reason", None)
+
+    cancelled = task_repository.cancel(
+        task.id, "  operator requested cancellation  ", NOW
+    )
+
+    assert cancelled.cancellation_reason == "operator requested cancellation"
+
+
+def test_concurrent_cancels_preserve_one_terminal_snapshot(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = TaskRepository(session_factory)
+    task = repository.enqueue("queued", {}, "cancel-concurrent", None)
+    barrier = Barrier(2)
+    calls_lock = Lock()
+    task_reads = 0
+    original_get = Session.get
+
+    def synchronize_task_reads(session, entity, ident, *args, **kwargs):
+        nonlocal task_reads
+        if entity is TaskRow and ident == task.id:
+            with calls_lock:
+                task_reads += 1
+                should_wait = task_reads <= 2
+            if should_wait:
+                barrier.wait(timeout=5)
+        return original_get(session, entity, ident, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "get", synchronize_task_reads)
+    first_repository = TaskRepository(session_factory)
+    second_repository = TaskRepository(session_factory)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            first_repository.cancel, task.id, "first cancellation", NOW
+        )
+        second = executor.submit(
+            second_repository.cancel, task.id, "second cancellation", NOW
+        )
+        first_result = first.result(timeout=10)
+        second_result = second.result(timeout=10)
+
+    persisted = repository.get(task.id)
+    assert task_reads >= 2
+    assert first_result == second_result == persisted
+    assert persisted.status is TaskStatus.CANCELLED
+    assert persisted.cancellation_reason in {"first cancellation", "second cancellation"}
+
+
+@pytest.mark.parametrize("reason", ["   ", "x" * 1001])
+def test_cancel_rejects_invalid_reasons_without_mutating_the_task(
+    task_repository: TaskRepository,
+    reason: str,
+) -> None:
+    task = task_repository.enqueue("queued", {}, f"cancel-invalid-{len(reason)}", None)
+
+    with pytest.raises(RequestInvalidError, match="cancellation reason"):
+        task_repository.cancel(task.id, reason, NOW)
+
+    assert task_repository.get(task.id).status is TaskStatus.QUEUED
+
+
+def test_cancelling_a_running_task_closes_its_attempt_and_fences_its_lease(
+    task_repository: TaskRepository,
+    session_factory: sessionmaker[Session],
+) -> None:
+    task = task_repository.enqueue("slow", {}, "cancel-running", None)
+    lease = task_repository.claim_next("worker-a", NOW, 30)
+    assert lease is not None
+    task_repository.start(task.id, lease.lease_token, NOW)
+
+    cancelled = task_repository.cancel(
+        task.id, "operator requested cancellation", NOW + timedelta(seconds=1)
+    )
+
+    assert cancelled.status is TaskStatus.CANCELLED
+    assert cancelled.last_error_code == "TASK_CANCELLED"
+    assert cancelled.cancellation_reason == "operator requested cancellation"
+    assert task_repository.is_cancelled(task.id)
+    with pytest.raises(TaskCancelledError):
+        task_repository.assert_active(
+            task.id, lease.lease_token, NOW + timedelta(seconds=1)
+        )
+    with pytest.raises(StaleLeaseError):
+        task_repository.complete(
+            task.id, lease.lease_token, {"published": True}, NOW + timedelta(seconds=1)
+        )
+
+    with session_factory() as session:
+        attempts = list(
+            session.scalars(
+                select(TaskAttemptRow).where(TaskAttemptRow.task_id == task.id)
+            )
+        )
+    assert [(attempt.outcome, attempt.error_code) for attempt in attempts] == [
+        ("cancelled", "TASK_CANCELLED")
+    ]
+
+
+def test_cancel_rejects_completed_tasks(
+    task_repository: TaskRepository,
+) -> None:
+    task = task_repository.enqueue("done", {}, "cancel-terminal", None)
+    lease = task_repository.claim_next("worker-a", NOW, 30)
+    assert lease is not None
+    task_repository.start(task.id, lease.lease_token, NOW)
+    task_repository.complete(task.id, lease.lease_token, {"ok": True}, NOW)
+
+    with pytest.raises(TaskNotCancellableError) as raised:
+        task_repository.cancel(task.id, "too late", NOW + timedelta(seconds=1))
+
+    assert raised.value.task_id == task.id
+    assert raised.value.status == TaskStatus.SUCCEEDED.value
+
+
+def test_worker_does_not_publish_a_handler_result_after_cancellation(
+    task_repository: TaskRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = task_repository.enqueue("late", {}, "cancel-late-result", None)
+    complete_calls = 0
+    original_complete = task_repository.complete
+
+    def record_complete(*args, **kwargs) -> None:
+        nonlocal complete_calls
+        complete_calls += 1
+        original_complete(*args, **kwargs)
+
+    monkeypatch.setattr(task_repository, "complete", record_complete)
+
+    def cancel_then_return(_lease: TaskLease) -> dict[str, bool]:
+        task_repository.cancel(task.id, "operator requested cancellation", NOW)
+        return {"published": True}
+
+    worker = Worker(
+        task_repository,
+        "worker-a",
+        {"late": cancel_then_return},
+        lambda: NOW,
+        30,
+    )
+
+    assert worker.run_once()
+    cancelled = task_repository.get(task.id)
+    assert cancelled.status is TaskStatus.CANCELLED
+    assert cancelled.result is None
+    assert complete_calls == 0

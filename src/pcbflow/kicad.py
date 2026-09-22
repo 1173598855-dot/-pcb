@@ -216,8 +216,11 @@ class KicadCli:
     @staticmethod
     def locate(configured: Path | None = None) -> Path | None:
         if configured is not None:
-            candidate = configured.resolve()
-            return candidate if candidate.is_file() else None
+            try:
+                candidate = configured.resolve()
+                return candidate if candidate.is_file() else None
+            except OSError:
+                return None
 
         from_path = shutil.which("kicad-cli")
         if from_path:

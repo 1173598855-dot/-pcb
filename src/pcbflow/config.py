@@ -19,6 +19,8 @@ class Settings:
     max_project_bytes: int = 1_000_000_000
     remote_mode: bool = False
     module_catalog_dir: Path | None = None
+    lceda_pro_executable: Path | None = None
+    lceda_pro_official_bridge: Path | None = None
     api_token: str | None = None
     api_actor_id: str = "remote-api"
     max_api_body_bytes: int = 1_000_000
@@ -30,7 +32,7 @@ class Settings:
     worker_slots: int = 1
     worker_poll_seconds: int = 5
     worker_poll_max_seconds: int = 60
-    worker_heartbeat_seconds: int = 30
+    worker_heartbeat_seconds: float = 30
     worker_shutdown_timeout_seconds: int = 300
     worker_id: str | None = None
 
@@ -68,6 +70,8 @@ class Settings:
             raise ValueError(
                 "worker_poll_seconds must not exceed worker_poll_max_seconds"
             )
+        if self.worker_heartbeat_seconds <= 0:
+            raise ValueError("worker_heartbeat_seconds must be positive")
         if self.worker_heartbeat_seconds >= self.task_lease_seconds / 2:
             raise ValueError(
                 "worker_heartbeat_seconds must be less than half the lease duration"
@@ -93,6 +97,10 @@ class Settings:
     def workspaces_dir(self) -> Path:
         return (self.data_dir / "workspaces").resolve()
 
+    @property
+    def worker_state_file(self) -> Path:
+        return (self.data_dir / "worker-state.json").resolve()
+
     @classmethod
     def from_env(
         cls,
@@ -104,6 +112,15 @@ class Settings:
         data_dir = Path(values.get("PCBFLOW_DATA_DIR", str(default_data_dir))).resolve()
         configured_cli = values.get("PCBFLOW_KICAD_CLI")
         configured_catalog = values.get("PCBFLOW_MODULE_CATALOG_DIR")
+        configured_lceda_pro = values.get("PCBFLOW_LCEDA_PRO_EXECUTABLE")
+        configured_lceda_bridge = values.get("PCBFLOW_LCEDA_PRO_OFFICIAL_BRIDGE")
+        task_lease_seconds = int(values.get("PCBFLOW_TASK_LEASE_SECONDS", "180"))
+        configured_heartbeat = values.get("PCBFLOW_WORKER_HEARTBEAT_SECONDS")
+        worker_heartbeat_seconds = (
+            float(configured_heartbeat)
+            if configured_heartbeat is not None
+            else min(30.0, task_lease_seconds / 3)
+        )
 
         return cls(
             data_dir=data_dir,
@@ -118,7 +135,15 @@ class Settings:
             module_catalog_dir=(
                 Path(configured_catalog).resolve() if configured_catalog else None
             ),
-            task_lease_seconds=int(values.get("PCBFLOW_TASK_LEASE_SECONDS", "180")),
+            lceda_pro_executable=(
+                Path(configured_lceda_pro).resolve() if configured_lceda_pro else None
+            ),
+            lceda_pro_official_bridge=(
+                Path(configured_lceda_bridge).resolve()
+                if configured_lceda_bridge
+                else None
+            ),
+            task_lease_seconds=task_lease_seconds,
             process_timeout_seconds=int(
                 values.get("PCBFLOW_PROCESS_TIMEOUT_SECONDS", "120")
             ),
@@ -158,9 +183,7 @@ class Settings:
             worker_poll_max_seconds=int(
                 values.get("PCBFLOW_WORKER_POLL_MAX_SECONDS", "60")
             ),
-            worker_heartbeat_seconds=int(
-                values.get("PCBFLOW_WORKER_HEARTBEAT_SECONDS", "30")
-            ),
+            worker_heartbeat_seconds=worker_heartbeat_seconds,
             worker_shutdown_timeout_seconds=int(
                 values.get("PCBFLOW_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "300")
             ),

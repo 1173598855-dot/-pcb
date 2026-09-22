@@ -181,7 +181,7 @@ class GitCli:
     def _controlled_argv(argv: Sequence[str]) -> list[str]:
         if not argv or argv[0] != "git":
             raise ValueError("Git argv must start with git")
-        return [
+        controlled = [
             "git",
             "-c",
             "core.autocrlf=false",
@@ -189,8 +189,10 @@ class GitCli:
             f"core.attributesFile={os.devnull}",
             "-c",
             f"core.hooksPath={os.devnull}",
-            *argv[1:],
         ]
+        if os.name == "nt":
+            controlled.extend(("-c", "core.longpaths=true"))
+        return [*controlled, *argv[1:]]
 
     def _invoke(
         self,

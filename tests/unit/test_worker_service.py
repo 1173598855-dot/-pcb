@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,6 +9,7 @@ import pytest
 
 from pcbflow.config import Settings
 from pcbflow.container import build_container
+from pcbflow.domain import TaskStatus
 from pcbflow.worker_service import CycleResult, WorkerService, WorkerState
 
 
@@ -21,6 +23,12 @@ def test_worker_starts_in_idle_state(tmp_path: Path) -> None:
         assert worker.active_tasks == {}
         assert worker.completed_count == 0
         assert worker.failed_count == 0
+        state = json.loads(
+            (settings.data_dir / "worker-state.json").read_text(encoding="utf-8")
+        )
+        assert state["worker_id"] == worker.worker_id
+        assert state["state"] == "IDLE"
+        assert state["status"] == "healthy"
     finally:
         container.dispose()
 
@@ -60,19 +68,11 @@ def test_worker_claims_and_executes_available_task(tmp_path: Path) -> None:
     container = build_container(settings)
 
     try:
-        # Create a test project and enqueue validation
-        source = tmp_path / "test-project"
-        source.mkdir(parents=True, exist_ok=True)
-        (source / "test.kicad_sch").write_text("(kicad_sch (version 20230121))")
-
-        project = container.projects.create(
-            "Test Project",
-            source,
-            "test-validation-worker-1",
-        )
-
-        task = container.validation.enqueue(
-            project.id, "test-validation-worker-1"
+        task = container.tasks.enqueue(
+            "worker-service-test-unknown",
+            {},
+            "test-worker-service-unknown-task",
+            None,
         )
 
         worker = WorkerService(container)
@@ -81,12 +81,39 @@ def test_worker_claims_and_executes_available_task(tmp_path: Path) -> None:
         assert result.claimed
         assert result.task_id == task.id
 
-        # Worker processes the task through run_once
-        # It either succeeds or fails terminally
-        assert worker.completed_count >= 0
-        assert worker.failed_count >= 0
+        processed = container.tasks.get(task.id)
+        assert processed.status is TaskStatus.FAILED_TERMINAL
+        assert processed.last_error_code == "UNKNOWN_TASK_KIND"
+        assert worker.completed_count == 0
+        assert worker.failed_count == 1
 
     finally:
+        container.dispose()
+
+
+def test_worker_treats_cancelled_task_as_resolved(tmp_path: Path) -> None:
+    settings = Settings.from_env({"PCBFLOW_DATA_DIR": str(tmp_path)})
+    container = build_container(settings)
+    worker = WorkerService(container)
+    try:
+        task = container.tasks.enqueue(
+            "worker-service-cancelled",
+            {},
+            "test-worker-service-cancelled-task",
+            None,
+        )
+        lease = container.tasks.claim_next("worker-a", datetime.now(UTC), 30)
+        assert lease is not None and lease.task_id == task.id
+        container.tasks.cancel(task.id, "operator requested cancellation", datetime.now(UTC))
+
+        worker._execute_task_in_thread(lease)
+
+        assert container.tasks.get(task.id).status is TaskStatus.CANCELLED
+        assert worker.completed_count == 0
+        assert worker.failed_count == 0
+        assert task.id not in worker.active_tasks
+    finally:
+        worker.request_shutdown()
         container.dispose()
 
 
