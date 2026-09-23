@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import io
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from pcbflow.board.adapter import BoardSemanticMismatchError, semantic_diff
+from pcbflow.board.validation import BoardRuleChecker
 from pcbflow.canonical import canonical_json_bytes, sha256_digest
+from pcbflow.cancellation import TaskCancelledError
 from pcbflow.domain import (
     EdaKind,
     EdaOperation,
@@ -36,6 +40,7 @@ from pcbflow.repositories import (
     ProjectRepository,
     TaskRepository,
 )
+from pcbflow.repository_errors import StaleLeaseError
 from pcbflow.tasks import TerminalTaskError
 
 G3_REQUIRED_EVIDENCE = frozenset(

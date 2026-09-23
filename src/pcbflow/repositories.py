@@ -20,6 +20,7 @@ from pcbflow.design_tables import (
 )
 from pcbflow.domain import (
     Evidence,
+    Finding,
     NormalizedFinding,
     Project,
     ProjectMode,

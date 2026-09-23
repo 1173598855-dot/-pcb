@@ -17,14 +17,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from pcbflow.artifacts import ArtifactDescriptor, StagedArtifact
-from pcbflow.canonical import canonical_digest, sha256_digest
-from pcbflow.design_tables import ArtifactRow, PcbCandidateRow, ProjectRow, TaskRow
+from pcbflow.canonical import canonical_digest, canonical_json_bytes, sha256_digest
+from pcbflow.cancellation import TaskCancelledError
+from pcbflow.design_tables import PcbCandidateRow
 from pcbflow.domain import (
     EdaKind,
     EdaOperation,
     RequestInvalidError,
-    StaleLeaseError,
-    TaskCancelledError,
     TaskLease,
     TaskStatus,
     new_id,
@@ -40,6 +39,8 @@ from pcbflow.pcb_candidate_validation import (
     PcbCandidateStatus,
     _release_task_idempotency_key,
     _task_idempotency_key,
+    validate_candidate_digest,
+    validate_candidate_public_inputs,
 )
 from pcbflow.pcb_workflow import CAPABILITY_EVIDENCE_KIND
 from pcbflow.repositories import (
@@ -48,6 +49,8 @@ from pcbflow.repositories import (
     ProjectNotFoundError,
     TaskRepository,
 )
+from pcbflow.repository_errors import StaleLeaseError
+from pcbflow.tables import ArtifactRow, ProjectRow, TaskRow
 from pcbflow.tasks import TerminalTaskError
 
 G3_REQUIRED_EVIDENCE = frozenset(
