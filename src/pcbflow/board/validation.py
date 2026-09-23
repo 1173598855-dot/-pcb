@@ -4,6 +4,7 @@ from collections.abc import Iterable
 
 from pcbflow.domain import NormalizedFinding
 
+from . import geometry
 from .ir import (
     BoardObjectId,
     BoardSnapshot,
@@ -17,7 +18,6 @@ from .ir import (
     RouteSegment,
     Via,
 )
-from . import geometry
 from .rulepack import ManufacturingRulePack
 
 

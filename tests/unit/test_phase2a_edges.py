@@ -20,11 +20,10 @@ from pcbflow.kicad import (
     KicadCli,
     KicadProjectNotFoundError,
     KicadReportFormatError,
-    KicadToolError,
-    KicadUnavailableError,
     parse_kicad_report,
 )
 from pcbflow.process import ProcessResult, ProcessRunner, ProcessTimeoutError
+from pcbflow.proposal_store import ProposalNotFoundError
 from pcbflow.proposals import (
     CandidateNotReviewableError,
     RevisionReconciliationRequiredError,
@@ -39,10 +38,11 @@ from pcbflow.requirement_store import RequirementSetNotFoundError
 from pcbflow.requirements import RequirementsBlockedError
 from pcbflow.revisions import (
     GitOperationError,
-    ProjectNotManagedError as RevisionProjectNotManagedError,
     ProjectWorktreeDirtyError,
 )
-from pcbflow.proposal_store import ProposalNotFoundError
+from pcbflow.revisions import (
+    ProjectNotManagedError as RevisionProjectNotManagedError,
+)
 
 
 @pytest.mark.parametrize(
@@ -297,7 +297,7 @@ def test_resident_worker_waits_for_active_tasks_before_idle_exit(
             self.disposed = True
 
     class FakeWorker:
-        instance: "FakeWorker | None" = None
+        instance: FakeWorker | None = None
 
         def __init__(self, _container) -> None:
             self.worker_id = "test-worker"

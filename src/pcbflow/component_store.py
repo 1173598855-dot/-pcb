@@ -8,7 +8,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from pcbflow.artifacts import ArtifactDescriptor
-from pcbflow.components import ComponentManifest, ComponentRevision, component_manifest_digest
+from pcbflow.components import (
+    ComponentManifest,
+    ComponentRevision,
+    component_manifest_digest,
+)
 from pcbflow.domain import new_id, utc_now
 from pcbflow.repositories import IdempotencyConflictError
 from pcbflow.tables import ArtifactRow, ComponentRevisionRow

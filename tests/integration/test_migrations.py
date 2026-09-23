@@ -1,10 +1,10 @@
 from pathlib import Path
 
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
+from alembic import command
 from pcbflow.eda import registration_input_digest
 from pcbflow.repositories import ProjectRepository
 

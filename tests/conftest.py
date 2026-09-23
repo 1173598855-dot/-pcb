@@ -2,14 +2,14 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from pcbflow.db import create_engine_and_session
+from alembic import command
 from pcbflow.config import Settings
 from pcbflow.container import build_container
+from pcbflow.db import create_engine_and_session
 from pcbflow.domain import Project
 
 

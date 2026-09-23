@@ -6,7 +6,6 @@ import shutil
 from pathlib import Path
 
 import httpx
-import yaml
 from typer.testing import CliRunner
 
 import pcbflow.api as api_module

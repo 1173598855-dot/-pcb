@@ -4,11 +4,10 @@ import errno
 import os
 import shutil
 import stat
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from collections.abc import Callable
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Iterator
-
+from typing import BinaryIO
 
 KICAD_LOCK_SUFFIXES = (
     ".kicad_sch.lck",

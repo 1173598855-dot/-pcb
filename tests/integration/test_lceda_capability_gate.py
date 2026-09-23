@@ -8,16 +8,20 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
-from sqlalchemy.orm import Session
 
 from pcbflow.cancellation import TaskCancelledError
 from pcbflow.canonical import canonical_json_bytes
-from pcbflow.domain import EdaKind, EdaOperation, RequestInvalidError, TaskStatus, utc_now
+from pcbflow.domain import (
+    EdaKind,
+    EdaOperation,
+    RequestInvalidError,
+    TaskStatus,
+    utc_now,
+)
 from pcbflow.eda import EdaCapability, ProjectEdaAuthorityInput
 from pcbflow.lceda_pro import LcedaProCapabilityError
 from pcbflow.repositories import ProjectNotFoundError
 from pcbflow.tables import ArtifactRow
-
 
 CAPABILITY_MEDIA_TYPE = "application/vnd.pcbflow.eda-capability+json"
 
@@ -281,7 +285,7 @@ def _run_verified_probe(container, project, tmp_path: Path):
 def test_require_operation_requires_verified_canonical_succeeded_evidence(
     container, lceda_project, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    task, result = _run_verified_probe(container, lceda_project, tmp_path)
+    _task, result = _run_verified_probe(container, lceda_project, tmp_path)
     evidence = container.evidence.list_for_project(lceda_project.id)[0]
     assert result["capability_digest"] == evidence.artifact_digest
     container.capability_gate.require_operation(
@@ -313,7 +317,7 @@ def test_require_operation_requires_verified_canonical_succeeded_evidence(
 def test_require_operations_validates_a_frozen_operation_set_once(
     container, lceda_project, tmp_path: Path
 ) -> None:
-    task, result = _run_verified_probe(container, lceda_project, tmp_path)
+    _task, result = _run_verified_probe(container, lceda_project, tmp_path)
     operations = (
         EdaOperation.SNAPSHOT,
         EdaOperation.CREATE_CANDIDATE,
@@ -335,7 +339,7 @@ def test_require_operations_validates_a_frozen_operation_set_once(
 def test_gate_rejects_wrong_media_and_nonterminal_or_mismatched_task_binding(
     container, lceda_project, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    task, result = _run_verified_probe(container, lceda_project, tmp_path)
+    task, _result = _run_verified_probe(container, lceda_project, tmp_path)
     evidence = container.evidence.list_for_project(lceda_project.id)[0]
     monkeypatch.setattr(container.evidence, "artifact_media_type", lambda digest: "text/plain")
     with pytest.raises(LcedaProCapabilityError):
@@ -463,7 +467,7 @@ def test_handler_recovers_precomplete_unavailable_evidence_without_reprobing(
 def test_gate_rejects_running_cancelled_and_verdict_mismatched_evidence(
     container, lceda_project, tmp_path: Path
 ) -> None:
-    task, result = _run_verified_probe(container, lceda_project, tmp_path)
+    task, _result = _run_verified_probe(container, lceda_project, tmp_path)
     evidence = container.evidence.list_for_project(lceda_project.id)[0]
     from pcbflow.tables import EvidenceRow, TaskRow
 

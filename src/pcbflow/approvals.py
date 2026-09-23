@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import UTC, datetime
 import hashlib
 import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select, text, update
@@ -21,8 +21,7 @@ from pcbflow.design_tables import (
 )
 from pcbflow.domain import RequestInvalidError, new_id, utc_now
 from pcbflow.eda import validate_idempotency_key
-from pcbflow.observability import audit_payload
-from pcbflow.observability import MetricName, Metrics
+from pcbflow.observability import MetricName, Metrics, audit_payload
 from pcbflow.pcb_candidates import (
     G3_EVIDENCE_SET_KIND,
     G3_EVIDENCE_SET_MEDIA_TYPE,
@@ -50,7 +49,6 @@ from pcbflow.requirement_store import (
 from pcbflow.requirements import RequirementSet, RequirementSetStatus
 from pcbflow.revisions import RevisionReconciler
 from pcbflow.tables import ArtifactRow, ProjectRow
-
 
 _G1_APPROVAL_MEDIA_TYPE = "application/vnd.pcbflow.g1-approval+json"
 _G3_APPROVAL_MEDIA_TYPE = "application/vnd.pcbflow.g3-approval+json"

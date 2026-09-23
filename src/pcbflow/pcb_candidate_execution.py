@@ -9,36 +9,27 @@ from __future__ import annotations
 
 import io
 import json
-from dataclasses import dataclass, fields
-from datetime import UTC, datetime
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from pcbflow.canonical import canonical_digest, canonical_json_bytes, sha256_digest
+from pcbflow.canonical import canonical_json_bytes, sha256_digest
 from pcbflow.domain import (
     EdaKind,
     EdaOperation,
     NormalizedFinding,
     ProjectMode,
     TaskLease,
-    TaskStatus,
     ValidationReport,
     utc_now,
 )
+from pcbflow.lceda_pro import LcedaProCapabilityError
 from pcbflow.pcb_candidate_store import (
-    PcbCandidateStore,
     PcbCandidateStatus,
-    PcbCandidateTaskHandler,
+    PcbCandidateStore,
     pcb_candidate_review_digest,
 )
-from pcbflow.pcb_candidate_validation import (
-    PCB_GENERATE_CANDIDATE_TASK_KIND,
-    PCB_EXPORT_RELEASE_TASK_KIND,
-    _release_task_idempotency_key,
-    _task_idempotency_key,
-)
-from pcbflow.pcb_workflow import CAPABILITY_EVIDENCE_KIND
 from pcbflow.repositories import (
     EvidenceRepository,
     FindingRepository,
@@ -46,8 +37,6 @@ from pcbflow.repositories import (
     TaskRepository,
 )
 from pcbflow.tasks import TerminalTaskError
-from pcbflow.lceda_pro import LcedaProCapabilityError
-
 
 G3_REQUIRED_EVIDENCE = frozenset(
     {
@@ -659,7 +648,7 @@ class PcbCandidateExecutionTaskHandler:
                     for item in evidence_set["items"]
                 },
             }
-            reports_by_kind = self._evidence.add_reports_and_findings(
+            self._evidence.add_reports_and_findings(
                 project_id=candidate.project_id,
                 task_id=lease.task_id,
                 reports=report_inputs,

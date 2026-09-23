@@ -1,21 +1,28 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
-import hashlib
+import re
 from collections.abc import Sequence
 from dataclasses import replace
-import re
 from typing import Protocol
 
 from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.canonical import canonical_json_bytes
-from pcbflow.domain import EdaKind, EdaOperation, RequestInvalidError, Task, TaskLease, TaskStatus, utc_now
+from pcbflow.domain import (
+    EdaKind,
+    EdaOperation,
+    RequestInvalidError,
+    Task,
+    TaskLease,
+    TaskStatus,
+    utc_now,
+)
 from pcbflow.eda import EdaCapability, validate_idempotency_key
 from pcbflow.eda_authority_store import ProjectEdaAuthorityStore
 from pcbflow.lceda_pro import LcedaProCapabilityError
 from pcbflow.repositories import EvidenceRepository, ProjectRepository, TaskRepository
-
 
 LCEDA_CAPABILITY_TASK_KIND = "pcb.lceda_pro_capability_probe"
 CAPABILITY_MEDIA_TYPE = "application/vnd.pcbflow.eda-capability+json"
@@ -59,30 +66,28 @@ def _validated_capability_payload(raw: bytes) -> dict[str, object]:
             raise ValueError("capability JSON is not canonical")
         available = payload["available"]
         verified = payload["write_verified"]
-        if not available:
-            if (
-                payload["profile_id"] is not None
-                or payload["profile_revision"] is not None
-                or values
-                or verified
-                or not payload["reason"]
-            ):
-                raise ValueError("invalid unavailable capability")
-        if verified:
-            if (
-                not isinstance(payload["executable"], str)
-                or not payload["executable"]
-                or not isinstance(payload["version"], str)
-                or not payload["version"]
-                or not isinstance(payload["executable_digest"], str)
-                or _DIGEST.fullmatch(payload["executable_digest"]) is None
-                or not isinstance(payload["profile_id"], str)
-                or not payload["profile_id"]
-                or payload["profile_revision"] is None
-                or payload["reason"] is not None
-                or EdaOperation.APPLY_OPERATIONS.value not in values
-            ):
-                raise ValueError("invalid verified capability")
+        if not available and (
+            payload["profile_id"] is not None
+            or payload["profile_revision"] is not None
+            or values
+            or verified
+            or not payload["reason"]
+        ):
+            raise ValueError("invalid unavailable capability")
+        if verified and (
+            not isinstance(payload["executable"], str)
+            or not payload["executable"]
+            or not isinstance(payload["version"], str)
+            or not payload["version"]
+            or not isinstance(payload["executable_digest"], str)
+            or _DIGEST.fullmatch(payload["executable_digest"]) is None
+            or not isinstance(payload["profile_id"], str)
+            or not payload["profile_id"]
+            or payload["profile_revision"] is None
+            or payload["reason"] is not None
+            or EdaOperation.APPLY_OPERATIONS.value not in values
+        ):
+            raise ValueError("invalid verified capability")
         return payload
     except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
         raise _blocked() from error

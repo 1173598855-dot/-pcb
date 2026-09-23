@@ -1,3 +1,19 @@
+from .adapter import (
+    BoardSemanticDiff,
+    BoardSemanticMismatchError,
+    CandidateWorkspace,
+    PcbEdaAdapter,
+    ReleaseArtifacts,
+    UnsupportedEdaOperationError,
+)
+from .copper import (
+    CopperEvidence,
+    CopperPlanner,
+    CopperResult,
+    ExcludedRegion,
+    StitchingPolicy,
+)
+from .fixture_adapter import FixtureBoardAdapter
 from .ir import (
     BoardObjectId,
     BoardSnapshot,
@@ -14,6 +30,7 @@ from .ir import (
     ThermalPolicy,
     Via,
 )
+from .kicad_adapter import KicadBoardAdapter, KicadBoardFormatError
 from .operations import (
     AddGroundStitching,
     BoardOperation,
@@ -23,8 +40,6 @@ from .operations import (
     PlaceFootprints,
     RouteNets,
 )
-from .rulepack import CopperPolicy, ManufacturingRulePack, RoutingPolicy
-from .routing import Autorouter, RoutePathEvidence, RoutingEvidence, RoutingResult, RoutingRoundEvidence
 from .placement import (
     DoubledRectUm,
     PlacementEvidence,
@@ -33,74 +48,71 @@ from .placement import (
     PlacementSolver,
     score_layout,
 )
-from .copper import CopperEvidence, CopperPlanner, CopperResult, ExcludedRegion, StitchingPolicy
+from .routing import (
+    Autorouter,
+    RoutePathEvidence,
+    RoutingEvidence,
+    RoutingResult,
+    RoutingRoundEvidence,
+)
+from .rulepack import CopperPolicy, ManufacturingRulePack, RoutingPolicy
 from .validation import (
     BoardRuleChecker,
     BoardWriteRejectedError,
     validate_proposed_snapshot,
 )
-from .adapter import (
-    BoardSemanticDiff,
-    BoardSemanticMismatchError,
-    CandidateWorkspace,
-    PcbEdaAdapter,
-    ReleaseArtifacts,
-    UnsupportedEdaOperationError,
-)
-from .fixture_adapter import FixtureBoardAdapter
-from .kicad_adapter import KicadBoardAdapter, KicadBoardFormatError
 
 __all__ = [
     "AddGroundStitching",
-    "BoardSemanticDiff",
-    "BoardSemanticMismatchError",
+    "Autorouter",
     "BoardObjectId",
     "BoardOperation",
     "BoardRuleChecker",
+    "BoardSemanticDiff",
+    "BoardSemanticMismatchError",
     "BoardSnapshot",
     "BoardWriteRejectedError",
-    "CopperPolicy",
+    "CandidateWorkspace",
     "CopperEvidence",
     "CopperPlanner",
+    "CopperPolicy",
     "CopperResult",
     "CopperZone",
-    "CandidateWorkspace",
     "CreateCopperZones",
     "DoubledRectUm",
+    "ExcludedRegion",
+    "FixtureBoardAdapter",
     "Footprint",
     "FootprintPlacement",
-    "FixtureBoardAdapter",
     "Keepout",
     "KicadBoardAdapter",
     "KicadBoardFormatError",
     "LockBoardObjects",
     "ManufacturingRulePack",
-    "RoutingPolicy",
-    "Autorouter",
-    "RoutePathEvidence",
-    "RoutingEvidence",
-    "RoutingResult",
-    "RoutingRoundEvidence",
-    "PlacementEvidence",
-    "PlacementResult",
-    "PlacementSeedEvidence",
-    "PlacementSolver",
     "Net",
     "NetClass",
     "OpaqueNode",
     "Pad",
-    "PlaceFootprints",
     "PcbEdaAdapter",
+    "PlaceFootprints",
+    "PlacementEvidence",
+    "PlacementResult",
+    "PlacementSeedEvidence",
+    "PlacementSolver",
     "PointUm",
     "RectUm",
     "ReleaseArtifacts",
     "RouteNets",
+    "RoutePathEvidence",
     "RouteSegment",
-    "ExcludedRegion",
+    "RoutingEvidence",
+    "RoutingPolicy",
+    "RoutingResult",
+    "RoutingRoundEvidence",
     "StitchingPolicy",
     "ThermalPolicy",
-    "score_layout",
-    "Via",
     "UnsupportedEdaOperationError",
+    "Via",
+    "score_layout",
     "validate_proposed_snapshot",
 ]

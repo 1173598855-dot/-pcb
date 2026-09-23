@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,7 +18,6 @@ from pcbflow.board import (
     Via,
 )
 from pcbflow.board.fixture_adapter import FixtureBoardAdapter
-
 
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "boardir"
 
@@ -130,12 +129,12 @@ def test_fixture_adapter_rejects_missing_locked_and_colliding_route_targets(snap
     (source / "expected-boardir.json").write_bytes(json.dumps(snapshot.to_canonical_dict()).encode())
     adapter = FixtureBoardAdapter()
     candidate = adapter.create_candidate(source, tmp_path / "candidate")
-    common = dict(
-        project_id=snapshot.profile_id, baseline_revision=snapshot.canonical_digest(), risk="medium",
-        rulepack_digest=rulepack.canonical_digest(), target_object_ids=(BoardObjectId("GPIO"),),
-        idempotency_key="unsafe-route", expected_snapshot_digest=snapshot.canonical_digest(),
-        net_ids=(BoardObjectId("GPIO"),),
-    )
+    common = {
+        "project_id": snapshot.profile_id, "baseline_revision": snapshot.canonical_digest(), "risk": "medium",
+        "rulepack_digest": rulepack.canonical_digest(), "target_object_ids": (BoardObjectId("GPIO"),),
+        "idempotency_key": "unsafe-route", "expected_snapshot_digest": snapshot.canonical_digest(),
+        "net_ids": (BoardObjectId("GPIO"),),
+    }
     missing = RouteNets(**common, removed_route_ids=(BoardObjectId("missing"),))
     locked = RouteNets(**common, removed_route_ids=(BoardObjectId("route_5v"),))
     colliding = RouteNets(**common, segments=(RouteSegment(BoardObjectId("route_5v"), BoardObjectId("GPIO"), PointUm(15_000, 30_000), PointUm(15_000, 42_000), 203, "F.Cu", False),))

@@ -14,8 +14,6 @@ from pcbflow.pcb_release import (
     PcbReleaseCapabilityError,
     PcbReleaseService,
     PcbReleaseTaskHandler,
-    _ReleasePublication,
-    _ReleaseError,
     _canonical_json,
     _existing_descriptor,
     _flagged_designators,
@@ -23,6 +21,8 @@ from pcbflow.pcb_release import (
     _manufacturing_error,
     _read_release_files,
     _release_payload,
+    _ReleaseError,
+    _ReleasePublication,
     _validate_frozen_native_drc,
     _validate_native_reports,
 )

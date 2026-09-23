@@ -9,11 +9,15 @@ from pcbflow.board.adapter import (
     UnsupportedEdaOperationError,
     semantic_diff,
 )
-from pcbflow.board.kicad_adapter import KicadBoardAdapter, KicadBoardFormatError
-from pcbflow.board.kicad_adapter import _head, _point, _rect
+from pcbflow.board.kicad_adapter import (
+    KicadBoardAdapter,
+    KicadBoardFormatError,
+    _head,
+    _point,
+    _rect,
+)
 from pcbflow.kicad import RawValidationReport
 from pcbflow.schematic.cst import CstAtom
-
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "kicad" / "board-v10"
 

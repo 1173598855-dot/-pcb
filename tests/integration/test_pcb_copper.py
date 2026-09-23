@@ -16,7 +16,6 @@ from pcbflow.board import (
     ManufacturingRulePack,
 )
 
-
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "boardir"
 
 

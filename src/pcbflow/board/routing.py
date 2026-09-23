@@ -2,17 +2,26 @@ from __future__ import annotations
 
 import hashlib
 import heapq
+import itertools
 from dataclasses import dataclass, replace
 
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.domain import NormalizedFinding
 
-from .ir import BoardObjectId, BoardSnapshot, Net, Pad, PointUm, RectUm, RouteSegment, Via
 from . import geometry
+from .ir import (
+    BoardObjectId,
+    BoardSnapshot,
+    Net,
+    Pad,
+    PointUm,
+    RectUm,
+    RouteSegment,
+    Via,
+)
 from .operations import RouteNets
 from .rulepack import ManufacturingRulePack
 from .validation import BoardRuleChecker
-
 
 _OBJECTIVE_VERSION = "routing-v1"
 
@@ -62,7 +71,7 @@ _Solution = tuple[list[RouteSegment], list[Via], list[tuple[PointUm, str]], int]
 
 
 def _score_solution(solution: _Solution) -> int:
-    segments, vias, path, raw_score = solution
+    _segments, vias, path, raw_score = solution
     via_penalty = len(vias) * 500
     length_penalty = sum(
         ((path[i + 1][0].x - path[i][0].x) ** 2 + (path[i + 1][0].y - path[i][0].y) ** 2) ** 0.5
@@ -361,11 +370,11 @@ def _route_net(
     paths: list[list[tuple[PointUm, str]]] = []
     score = 0
     remaining_vias = rulepack.routing.max_vias_per_net
-    for start, target in zip(pads, pads[1:]):
+    for start, target in itertools.pairwise(pads):
         path, path_score = _astar(snapshot, rulepack, net, start, target, congestion, remaining_vias)  # type: ignore[arg-type]
         if path is None:
             return [], [], None, 0
-        remaining_vias -= sum(1 for left, right in zip(path, path[1:]) if left[1] != right[1])
+        remaining_vias -= sum(1 for left, right in itertools.pairwise(path) if left[1] != right[1])
         paths.append(path)
         score += path_score
     board_class = snapshot.net_class(net.net_class)

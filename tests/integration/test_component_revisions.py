@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from sqlalchemy.orm import Session
 
-from pcbflow.artifacts import ArtifactDescriptor, _STREAM_CHUNK_BYTES
+from pcbflow.artifacts import _STREAM_CHUNK_BYTES, ArtifactDescriptor
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.components import (
     ComponentRevision,

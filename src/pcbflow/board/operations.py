@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import ClassVar, Mapping
+from typing import ClassVar
 
 from .ir import BoardObjectId, CopperZone, PointUm, RouteSegment, ThermalPolicy, Via
-
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 

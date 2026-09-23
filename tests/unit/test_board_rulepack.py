@@ -8,7 +8,6 @@ import pytest
 
 from pcbflow.board import ManufacturingRulePack
 
-
 RULEPACK = (
     Path(__file__).parents[1]
     / "fixtures"

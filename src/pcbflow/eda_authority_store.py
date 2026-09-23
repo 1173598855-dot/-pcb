@@ -6,6 +6,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from pcbflow.design_tables import ProjectEdaAuthorityRow
+from pcbflow.domain import EdaKind, utc_now
 from pcbflow.eda import (
     EdaAuthorityConflictError,
     ProjectEdaAuthority,
@@ -14,10 +16,9 @@ from pcbflow.eda import (
     validate_authority_input,
     validate_idempotency_key,
 )
-from pcbflow.design_tables import ProjectEdaAuthorityRow
-from pcbflow.domain import EdaKind, utc_now
 from pcbflow.repositories import ProjectNotFoundError
 from pcbflow.tables import ProjectRow
+
 
 def _utc(value: datetime) -> datetime:
     return (

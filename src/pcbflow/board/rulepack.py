@@ -9,9 +9,9 @@ from .ir import (
     BoardObjectId,
     JsonObject,
     NetClass,
+    _canonicalize_object_lists,
     _decode_json,
     _find_by_id,
-    _canonicalize_object_lists,
     _net_class_dict,
     _parse_net_class,
     _require_bool,
@@ -20,7 +20,6 @@ from .ir import (
     _require_list,
     _require_string,
 )
-
 
 _V1_NET_CLASSES = frozenset(
     {"signal", "quiet_signal", "logic_power", "load_power", "ground"}

@@ -34,7 +34,7 @@ _context: ContextVar[dict[str, str]] = ContextVar(
 def _fields(values: Mapping[str, object]) -> dict[str, str]:
     unknown = set(values) - _LOG_FIELDS
     if unknown:
-        raise ValueError(f"unsupported log field: {sorted(unknown)[0]}")
+        raise ValueError(f"unsupported log field: {min(unknown)}")
     return {key: str(value) for key, value in values.items() if value is not None}
 
 
@@ -134,7 +134,7 @@ class Metrics:
         values = labels or {}
         unknown = set(values) - _METRIC_LABELS
         if unknown:
-            raise ValueError(f"unsupported metric label: {sorted(unknown)[0]}")
+            raise ValueError(f"unsupported metric label: {min(unknown)}")
         return tuple(sorted((str(key), str(value)) for key, value in values.items()))
 
     def _record(

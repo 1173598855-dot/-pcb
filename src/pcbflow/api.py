@@ -11,53 +11,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from pcbflow.approvals import ApprovalDigestMismatchError, ApprovalDigestMismatchError
-from pcbflow.canonical import canonical_json_bytes
-from pcbflow.commands import DesignCommandSchemaError, load_command_batch
-from pcbflow.component_binding_store import ComponentModuleBindingConflictError
-from pcbflow.component_bindings import (
-    ModuleCatalogUnavailableError,
-    ModuleKicadMajorUnsupportedError,
-)
-from pcbflow.component_store import ComponentRevisionNotFoundError
-from pcbflow.config import Settings
-from pcbflow.container import Container, build_container
-from pcbflow.eda import (
-    EdaAuthorityConflictError,
-    validate_idempotency_key,
-)
-from pcbflow.lceda_pro import LcedaProCapabilityError
-from pcbflow.pcb_candidates import (
-    PcbCandidateNotFoundError,
-    PcbCandidateNotReviewableError,
-)
-from pcbflow.domain import RequestInvalidError, new_id, utc_now
-from pcbflow.observability import bind_log_context
-from pcbflow.proposal_store import ProposalNotFoundError
-from pcbflow.proposals import (
-    CandidateNotReviewableError,
-    ProjectNotManagedError as ProposalProjectNotManagedError,
-    RevisionReconciliationRequiredError,
-)
-from pcbflow.repositories import (
-    IdempotencyConflictError,
-    ProjectNotFoundError,
-    RevisionConflictError,
-    TaskNotCancellableError,
-    TaskNotFoundError,
-)
-from pcbflow.requirement_store import RequirementSetNotFoundError
-from pcbflow.requirements import (
-    RequirementSet,
-    RequirementSetPayload,
-    RequirementsBlockedError,
-)
-from pcbflow.revisions import (
-    GitOperationError,
-    ProjectNotManagedError as RevisionProjectNotManagedError,
-    ProjectWorktreeDirtyError,
-)
-from pcbflow.schematic.modules import ModuleRevisionNotFoundError
 from pcbflow.api_schemas import (
     AcceptProposalRequest,
     ActorRequest,
@@ -73,6 +26,57 @@ from pcbflow.api_schemas import (
     ExportPcbReleaseRequest,
     RejectProposalRequest,
 )
+from pcbflow.approvals import ApprovalDigestMismatchError
+from pcbflow.canonical import canonical_json_bytes
+from pcbflow.commands import DesignCommandSchemaError, load_command_batch
+from pcbflow.component_binding_store import ComponentModuleBindingConflictError
+from pcbflow.component_bindings import (
+    ModuleCatalogUnavailableError,
+    ModuleKicadMajorUnsupportedError,
+)
+from pcbflow.component_store import ComponentRevisionNotFoundError
+from pcbflow.config import Settings
+from pcbflow.container import Container, build_container
+from pcbflow.domain import RequestInvalidError, new_id, utc_now
+from pcbflow.eda import (
+    EdaAuthorityConflictError,
+    validate_idempotency_key,
+)
+from pcbflow.lceda_pro import LcedaProCapabilityError
+from pcbflow.observability import bind_log_context
+from pcbflow.pcb_candidates import (
+    PcbCandidateNotFoundError,
+    PcbCandidateNotReviewableError,
+)
+from pcbflow.proposal_store import ProposalNotFoundError
+from pcbflow.proposals import (
+    CandidateNotReviewableError,
+    RevisionReconciliationRequiredError,
+)
+from pcbflow.proposals import (
+    ProjectNotManagedError as ProposalProjectNotManagedError,
+)
+from pcbflow.repositories import (
+    IdempotencyConflictError,
+    ProjectNotFoundError,
+    RevisionConflictError,
+    TaskNotCancellableError,
+    TaskNotFoundError,
+)
+from pcbflow.requirement_store import RequirementSetNotFoundError
+from pcbflow.requirements import (
+    RequirementsBlockedError,
+    RequirementSet,
+    RequirementSetPayload,
+)
+from pcbflow.revisions import (
+    GitOperationError,
+    ProjectWorktreeDirtyError,
+)
+from pcbflow.revisions import (
+    ProjectNotManagedError as RevisionProjectNotManagedError,
+)
+from pcbflow.schematic.modules import ModuleRevisionNotFoundError
 
 
 class ApiError(RuntimeError):

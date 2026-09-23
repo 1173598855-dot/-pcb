@@ -15,7 +15,6 @@ from pcbflow.release_packaging import (
     package_kicad_release,
 )
 
-
 _EMPTY_DRC = json.dumps(
     {"violations": [], "unconnected_items": [], "schematic_parity": []}
 ).encode("utf-8")

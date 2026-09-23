@@ -4,10 +4,16 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from pcbflow.board import BoardObjectId, BoardRuleChecker, BoardSnapshot, Keepout, ManufacturingRulePack, RectUm
+from pcbflow.board import (
+    BoardObjectId,
+    BoardRuleChecker,
+    BoardSnapshot,
+    Keepout,
+    ManufacturingRulePack,
+    RectUm,
+)
 from pcbflow.board.fixture_adapter import FixtureBoardAdapter
 from pcbflow.board.placement import DoubledRectUm, PlacementSolver, score_layout
-
 
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "boardir"
 

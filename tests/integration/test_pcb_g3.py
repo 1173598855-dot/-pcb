@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select, text
 
 from pcbflow.approvals import ApprovalDigestMismatchError
-from pcbflow.board import BoardObjectId, BoardSnapshot, FixtureBoardAdapter, PlaceFootprints, PointUm
+from pcbflow.board import (
+    BoardObjectId,
+    BoardSnapshot,
+    FixtureBoardAdapter,
+    PlaceFootprints,
+    PointUm,
+)
 from pcbflow.board.operations import FootprintPlacement
 from pcbflow.board.rulepack import ManufacturingRulePack
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.config import Settings
 from pcbflow.container import build_container
+from pcbflow.design_tables import PcbCandidateRow
 from pcbflow.domain import (
     EdaKind,
     EdaOperation,
@@ -34,10 +41,8 @@ from pcbflow.pcb_workflow import (
     LCEDA_CAPABILITY_TASK_KIND,
     capability_artifact_bytes,
 )
-from pcbflow.design_tables import PcbCandidateRow
-from pcbflow.tables import ArtifactRow, EvidenceRow, TaskRow
 from pcbflow.repositories import EvidenceConflictError, StaleLeaseError
-
+from pcbflow.tables import ArtifactRow, EvidenceRow, TaskRow
 
 _BASE_REVISION = "git:" + "b" * 40
 
@@ -1353,7 +1358,7 @@ def test_cancellation_during_evidence_publication_removes_new_objects(
 def test_evidence_publication_cleanup_preserves_shared_registered_object(
     g3_container, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    project, candidate, _source, _fixture_root = _create_candidate(g3_container, tmp_path)
+    _project, candidate, _source, _fixture_root = _create_candidate(g3_container, tmp_path)
 
     def object_paths() -> set[Path]:
         objects = g3_container.artifacts.root / "objects"

@@ -11,7 +11,6 @@ from typing import Literal
 from pcbflow.canonical import canonical_digest
 from pcbflow.domain import NormalizedFinding
 
-
 _SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TRUE_VALUES = frozenset({"1", "true", "yes", "y", "dnp", "hand_solder"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "n", ""})

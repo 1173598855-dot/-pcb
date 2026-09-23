@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 from pcbflow.schematic.cst import (
     CstEdit,
@@ -19,7 +20,6 @@ from pcbflow.schematic.cst import (
     parse_cst,
     replace_node,
 )
-
 
 SOURCE = (
     b'(kicad_sch\r\n'
@@ -44,11 +44,11 @@ def test_no_change_roundtrip_is_byte_exact() -> None:
 def test_replacing_one_string_preserves_all_other_bytes() -> None:
     document = parse_cst(SOURCE)
     symbol = document.root.find_children("symbol")[0]
-    value_property = [
+    value_property = next(
         node
         for node in symbol.find_children("property")
         if node.atom_text(1) == "Value"
-    ][0]
+    )
     target = value_property.items[2]
     changed = apply_edits(
         document,
@@ -64,11 +64,11 @@ def test_replacing_one_string_preserves_all_other_bytes() -> None:
 def test_node_offsets_are_original_byte_offsets() -> None:
     document = parse_cst(SOURCE)
     symbol = document.root.find_children("symbol")[0]
-    value_property = [
+    value_property = next(
         node
         for node in symbol.find_children("property")
         if node.atom_text(1) == "Value"
-    ][0]
+    )
     value = value_property.items[2]
 
     assert value.start == SOURCE.index(b'"\xe7\x8a\xb6\xe6\x80\x81LED"')
@@ -238,9 +238,9 @@ def test_committed_kicad_9_fixture_is_crlf_and_roundtrips() -> None:
     symbol = document.root.find_children("symbol")[0]
     assert symbol.find_children("lib_id")[0].atom_text(1) == "Device:LED"
     assert len(symbol.find_children("pin")) == 2
-    custom_property = [
+    custom_property = next(
         node
         for node in symbol.find_children("property")
         if node.atom_text(1) == "PCBFlowCustom"
-    ][0]
+    )
     assert any(ord(character) > 127 for character in custom_property.atom_text(2))

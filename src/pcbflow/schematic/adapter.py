@@ -14,11 +14,11 @@ from pcbflow.commands import (
     DesignCommand,
     InstantiateBoundModuleOperation,
     InstantiateModuleOperation,
-    SetPropertyOperation,
     SchematicObjectRef,
+    SetPropertyOperation,
 )
-from pcbflow.observability import MetricName, Metrics
 from pcbflow.kicad_compatibility import profile_for_major
+from pcbflow.observability import MetricName, Metrics
 from pcbflow.schematic.cst import (
     CstAtom,
     CstDocument,
@@ -32,7 +32,12 @@ from pcbflow.schematic.cst import (
     parse_cst,
     replace_node,
 )
-from pcbflow.schematic.diff import ChangeKind, ChangeSelector, CommandAttribution, build_semantic_diff
+from pcbflow.schematic.diff import (
+    ChangeKind,
+    ChangeSelector,
+    CommandAttribution,
+    build_semantic_diff,
+)
 from pcbflow.schematic.modules import (
     ModuleCatalogPort,
     ModuleRevision,

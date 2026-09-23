@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping, Protocol
+from typing import Protocol
 from uuid import UUID, uuid5
 
 import yaml
@@ -14,7 +15,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from pcbflow.canonical import canonical_digest
 from pcbflow.schematic.cst import CstAtom, CstList, parse_cst
-
 
 MODULE_UUID_NAMESPACE = UUID("9bcf613a-1ced-5b76-9a90-8fd90ac5f16d")
 _ALLOWED_SUFFIXES = frozenset((".yaml", ".kicad_sch"))
@@ -151,9 +151,7 @@ def derive_module_uuid(
     module_revision_digest: str,
     module_local_uuid: str,
 ) -> str:
-    value = "\x1f".join(
-        (project_id, batch_id, command_id, module_revision_digest, module_local_uuid)
-    )
+    value = f"{project_id}\x1f{batch_id}\x1f{command_id}\x1f{module_revision_digest}\x1f{module_local_uuid}"
     return str(uuid5(MODULE_UUID_NAMESPACE, value))
 
 

@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pcbflow.board import Autorouter, BoardSnapshot, FixtureBoardAdapter, ManufacturingRulePack
-
+from pcbflow.board import (
+    Autorouter,
+    BoardSnapshot,
+    FixtureBoardAdapter,
+    ManufacturingRulePack,
+)
 
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "boardir"
 

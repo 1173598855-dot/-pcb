@@ -9,29 +9,24 @@ adapter/workspace/runtime concerns.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from contextlib import nullcontext
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import exists, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from pcbflow.artifacts import ArtifactDescriptor, ContentAddressedStore, StagedArtifact
+from pcbflow.artifacts import ArtifactDescriptor, StagedArtifact
 from pcbflow.canonical import canonical_digest, sha256_digest
-from pcbflow.design_tables import PcbCandidateRow, ProjectRow, TaskRow, ArtifactRow
+from pcbflow.design_tables import ArtifactRow, PcbCandidateRow, ProjectRow, TaskRow
 from pcbflow.domain import (
     EdaKind,
     EdaOperation,
-    NormalizedFinding,
-    ProjectMode,
     RequestInvalidError,
     StaleLeaseError,
     TaskCancelledError,
     TaskLease,
     TaskStatus,
-    ValidationReport,
     new_id,
     utc_now,
 )
@@ -40,8 +35,8 @@ from pcbflow.lceda_pro import LcedaProCapabilityError
 from pcbflow.pcb_candidate_validation import (
     PCB_EXPORT_RELEASE_TASK_KIND,
     PCB_GENERATE_CANDIDATE_TASK_KIND,
-    PcbCandidateNotReviewableError,
     PcbCandidateNotFoundError,
+    PcbCandidateNotReviewableError,
     PcbCandidateStatus,
     _release_task_idempotency_key,
     _task_idempotency_key,
@@ -49,14 +44,11 @@ from pcbflow.pcb_candidate_validation import (
 from pcbflow.pcb_workflow import CAPABILITY_EVIDENCE_KIND
 from pcbflow.repositories import (
     EvidenceRepository,
-    FindingRepository,
     IdempotencyConflictError,
     ProjectNotFoundError,
-    ProjectRepository,
     TaskRepository,
 )
 from pcbflow.tasks import TerminalTaskError
-
 
 G3_REQUIRED_EVIDENCE = frozenset(
     {
@@ -258,7 +250,7 @@ class PcbCandidateStore:
     ) -> Any:
         validate_idempotency_key(idempotency_key)
         try:
-            from pcbflow.pcb_candidate_validation import validate_candidate_digest
+            pass
         except Exception:
             pass
         project = self._projects.get(project_id)
@@ -292,7 +284,9 @@ class PcbCandidateStore:
         else:
             parsed = {}
         if "seed" in parsed or "net_ids" in parsed:
-            from pcbflow.pcb_candidate_validation import validate_candidate_public_inputs
+            from pcbflow.pcb_candidate_validation import (
+                validate_candidate_public_inputs,
+            )
             validate_candidate_public_inputs(
                 seed=parsed.get("seed", 0),
                 net_ids=parsed.get("net_ids"),

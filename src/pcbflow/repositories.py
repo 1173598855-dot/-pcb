@@ -18,14 +18,6 @@ from pcbflow.design_tables import (
     ProjectEdaAuthorityRow,
     ProjectRevisionRow,
 )
-from pcbflow.eda import (
-    EdaAuthorityConflictError,
-    ProjectEdaAuthorityInput,
-    authority_digest,
-    registration_input_digest,
-    validate_authority_input,
-    validate_idempotency_key,
-)
 from pcbflow.domain import (
     Evidence,
     NormalizedFinding,
@@ -38,16 +30,15 @@ from pcbflow.domain import (
     new_id,
     utc_now,
 )
-from pcbflow.observability import audit_payload
-from pcbflow.tables import (
-    ArtifactRow,
-    EvidenceRow,
-    FindingRow,
-    ProjectRow,
-    TaskAttemptRow,
-    TaskRow,
+from pcbflow.eda import (
+    EdaAuthorityConflictError,
+    ProjectEdaAuthorityInput,
+    authority_digest,
+    registration_input_digest,
+    validate_authority_input,
+    validate_idempotency_key,
 )
-from pcbflow.workspaces import assert_supported_entry
+from pcbflow.observability import audit_payload
 from pcbflow.repository_errors import (
     EvidenceConflictError,
     IdempotencyConflictError,
@@ -59,11 +50,28 @@ from pcbflow.repository_errors import (
 )
 from pcbflow.repository_mapping import (
     assert_active_fence as _assert_active_fence,
+)
+from pcbflow.repository_mapping import (
     evidence as _evidence,
+)
+from pcbflow.repository_mapping import (
     finding as _finding,
+)
+from pcbflow.repository_mapping import (
     project as _project,
+)
+from pcbflow.repository_mapping import (
     task as _task,
 )
+from pcbflow.tables import (
+    ArtifactRow,
+    EvidenceRow,
+    FindingRow,
+    ProjectRow,
+    TaskAttemptRow,
+    TaskRow,
+)
+from pcbflow.workspaces import assert_supported_entry
 
 
 class ProjectRepository:

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import errno
-from datetime import UTC, datetime
 import os
-from pathlib import Path
 import shutil
+from datetime import UTC, datetime
+from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
 
@@ -203,7 +203,7 @@ def test_workspace_copier_rejects_a_top_level_reparse_point(
     source = tmp_path / "workspace-source"
     source.mkdir()
     (source / "board.kicad_sch").write_text("board", encoding="utf-8")
-    metadata = source.lstat()
+    source.lstat()
     original_lstat = Path.lstat
 
     def reparse_source(path: Path):

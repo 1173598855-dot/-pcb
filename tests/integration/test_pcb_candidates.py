@@ -11,7 +11,12 @@ from pcbflow.board import BoardObjectId, PlaceFootprints, PointUm
 from pcbflow.board.operations import FootprintPlacement
 from pcbflow.cancellation import TaskCancelledError
 from pcbflow.design_tables import PcbCandidateRow
-from pcbflow.domain import EdaKind, EdaOperation, RequestInvalidError, TaskStatus, utc_now
+from pcbflow.domain import (
+    EdaKind,
+    RequestInvalidError,
+    TaskStatus,
+    utc_now,
+)
 from pcbflow.eda import ProjectEdaAuthorityInput
 from pcbflow.lceda_pro import LcedaProCapabilityError
 from pcbflow.pcb_candidates import (
@@ -21,7 +26,6 @@ from pcbflow.pcb_candidates import (
 )
 from pcbflow.repositories import StaleLeaseError
 from pcbflow.tables import TaskRow
-
 
 _DIGEST = "sha256:" + "a" * 64
 
@@ -169,16 +173,16 @@ def test_candidate_idempotency_keys_are_scoped_to_the_project(
         ),
         "other-authority",
     )
-    kwargs = dict(
-        base_revision="git:" + "b" * 40,
-        base_snapshot_digest="sha256:" + "d" * 64,
-        board_snapshot_digest="sha256:" + "c" * 64,
-        rulepack_digest=_DIGEST,
-        capability_digest="sha256:" + "e" * 64,
-        operations=(),
-        idempotency_key="same-candidate-key",
-        require_capability=False,
-    )
+    kwargs = {
+        "base_revision": "git:" + "b" * 40,
+        "base_snapshot_digest": "sha256:" + "d" * 64,
+        "board_snapshot_digest": "sha256:" + "c" * 64,
+        "rulepack_digest": _DIGEST,
+        "capability_digest": "sha256:" + "e" * 64,
+        "operations": (),
+        "idempotency_key": "same-candidate-key",
+        "require_capability": False,
+    }
 
     first = container.pcb_candidates.create(project_id=lceda_project.id, **kwargs)
     second = container.pcb_candidates.create(project_id=other.id, **kwargs)
@@ -210,17 +214,17 @@ def test_candidate_can_be_found_by_project_and_idempotency_key(
 
 
 def test_candidate_replay_rejects_changed_frozen_inputs(container, lceda_project):
-    kwargs = dict(
-        project_id=lceda_project.id,
-        base_revision="git:" + "b" * 40,
-        base_snapshot_digest="sha256:" + "d" * 64,
-        board_snapshot_digest="sha256:" + "c" * 64,
-        rulepack_digest=_DIGEST,
-        capability_digest="sha256:" + "e" * 64,
-        operations=(_operation(lceda_project.id),),
-        idempotency_key="candidate-input-conflict",
-        require_capability=False,
-    )
+    kwargs = {
+        "project_id": lceda_project.id,
+        "base_revision": "git:" + "b" * 40,
+        "base_snapshot_digest": "sha256:" + "d" * 64,
+        "board_snapshot_digest": "sha256:" + "c" * 64,
+        "rulepack_digest": _DIGEST,
+        "capability_digest": "sha256:" + "e" * 64,
+        "operations": (_operation(lceda_project.id),),
+        "idempotency_key": "candidate-input-conflict",
+        "require_capability": False,
+    }
     original = container.pcb_candidates.create(**kwargs)
     with pytest.raises(Exception):
         container.pcb_candidates.create(
@@ -230,17 +234,17 @@ def test_candidate_replay_rejects_changed_frozen_inputs(container, lceda_project
 
 
 def test_candidate_replay_is_allowed_after_capability_gate_changes(container, lceda_project):
-    kwargs = dict(
-        project_id=lceda_project.id,
-        base_revision="git:" + "b" * 40,
-        base_snapshot_digest="sha256:" + "d" * 64,
-        board_snapshot_digest="sha256:" + "c" * 64,
-        rulepack_digest=_DIGEST,
-        capability_digest="sha256:" + "e" * 64,
-        operations=(_operation(lceda_project.id),),
-        idempotency_key="candidate-gate-replay",
-        require_capability=False,
-    )
+    kwargs = {
+        "project_id": lceda_project.id,
+        "base_revision": "git:" + "b" * 40,
+        "base_snapshot_digest": "sha256:" + "d" * 64,
+        "board_snapshot_digest": "sha256:" + "c" * 64,
+        "rulepack_digest": _DIGEST,
+        "capability_digest": "sha256:" + "e" * 64,
+        "operations": (_operation(lceda_project.id),),
+        "idempotency_key": "candidate-gate-replay",
+        "require_capability": False,
+    }
     original = container.pcb_candidates.create(**kwargs)
     replay = container.pcb_candidates.create(**{**kwargs, "require_capability": True})
     assert replay == original

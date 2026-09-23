@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import io
 import stat
+from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, Iterator, Literal, Self
+from typing import TYPE_CHECKING, BinaryIO, Literal, Self
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -229,7 +230,7 @@ def _open_regular_file(path: Path) -> Iterator[BinaryIO]:
 def _is_link_or_reparse_point(metadata: object) -> bool:
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     attributes = getattr(metadata, "st_file_attributes", 0)
-    return stat.S_ISLNK(getattr(metadata, "st_mode")) or bool(
+    return stat.S_ISLNK(metadata.st_mode) or bool(
         attributes & reparse_flag
     )
 

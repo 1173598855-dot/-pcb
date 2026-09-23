@@ -1,17 +1,18 @@
-import io
 import hashlib
+import io
 from pathlib import Path
 
 import pytest
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from pcbflow.artifacts import (
+    _STREAM_CHUNK_BYTES,
     ArtifactConflictError,
     ArtifactDigestMismatchError,
     ArtifactSizeLimitError,
     ContentAddressedStore,
     InvalidDigestError,
-    _STREAM_CHUNK_BYTES,
 )
 
 

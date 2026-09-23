@@ -138,7 +138,7 @@ def build_semantic_diff(
 def _index_by_ref(items: tuple[object, ...]) -> dict[str, object]:
     indexed: dict[str, object] = {}
     for item in items:
-        reference = getattr(item, "ref")
+        reference = item.ref
         key = object_ref_key(reference)
         if key in indexed:
             raise ValueError(f"duplicate semantic object reference: {key}")

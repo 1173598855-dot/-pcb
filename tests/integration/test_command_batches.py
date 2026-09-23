@@ -19,8 +19,8 @@ from pcbflow.design_tables import (
 )
 from pcbflow.domain import TaskStatus
 from pcbflow.observability import bind_log_context
-from pcbflow.repositories import IdempotencyConflictError
 from pcbflow.proposal_store import ProposalStore
+from pcbflow.repositories import IdempotencyConflictError
 from pcbflow.tables import TaskRow
 
 

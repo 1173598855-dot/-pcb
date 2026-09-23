@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+import io
+import json
+import re
 from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-import io
-import json
 from pathlib import Path
-import re
 from tempfile import TemporaryDirectory
 from typing import Any
 
@@ -17,8 +17,20 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from pcbflow.artifacts import ArtifactDescriptor, ContentAddressedStore, StagedArtifact
-from pcbflow.board.adapter import BoardSemanticMismatchError, PcbEdaAdapter, semantic_diff
-from pcbflow.board.ir import BoardObjectId, BoardSnapshot, CopperZone, PointUm, RectUm, RouteSegment, Via
+from pcbflow.board.adapter import (
+    BoardSemanticMismatchError,
+    PcbEdaAdapter,
+    semantic_diff,
+)
+from pcbflow.board.ir import (
+    BoardObjectId,
+    BoardSnapshot,
+    CopperZone,
+    PointUm,
+    RectUm,
+    RouteSegment,
+    Via,
+)
 from pcbflow.board.operations import (
     AddGroundStitching,
     BoardOperation,
@@ -1950,7 +1962,7 @@ class PcbCandidateExecutionTaskHandler:
                     for item in evidence_set["items"]
                 },
             }
-            reports_by_kind = self._evidence.add_reports_and_findings(
+            self._evidence.add_reports_and_findings(
                 project_id=candidate.project_id,
                 task_id=lease.task_id,
                 reports=report_inputs,

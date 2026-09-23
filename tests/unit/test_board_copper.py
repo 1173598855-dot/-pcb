@@ -10,13 +10,11 @@ from pcbflow.board import (
     CopperPlanner,
     Keepout,
     ManufacturingRulePack,
-    Pad,
     PointUm,
     RectUm,
     RouteSegment,
 )
 from pcbflow.board.copper import _is_axis_aligned_rectangle
-
 
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "boardir"
 

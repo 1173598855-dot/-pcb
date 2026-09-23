@@ -11,11 +11,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from pcbflow.domain import EdaKind
 from pcbflow.eda import (
     ProjectEdaAuthorityInput,
     validate_authority_input,
 )
-from pcbflow.domain import EdaKind
 from pcbflow.pcb_candidates import validate_candidate_public_inputs
 
 
@@ -140,7 +140,7 @@ class CreatePcbCandidateRequest(StrictRequest):
         return values
 
     @model_validator(mode="after")
-    def validate_shared_candidate_inputs(self) -> "CreatePcbCandidateRequest":
+    def validate_shared_candidate_inputs(self) -> CreatePcbCandidateRequest:
         validate_candidate_public_inputs(
             seed=self.seed,
             net_ids=self.net_ids,

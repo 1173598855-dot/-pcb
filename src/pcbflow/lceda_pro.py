@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
-import re
 from typing import Protocol
 
-from pcbflow.canonical import hash_file
-from pcbflow.eda import EdaCapability
-from pcbflow.domain import EdaOperation, RequestInvalidError
-from pcbflow.process import ProcessPort, ProcessTimeoutError
-from pcbflow.board.adapter import CandidateWorkspace, ReleaseArtifacts, UnsupportedEdaOperationError
+from pcbflow.board.adapter import (
+    CandidateWorkspace,
+    ReleaseArtifacts,
+    UnsupportedEdaOperationError,
+)
 from pcbflow.board.ir import BoardSnapshot
 from pcbflow.board.operations import BoardOperation
 from pcbflow.board.rulepack import ManufacturingRulePack
-from pcbflow.domain import ValidationReport
-
+from pcbflow.canonical import hash_file
+from pcbflow.domain import EdaOperation, RequestInvalidError, ValidationReport
+from pcbflow.eda import EdaCapability
+from pcbflow.process import ProcessPort, ProcessTimeoutError
 
 _VERSION = re.compile(r"(?<!\d)(\d+\.\d+\.\d+)(?!\d)")
 _SUPPORTED_VERSION = re.compile(r"3\.2\.\d+\Z")

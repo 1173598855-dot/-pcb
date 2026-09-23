@@ -1,6 +1,6 @@
+import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-import shutil
 
 import pytest
 from sqlalchemy import select
@@ -23,8 +23,8 @@ from pcbflow.repositories import (
     StaleLeaseError,
     TaskRepository,
 )
-from pcbflow.tasks import Worker
 from pcbflow.tables import TaskAttemptRow
+from pcbflow.tasks import Worker
 from pcbflow.validation import (
     VALIDATION_TASK_KIND,
     ProjectCopyLimitError,

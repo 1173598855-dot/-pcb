@@ -5,9 +5,10 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Mapping, Protocol, Sequence
+from typing import BinaryIO, Protocol
 
 from pcbflow.cancellation import TaskCancelledError, current_cancellation_checker
 

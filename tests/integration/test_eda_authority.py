@@ -6,9 +6,9 @@ from threading import Barrier
 
 import pytest
 
+from pcbflow.domain import EdaKind, RequestInvalidError
 from pcbflow.eda import EdaAuthorityConflictError, ProjectEdaAuthorityInput
 from pcbflow.eda_authority_store import ProjectEdaAuthorityStore
-from pcbflow.domain import EdaKind, RequestInvalidError
 
 
 @pytest.fixture

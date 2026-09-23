@@ -32,18 +32,17 @@ from pcbflow.domain import Project, ProjectMode, new_id, utc_now
 from pcbflow.observability import MetricName, Metrics, audit_payload, log_event
 from pcbflow.process import ProcessPort, ProcessResult
 from pcbflow.repositories import IdempotencyConflictError, ProjectRepository
-from pcbflow.workspaces import _remove_readonly_entry
 from pcbflow.revision_store import ProjectRevisionStore
 from pcbflow.workspaces import (
     WorkspaceCopier,
     WorkspaceEntryError,
     WorkspaceLimitError,
+    _remove_readonly_entry,
     assert_supported_entry,
     is_snapshot_excluded,
     normalize_snapshot_excludes,
     open_regular_file,
 )
-
 
 _OBJECT_ID = re.compile(r"[0-9a-f]{40,64}")
 _SNAPSHOT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")

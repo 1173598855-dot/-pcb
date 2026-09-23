@@ -7,24 +7,12 @@ representation functions that have no store or execution dependencies.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
-from pcbflow.canonical import canonical_digest, canonical_json_bytes, sha256_digest
-from pcbflow.design_tables import PcbCandidateRow
+from pcbflow.canonical import canonical_digest
 from pcbflow.domain import (
-    EdaKind,
-    EdaOperation,
-    NormalizedFinding,
-    ProjectMode,
     RequestInvalidError,
-    TaskLease,
-    TaskStatus,
-    ValidationReport,
-    new_id,
-    utc_now,
 )
-
 
 PCB_GENERATE_CANDIDATE_TASK_KIND = "pcb.generate_candidate"
 PCB_EXPORT_RELEASE_TASK_KIND = "pcb.export_release"

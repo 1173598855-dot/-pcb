@@ -22,10 +22,12 @@ from pcbflow.domain import RequestInvalidError, TaskStatus, new_id, utc_now
 from pcbflow.observability import audit_payload, ensure_trace_id
 from pcbflow.proposals import (
     DESIGN_PROPOSAL_TASK_KIND,
-    ChangeProposal,
-    ProposalStatus,
     READY_EVIDENCE_KINDS,
     READY_EVIDENCE_MEDIA_TYPES,
+    ChangeProposal,
+    EvidenceRegistration,
+    EvidenceSet,
+    ProposalStatus,
 )
 from pcbflow.repositories import (
     EvidenceConflictError,
@@ -34,7 +36,6 @@ from pcbflow.repositories import (
     StaleLeaseError,
 )
 from pcbflow.tables import ArtifactRow, EvidenceRow, ProjectRow, TaskRow
-from pcbflow.proposals import EvidenceRegistration, EvidenceSet
 
 
 class CommandBatchNotFoundError(LookupError):

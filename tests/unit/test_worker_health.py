@@ -1,6 +1,6 @@
 """Tests for worker health check and metrics."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pcbflow.config import Settings

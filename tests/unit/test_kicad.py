@@ -17,8 +17,7 @@ from pcbflow.kicad import (
     KicadUnavailableError,
     parse_kicad_report,
 )
-from pcbflow.process import ProcessResult
-from pcbflow.process import ProcessTimeoutError
+from pcbflow.process import ProcessResult, ProcessTimeoutError
 
 
 class VersionRunner:

@@ -22,10 +22,16 @@ from pcbflow.board import (
 )
 from pcbflow.board.operations import FootprintPlacement
 from pcbflow.board.rulepack import ManufacturingRulePack
-from pcbflow.config import Settings
 from pcbflow.cancellation import TaskCancelledError
+from pcbflow.config import Settings
 from pcbflow.container import build_container
-from pcbflow.domain import EdaKind, EdaOperation, RequestInvalidError, TaskStatus, utc_now
+from pcbflow.domain import (
+    EdaKind,
+    EdaOperation,
+    RequestInvalidError,
+    TaskStatus,
+    utc_now,
+)
 from pcbflow.eda import EdaCapability, ProjectEdaAuthorityInput
 from pcbflow.lceda_pro import LcedaProCapabilityError
 from pcbflow.pcb_candidates import PcbCandidateNotReviewableError, PcbCandidateStatus
@@ -34,15 +40,14 @@ from pcbflow.pcb_release import (
     PcbReleaseApprovalService,
     _ReleasePublication,
 )
-from pcbflow.repositories import StaleLeaseError
-from pcbflow.tables import ArtifactRow
 from pcbflow.pcb_workflow import (
     CAPABILITY_EVIDENCE_KIND,
     CAPABILITY_MEDIA_TYPE,
     LCEDA_CAPABILITY_TASK_KIND,
     capability_artifact_bytes,
 )
-
+from pcbflow.repositories import StaleLeaseError
+from pcbflow.tables import ArtifactRow
 
 _BASE_REVISION = "git:" + "b" * 40
 
@@ -358,7 +363,7 @@ def test_release_artifact_registration_rejects_descriptor_deleted_by_other_publi
     owner = release_container.artifacts.stage_stream(
         io.BytesIO(b"release registration race"), "application/x-release-race"
     )
-    owner_descriptor = owner.publish()
+    owner.publish()
     reuser = release_container.artifacts.stage_stream(
         io.BytesIO(b"release registration race"), "application/x-release-race"
     )
@@ -1000,7 +1005,7 @@ def test_release_stale_final_fence_reverts_exact_pending_transition(
     release_container, tmp_path: Path, monkeypatch
 ) -> None:
     candidate = _approved_candidate(release_container, tmp_path)
-    task = release_container.pcb_release.enqueue_export(
+    release_container.pcb_release.enqueue_export(
         candidate.id, "release-stale-during-final-fence"
     )
     pending = release_container.pcb_candidates.get(candidate.id)

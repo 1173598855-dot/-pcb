@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 from pcbflow.eda import EdaCapability
 from pcbflow.kicad import KicadPort, parse_kicad_report
@@ -119,7 +119,7 @@ class KicadBoardAdapter:
         if not layers:
             raise KicadBoardFormatError("KICAD_BOARD_NO_COPPER_LAYERS")
 
-        net_names = {values[0]: values[1] for node in _children(root, "net") if len((values := _atoms(node))) >= 2 and values[0] != "0"}
+        net_names = {values[0]: values[1] for node in _children(root, "net") if len(values := _atoms(node)) >= 2 and values[0] != "0"}
         setup = _child(root, "setup")
         rules = _child(setup, "rules") if setup else None
         rule = lambda name, default: _um((_atoms(_child(rules, name)) or [str(default)])[0]) if rules else _um(str(default))

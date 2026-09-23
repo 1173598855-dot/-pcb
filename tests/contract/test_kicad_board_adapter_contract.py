@@ -5,7 +5,6 @@ from pathlib import Path
 from pcbflow.board.adapter import PcbEdaAdapter
 from pcbflow.board.kicad_adapter import KicadBoardAdapter
 
-
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "kicad" / "board-v10"
 
 

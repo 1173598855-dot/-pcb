@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-from ipaddress import ip_address
 import stat
+from datetime import UTC, datetime
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Annotated, NoReturn
-from datetime import UTC, datetime
 
 import typer
 import uvicorn
@@ -22,22 +22,24 @@ from pcbflow.component_bindings import (
 from pcbflow.component_store import ComponentRevisionNotFoundError
 from pcbflow.config import Settings
 from pcbflow.container import Container, build_container
+from pcbflow.domain import EdaKind, utc_now
 from pcbflow.eda import (
     EdaAuthorityConflictError,
     ProjectEdaAuthorityInput,
     validate_authority_input,
 )
 from pcbflow.lceda_pro import LcedaProCapabilityError
+from pcbflow.observability import ensure_trace_id
 from pcbflow.pcb_candidates import (
     PcbCandidateNotFoundError,
     PcbCandidateNotReviewableError,
     validate_candidate_public_inputs,
 )
-from pcbflow.domain import EdaKind, utc_now
-from pcbflow.observability import ensure_trace_id
 from pcbflow.proposal_store import ProposalNotFoundError
 from pcbflow.proposals import (
     CandidateNotReviewableError,
+)
+from pcbflow.proposals import (
     ProjectNotManagedError as ProposalProjectNotManagedError,
 )
 from pcbflow.repositories import (
@@ -48,11 +50,13 @@ from pcbflow.repositories import (
     TaskNotFoundError,
 )
 from pcbflow.requirement_store import RequirementSetNotFoundError
-from pcbflow.requirements import RequirementSet, RequirementsBlockedError
+from pcbflow.requirements import RequirementsBlockedError, RequirementSet
 from pcbflow.revisions import (
     GitOperationError,
-    ProjectNotManagedError as RevisionProjectNotManagedError,
     ProjectWorktreeDirtyError,
+)
+from pcbflow.revisions import (
+    ProjectNotManagedError as RevisionProjectNotManagedError,
 )
 from pcbflow.schematic.modules import ModuleRevisionNotFoundError
 from pcbflow.worker_health import read_worker_health_state
@@ -311,7 +315,7 @@ def project_add(
         authority = _authority_input(
             eda_kind, eda_profile_id, board_profile_id, rulepack_digest
         )
-        project, created = container.projects.create_with_status(
+        project, _created = container.projects.create_with_status(
             name, path, idempotency_key, authority
         )
     except Exception as error:
@@ -700,10 +704,10 @@ def approval_decide(
     subject_digest: Annotated[str, typer.Option("--subject-digest")],
     approve: Annotated[bool, typer.Option("--approve")] = False,
     reject: Annotated[bool, typer.Option("--reject")] = False,
-    actor_id: Annotated[str, typer.Option("--actor-id")] = None,
+    actor_id: Annotated[str | None, typer.Option("--actor-id")] = None,
     actor_type: Annotated[str, typer.Option("--actor-type")] = "human",
-    comment: Annotated[str, typer.Option("--comment")] = None,
-    idempotency_key: Annotated[str, typer.Option("--idempotency-key")] = None,
+    comment: Annotated[str | None, typer.Option("--comment")] = None,
+    idempotency_key: Annotated[str | None, typer.Option("--idempotency-key")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     if approve == reject:
@@ -817,10 +821,10 @@ def proposal_diff(
 def proposal_accept(
     proposal_id: str,
     candidate_digest: Annotated[str, typer.Option("--candidate-digest")],
-    actor_id: Annotated[str, typer.Option("--actor-id")] = None,
+    actor_id: Annotated[str | None, typer.Option("--actor-id")] = None,
     actor_type: Annotated[str, typer.Option("--actor-type")] = "human",
-    comment: Annotated[str, typer.Option("--comment")] = None,
-    idempotency_key: Annotated[str, typer.Option("--idempotency-key")] = None,
+    comment: Annotated[str | None, typer.Option("--comment")] = None,
+    idempotency_key: Annotated[str | None, typer.Option("--idempotency-key")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     if not actor_id or not comment or not idempotency_key:
@@ -852,9 +856,9 @@ def proposal_accept(
 def proposal_reject(
     proposal_id: str,
     reason: Annotated[str, typer.Option("--reason")],
-    actor_id: Annotated[str, typer.Option("--actor-id")] = None,
+    actor_id: Annotated[str | None, typer.Option("--actor-id")] = None,
     actor_type: Annotated[str, typer.Option("--actor-type")] = "human",
-    idempotency_key: Annotated[str, typer.Option("--idempotency-key")] = None,
+    idempotency_key: Annotated[str | None, typer.Option("--idempotency-key")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     if not actor_id or not idempotency_key:
@@ -1074,7 +1078,7 @@ def list_evidence(
 
 @worker_app.command("health")
 def worker_health(
-    worker_file: Annotated[str, typer.Option("--file")] = None,
+    worker_file: Annotated[str | None, typer.Option("--file")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Check worker health status. Use --file to read from worker state file."""

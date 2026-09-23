@@ -1,57 +1,57 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
-import json
 import hashlib
+import json
 import time
 from contextvars import ContextVar
-from pathlib import Path
+from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
 from pcbflow.artifacts import ArtifactDescriptor
 from pcbflow.canonical import canonical_digest, canonical_json_bytes
-from pcbflow.commands import ValidationKind, evaluate_precondition
-from pcbflow.commands import load_command_batch
+from pcbflow.commands import ValidationKind, evaluate_precondition, load_command_batch
 from pcbflow.component_bindings import (
     ComponentModuleBindingDigestMismatchError,
     ComponentModuleBindingKicadMajorMismatchError,
     ComponentModuleBindingNotFoundError,
 )
-from pcbflow.domain import ProjectMode, RequestInvalidError
+from pcbflow.domain import ProjectMode, RequestInvalidError, TaskLease
+from pcbflow.kicad import (
+    KicadCapability,
+    KicadCapabilityBoundPort,
+    KicadDesignFormatError,
+    KicadInputLimitError,
+    KicadOperationUnsupportedError,
+    KicadPort,
+    KicadUnavailableError,
+    parse_kicad_report,
+)
+from pcbflow.kicad_compatibility import profile_for_major
+from pcbflow.observability import MetricName, Metrics, bind_log_context
 from pcbflow.repositories import (
     IdempotencyConflictError,
     ProjectRepository,
     RevisionConflictError,
+    StaleLeaseError,
+    TaskRepository,
 )
 from pcbflow.requirement_store import RequirementStore
 from pcbflow.requirements import RequirementSetStatus
-from pcbflow.tasks import TerminalTaskError
-from pcbflow.repositories import StaleLeaseError, TaskRepository
-from pcbflow.domain import TaskLease
 from pcbflow.revisions import RevisionService
 from pcbflow.schematic.adapter import CstSchematicAdapter
-from pcbflow.schematic.diff import CommandAttribution, build_semantic_diff, semantic_diff_bytes
-from pcbflow.schematic.semantic import SchematicDocument, object_ref_key
-from pcbflow.kicad import (
-    KicadPort,
-    KicadCapabilityBoundPort,
-    KicadCapability,
-    KicadDesignFormatError,
-    KicadInputLimitError,
-    KicadOperationUnsupportedError,
-    parse_kicad_report,
-    KicadUnavailableError,
-    KicadOperationUnsupportedError,
+from pcbflow.schematic.diff import (
+    CommandAttribution,
+    build_semantic_diff,
+    semantic_diff_bytes,
 )
-from pcbflow.kicad_compatibility import profile_for_major
-from pcbflow.repositories import ProjectRepository
+from pcbflow.schematic.semantic import SchematicDocument, object_ref_key
+from pcbflow.tasks import TerminalTaskError
 from pcbflow.validation import assert_project_tree_safe
-from pcbflow.domain import ProjectMode
-from pcbflow.observability import MetricName, Metrics, bind_log_context
 
 
 class CandidateNotReviewableError(RuntimeError):
@@ -432,7 +432,6 @@ class ProposalExecutor:
         capability: KicadCapability | None = None
         capability_report: dict[str, object] | None = None
         command_execution_data: bytes | None = None
-        candidate_revision: str | None = None
         def add(kind, data, media="application/octet-stream", verdict="pass"):
             descriptor = self._put(data, media)
             evidence.append(
@@ -501,7 +500,7 @@ class ProposalExecutor:
             )
             with self._revisions.materialize(project.id, batch.base_revision, "proposal") as workspace:
                 self._revisions.assert_clean(project.id, batch.base_revision, workspace)
-                before_manifest = add("project_snapshot_before", self._manifest(workspace, self._revisions), "application/json")
+                add("project_snapshot_before", self._manifest(workspace, self._revisions), "application/json")
                 if (
                     not capability.available
                     or capability.version is None
@@ -653,13 +652,13 @@ class ProposalExecutor:
                 if parsed.findings:
                     evidence[-1] = EvidenceRegistration(erc_descriptor, EvidenceItem(kind="kicad_erc", artifact_digest=erc_descriptor.digest, media_type="application/json", verdict="fail"))
                 after_manifest = self._manifest(workspace, self._revisions)
-                after_descriptor = add(
+                add(
                     "project_snapshot_after", after_manifest, "application/json"
                 )
                 after_snapshot_digest = json.loads(after_manifest)["snapshot_digest"]
                 diff_bytes = self._revisions.git.diff_worktree(workspace)
                 self._hit_fault(FaultPoint.DURING_DIFF_ARTIFACT_SAVE)
-                diff_descriptor = add("git_text_diff", diff_bytes, "application/octet-stream")
+                add("git_text_diff", diff_bytes, "application/octet-stream")
                 if parsed.findings:
                     raise TerminalTaskError("CANDIDATE_VALIDATION_FAILED", "KiCad ERC reported findings")
                 self._tasks.assert_active(lease.task_id, lease.lease_token, self._clock())
@@ -678,7 +677,6 @@ class ProposalExecutor:
                     author_name=actor_name,
                     author_email=actor_email,
                 )
-                candidate_revision = candidate.revision
                 artifacts = tuple(item.item for item in evidence)
                 evidence_set = EvidenceSet(
                     project_id=project.id,
@@ -1094,7 +1092,7 @@ class ProposalDecisionService:
                 batch = self._command_batches.get(replay.command_batch_id)
                 raise RevisionConflictError(batch.base_revision, current.current_revision)
             return replay
-        project, batch, requirements, _items = self._validate_candidate(proposal, candidate_digest)
+        project, batch, _requirements, _items = self._validate_candidate(proposal, candidate_digest)
         # A changed base is deliberately resolved by the decision transaction
         # as a durable stale transition; reconciliation must not mask it with
         # a missing-object error for the externally advanced revision.

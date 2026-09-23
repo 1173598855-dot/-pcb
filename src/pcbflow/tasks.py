@@ -121,81 +121,80 @@ class Worker:
             task_id=lease.task_id,
             project_id=lease.payload.get("project_id"),
             trace_id=lease.payload.get("trace_id"),
-        ):
-            with task_cancellation_scope(lambda: self._is_cancelled(lease.task_id)):
-                try:
-                    if self._is_cancelled(lease.task_id):
-                        raise TaskCancelledError(lease.task_id)
-                    result = handler(lease)
-                    if self._is_cancelled(lease.task_id):
-                        raise TaskCancelledError(lease.task_id)
-                except TaskCancelledError:
-                    logger.info("task.cancelled", extra={"task_id": lease.task_id})
-                except RetryableTaskError as error:
-                    if not lease_lost.is_set():
-                        try:
-                            self._repository.fail(
-                                lease.task_id,
-                                lease.lease_token,
-                                error.code,
-                                True,
-                                self._clock(),
-                            )
-                        except StaleLeaseError:
-                            lease_lost.set()
-                except TerminalTaskError as error:
-                    if not lease_lost.is_set():
-                        try:
-                            self._repository.fail(
-                                lease.task_id,
-                                lease.lease_token,
-                                error.code,
-                                False,
-                                self._clock(),
-                            )
-                        except StaleLeaseError:
-                            lease_lost.set()
-                except StaleLeaseError:
-                    lease_lost.set()
-                    logger.warning(
-                        "task.lease_lost",
+        ), task_cancellation_scope(lambda: self._is_cancelled(lease.task_id)):
+            try:
+                if self._is_cancelled(lease.task_id):
+                    raise TaskCancelledError(lease.task_id)
+                result = handler(lease)
+                if self._is_cancelled(lease.task_id):
+                    raise TaskCancelledError(lease.task_id)
+            except TaskCancelledError:
+                logger.info("task.cancelled", extra={"task_id": lease.task_id})
+            except RetryableTaskError as error:
+                if not lease_lost.is_set():
+                    try:
+                        self._repository.fail(
+                            lease.task_id,
+                            lease.lease_token,
+                            error.code,
+                            True,
+                            self._clock(),
+                        )
+                    except StaleLeaseError:
+                        lease_lost.set()
+            except TerminalTaskError as error:
+                if not lease_lost.is_set():
+                    try:
+                        self._repository.fail(
+                            lease.task_id,
+                            lease.lease_token,
+                            error.code,
+                            False,
+                            self._clock(),
+                        )
+                    except StaleLeaseError:
+                        lease_lost.set()
+            except StaleLeaseError:
+                lease_lost.set()
+                logger.warning(
+                    "task.lease_lost",
+                    extra={"task_id": lease.task_id},
+                )
+            except Exception:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "task.unhandled_error",
+                    error_code="UNHANDLED_TASK_ERROR",
+                    result="failed",
+                )
+                if not lease_lost.is_set():
+                    try:
+                        self._repository.fail(
+                            lease.task_id,
+                            lease.lease_token,
+                            "UNHANDLED_TASK_ERROR",
+                            False,
+                            self._clock(),
+                        )
+                    except StaleLeaseError:
+                        lease_lost.set()
+            else:
+                if not lease_lost.is_set():
+                    try:
+                        self._repository.complete(
+                            lease.task_id, lease.lease_token, result, self._clock()
+                        )
+                    except StaleLeaseError:
+                        lease_lost.set()
+            finally:
+                stop_heartbeat.set()
+                heartbeat_thread.join(
+                    timeout=max(1.0, min(5.0, heartbeat_interval * 2))
+                )
+                if heartbeat_thread.is_alive():
+                    logger.error(
+                        "task.lease_heartbeat_did_not_stop",
                         extra={"task_id": lease.task_id},
                     )
-                except Exception:
-                    log_event(
-                        logger,
-                        logging.ERROR,
-                        "task.unhandled_error",
-                        error_code="UNHANDLED_TASK_ERROR",
-                        result="failed",
-                    )
-                    if not lease_lost.is_set():
-                        try:
-                            self._repository.fail(
-                                lease.task_id,
-                                lease.lease_token,
-                                "UNHANDLED_TASK_ERROR",
-                                False,
-                                self._clock(),
-                            )
-                        except StaleLeaseError:
-                            lease_lost.set()
-                else:
-                    if not lease_lost.is_set():
-                        try:
-                            self._repository.complete(
-                                lease.task_id, lease.lease_token, result, self._clock()
-                            )
-                        except StaleLeaseError:
-                            lease_lost.set()
-                finally:
-                    stop_heartbeat.set()
-                    heartbeat_thread.join(
-                        timeout=max(1.0, min(5.0, heartbeat_interval * 2))
-                    )
-                    if heartbeat_thread.is_alive():
-                        logger.error(
-                            "task.lease_heartbeat_did_not_stop",
-                            extra={"task_id": lease.task_id},
-                        )
         return True

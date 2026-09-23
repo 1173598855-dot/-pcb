@@ -19,7 +19,6 @@ from pcbflow.kicad_export import (
 )
 from pcbflow.process import ProcessRunner
 
-
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "kicad" / "real" / "10" / "validation"
 
 

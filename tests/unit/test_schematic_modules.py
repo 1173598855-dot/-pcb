@@ -15,12 +15,6 @@ from pcbflow.schematic.adapter import (
     CstSchematicAdapter,
     DesignCommandUnsupportedError,
 )
-from pcbflow.schematic.modules import (
-    FileModuleCatalog,
-    ModuleIntegrityError,
-    ModuleRevisionNotFoundError,
-    derive_module_uuid,
-)
 from pcbflow.schematic.cst import (
     apply_edits,
     insert_before_close,
@@ -30,8 +24,13 @@ from pcbflow.schematic.cst import (
     parse_cst,
 )
 from pcbflow.schematic.diff import ChangeKind
+from pcbflow.schematic.modules import (
+    FileModuleCatalog,
+    ModuleIntegrityError,
+    ModuleRevisionNotFoundError,
+    derive_module_uuid,
+)
 from pcbflow.schematic.semantic import KicadSemanticError, object_ref_key
-
 
 TEMPLATE_DIGEST = "sha256:af9e40b8da5a63158a95cff1d222eb8c7ce57e05e88759df50dacfc775ccfe4e"
 

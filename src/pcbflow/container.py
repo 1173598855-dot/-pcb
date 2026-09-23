@@ -1,16 +1,16 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-import time
 
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from alembic import command
 from pcbflow.approvals import ApprovalService, GateDecisionStore, PcbApprovalService
 from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.board.adapter import PcbEdaAdapter
@@ -21,16 +21,11 @@ from pcbflow.component_store import ComponentRevisionStore
 from pcbflow.components import ComponentRevisionService
 from pcbflow.config import Settings
 from pcbflow.db import create_engine_and_session
-from pcbflow.eda_authority_store import ProjectEdaAuthorityStore
 from pcbflow.domain import new_id, utc_now
-from pcbflow.observability import Metrics
+from pcbflow.eda_authority_store import ProjectEdaAuthorityStore
 from pcbflow.kicad import KicadCli, KicadPort
 from pcbflow.lceda_pro import LcedaProAdapter
-from pcbflow.pcb_workflow import (
-    LCEDA_CAPABILITY_TASK_KIND,
-    CapabilityGateService,
-    CapabilityProbeTaskHandler,
-)
+from pcbflow.observability import Metrics
 from pcbflow.pcb_candidates import (
     PCB_GENERATE_CANDIDATE_TASK_KIND,
     PcbCandidateExecutionTaskHandler,
@@ -42,6 +37,11 @@ from pcbflow.pcb_release import (
     PcbReleaseService,
     PcbReleaseTaskHandler,
 )
+from pcbflow.pcb_workflow import (
+    LCEDA_CAPABILITY_TASK_KIND,
+    CapabilityGateService,
+    CapabilityProbeTaskHandler,
+)
 from pcbflow.process import ProcessRunner
 from pcbflow.proposal_store import CommandBatchStore, ProposalStore
 from pcbflow.proposals import (
@@ -52,9 +52,6 @@ from pcbflow.proposals import (
     ProposalExecutor,
     ProposalService,
 )
-from pcbflow.schematic.adapter import CstSchematicAdapter
-from pcbflow.schematic.modules import FileModuleCatalog
-from pcbflow.revision_store import ProjectRevisionStore
 from pcbflow.repositories import (
     EvidenceRepository,
     FindingRepository,
@@ -62,7 +59,10 @@ from pcbflow.repositories import (
     TaskRepository,
 )
 from pcbflow.requirement_store import RequirementService, RequirementStore
+from pcbflow.revision_store import ProjectRevisionStore
 from pcbflow.revisions import GitCli, RevisionReconciler, RevisionService
+from pcbflow.schematic.adapter import CstSchematicAdapter
+from pcbflow.schematic.modules import FileModuleCatalog
 from pcbflow.tasks import Worker
 from pcbflow.validation import (
     VALIDATION_TASK_KIND,

@@ -10,23 +10,22 @@ from sqlalchemy import select, update
 
 from pcbflow.approvals import ApprovalDigestMismatchError
 from pcbflow.canonical import canonical_json_bytes
+from pcbflow.design_tables import ChangeProposalRow, OutboxEventRow
 from pcbflow.domain import RequestInvalidError
+from pcbflow.observability import MetricName
 from pcbflow.proposals import (
+    READY_EVIDENCE_MEDIA_TYPES,
+    CandidateNotReviewableError,
     EvidenceItem,
     EvidenceRegistration,
     EvidenceSet,
     ProposalDecisionService,
-    CandidateNotReviewableError,
     ProposalStatus,
-    READY_EVIDENCE_MEDIA_TYPES,
     proposal_review_digest,
 )
 from pcbflow.repositories import RevisionConflictError
-from pcbflow.design_tables import ChangeProposalRow, OutboxEventRow
-from pcbflow.tables import ArtifactRow, EvidenceRow
 from pcbflow.revisions import RevisionReconciler
-from pcbflow.observability import MetricName
-
+from pcbflow.tables import ArtifactRow, EvidenceRow
 
 NOW = datetime(2026, 7, 29, 13, 0, tzinfo=UTC)
 

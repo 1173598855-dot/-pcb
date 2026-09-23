@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -963,7 +964,7 @@ def _wire_points(node: CstList, path: Path) -> tuple[Point, ...]:
 def _point_on_wire(point: Point, wire_points: tuple[Point, ...]) -> bool:
     return any(
         _point_on_segment(point, start, end)
-        for start, end in zip(wire_points, wire_points[1:])
+        for start, end in itertools.pairwise(wire_points)
     )
 
 

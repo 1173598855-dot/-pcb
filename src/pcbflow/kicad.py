@@ -12,7 +12,7 @@ from pcbflow.canonical import hash_file
 from pcbflow.domain import NormalizedFinding, ValidationReport
 from pcbflow.kicad_compatibility import (
     KicadCompatibilityProfile,
-    KicadOperationUnsupportedError,
+    KicadOperationUnsupportedError,  # noqa: F401  re-exported for proposals
     select_kicad_profile,
 )
 from pcbflow.process import ProcessPort, ProcessTimeoutError

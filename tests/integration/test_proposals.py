@@ -6,10 +6,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy import update
 
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.config import Settings
 from pcbflow.container import build_container
+from pcbflow.design_tables import ChangeProposalRow
 from pcbflow.domain import TaskLease, TaskStatus
 from pcbflow.kicad import (
     KicadCapability,
@@ -18,13 +20,11 @@ from pcbflow.kicad import (
     RawValidationReport,
 )
 from pcbflow.observability import MetricName
-from pcbflow.design_tables import ChangeProposalRow
 from pcbflow.proposals import EvidenceSet, ProposalExecutor, ProposalStatus
 from pcbflow.repositories import StaleLeaseError
-from pcbflow.validation import ProjectCopyLimitError, assert_project_tree_safe
 from pcbflow.tables import ArtifactRow, EvidenceRow, TaskRow
-from sqlalchemy import update
 from pcbflow.tasks import TerminalTaskError
+from pcbflow.validation import ProjectCopyLimitError, assert_project_tree_safe
 from tests.component_fixtures import build_component_directory
 
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
@@ -765,7 +765,7 @@ def test_ready_replay_rejects_corrupted_evidence_object(tmp_path: Path) -> None:
         _source, project, requirement_set = _prepare(container, tmp_path)
         proposal = container.proposals.create(_instantiate_batch(project, requirement_set), "execute-status-led")
         assert container.worker.run_once()
-        ready = container.proposal_store.get(proposal.id)
+        container.proposal_store.get(proposal.id)
         evidence = next(item for item in container.evidence.list_for_project(project.id) if item.task_id == proposal.task_id)
         Path(container.artifacts._path(evidence.artifact_digest)).write_bytes(b"corrupt replay evidence")
         replay_token = "replay-token"

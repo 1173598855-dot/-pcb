@@ -27,7 +27,6 @@ from pcbflow.proposals import (
 )
 from tests.component_fixtures import build_component_directory
 
-
 PASSING_ERC = b'{"version":"1.0","source":"board.kicad_sch","violations":[]}'
 NOW = datetime(2026, 7, 29, 14, 0, tzinfo=UTC)
 

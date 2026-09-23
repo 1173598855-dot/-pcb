@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import json
-import time
 from datetime import UTC, datetime
 from pathlib import Path
-
-import pytest
 
 from pcbflow.config import Settings
 from pcbflow.container import build_container
 from pcbflow.domain import TaskStatus
-from pcbflow.worker_service import CycleResult, WorkerService, WorkerState
+from pcbflow.worker_service import WorkerService, WorkerState
 
 
 def test_worker_starts_in_idle_state(tmp_path: Path) -> None:

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import math
 import random
-from typing import Mapping
+from collections.abc import Mapping
+from dataclasses import dataclass
 
 from ortools.sat.python import cp_model
 
@@ -14,7 +14,6 @@ from pcbflow.domain import NormalizedFinding
 from .ir import BoardObjectId, BoardSnapshot, Footprint, PointUm, RectUm
 from .operations import FootprintPlacement, PlaceFootprints
 from .rulepack import ManufacturingRulePack
-
 
 _GRID_UM = 5_000
 _OBJECTIVE_VERSION = "placement-v1"
@@ -28,7 +27,7 @@ class DoubledRectUm:
     width: int
     height: int
 
-    def intersects(self, other: "DoubledRectUm | RectUm") -> bool:
+    def intersects(self, other: DoubledRectUm | RectUm) -> bool:
         if isinstance(other, RectUm):
             other = _doubled_rect(other)
         if not isinstance(other, DoubledRectUm):
@@ -646,8 +645,8 @@ def _placement_key(placements: Mapping[str, PointUm]) -> tuple[tuple[str, int, i
 
 
 __all__ = [
-    "PlacementEvidence",
     "DoubledRectUm",
+    "PlacementEvidence",
     "PlacementResult",
     "PlacementSeedEvidence",
     "PlacementSolver",

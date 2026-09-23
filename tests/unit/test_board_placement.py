@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,8 +15,11 @@ from pcbflow.board import (
     PointUm,
     RectUm,
 )
-from pcbflow.board.placement import PlacementSolver, connector_access_penalty, thermal_cluster_penalty
-
+from pcbflow.board.placement import (
+    PlacementSolver,
+    connector_access_penalty,
+    thermal_cluster_penalty,
+)
 
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "boardir"
 

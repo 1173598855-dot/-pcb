@@ -5,10 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from pcbflow.board import BoardObjectId, FootprintPlacement, PlaceFootprints, PointUm, RouteNets
+from pcbflow.board import (
+    BoardObjectId,
+    FootprintPlacement,
+    PlaceFootprints,
+    PointUm,
+    RouteNets,
+)
 from pcbflow.board.adapter import BoardSemanticMismatchError
 from pcbflow.board.fixture_adapter import FixtureBoardAdapter
-
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "boardir" / "stm32-environment-controller-2l-v1.json"
 

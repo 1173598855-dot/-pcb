@@ -13,17 +13,17 @@ from pcbflow.artifacts import ArtifactDescriptor, ContentAddressedStore
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.design_tables import RequirementSetRow
 from pcbflow.domain import ProjectMode, RequestInvalidError, new_id, utc_now
+from pcbflow.observability import MetricName, Metrics
 from pcbflow.repositories import (
     IdempotencyConflictError,
     ProjectRepository,
     RevisionConflictError,
 )
-from pcbflow.observability import MetricName, Metrics
 from pcbflow.requirements import (
+    RequirementsBlockedError,
     RequirementSet,
     RequirementSetPayload,
     RequirementSetStatus,
-    RequirementsBlockedError,
     load_rendered_requirement_files,
     load_requirement_payload,
     render_requirement_files,
@@ -31,7 +31,6 @@ from pcbflow.requirements import (
 )
 from pcbflow.revisions import ProjectNotManagedError, RevisionService
 from pcbflow.tables import ArtifactRow
-
 
 _REQUIREMENT_MEDIA_TYPE = "application/vnd.pcbflow.requirements+json"
 

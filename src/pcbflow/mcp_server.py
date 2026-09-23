@@ -8,12 +8,12 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from mcp.server.mcpserver import MCPServer
-from mcp.types import CallToolResult, ListToolsResult, Tool
+from mcp.types import CallToolResult, TextContent
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +24,8 @@ _HEALTH_TIMEOUT_SECONDS = 5.0
 
 
 def _post_json_sync(
-    url: str, payload: Dict[str, Any], headers: Dict[str, str], label: str
-) -> Dict[str, Any]:
+    url: str, payload: dict[str, Any], headers: dict[str, str], label: str
+) -> dict[str, Any]:
     """POST ``payload`` as JSON and decode the JSON response.
 
     Uses the standard library so the server keeps working without pulling an
@@ -53,8 +53,8 @@ def _post_json_sync(
 
 
 async def _post_json(
-    url: str, payload: Dict[str, Any], headers: Dict[str, str], label: str
-) -> Dict[str, Any]:
+    url: str, payload: dict[str, Any], headers: dict[str, str], label: str
+) -> dict[str, Any]:
     return await asyncio.to_thread(_post_json_sync, url, payload, headers, label)
 
 
@@ -82,7 +82,7 @@ class ModelConfig:
     max_tokens: int = 4000
     temperature: float = 0.7
     priority: CollaborationPriority = CollaborationPriority.PRIMARY
-    health_check_url: Optional[str] = None
+    health_check_url: str | None = None
     capabilities: tuple[str, ...] = ()
 
 
@@ -103,7 +103,7 @@ class ModelHealthState:
     healthy: bool = True
     last_check: float = 0.0
     failure_count: int = 0
-    last_failure: Optional[float] = None
+    last_failure: float | None = None
 
 
 @dataclass(slots=True)
@@ -118,18 +118,18 @@ class CircuitBreakerState:
 class MultiModelRouter:
     _DEFAULT_BREAKER_THRESHOLD = 5
 
-    def __init__(self, chains: Dict[str, CollaborationChain]) -> None:
+    def __init__(self, chains: dict[str, CollaborationChain]) -> None:
         self._chains = chains
-        self._health: Dict[str, ModelHealthState] = {}
-        self._circuit_breakers: Dict[str, CircuitBreakerState] = {}
+        self._health: dict[str, ModelHealthState] = {}
+        self._circuit_breakers: dict[str, CircuitBreakerState] = {}
         self._lock = asyncio.Lock()
 
     async def route_task(
         self,
         chain_name: str,
-        task: Dict[str, Any],
-        context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        task: dict[str, Any],
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if chain_name not in self._chains:
             raise ValueError(f"Collaboration chain not found: {chain_name}")
 
@@ -138,7 +138,7 @@ class MultiModelRouter:
         if not await self._is_chain_available(chain_name):
             raise RuntimeError(f"Collaboration chain unavailable: {chain_name}")
 
-        last_exception: Optional[Exception] = None
+        last_exception: Exception | None = None
         for attempt in range(chain.max_attempts):
             model = self._select_model(chain, attempt)
             try:
@@ -195,9 +195,9 @@ class MultiModelRouter:
     async def _call_model(
         self,
         model: ModelConfig,
-        task: Dict[str, Any],
-        context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        task: dict[str, Any],
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not await self._is_model_healthy(model):
             raise RuntimeError(f"Model {model.name} is not healthy")
 
@@ -214,9 +214,9 @@ class MultiModelRouter:
     async def _call_openai(
         self,
         model: ModelConfig,
-        task: Dict[str, Any],
-        context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        task: dict[str, Any],
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         try:
             from openai import AsyncOpenAI
         except ImportError as exc:
@@ -247,9 +247,9 @@ class MultiModelRouter:
     async def _call_anthropic(
         self,
         model: ModelConfig,
-        task: Dict[str, Any],
-        context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        task: dict[str, Any],
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         try:
             from anthropic import AsyncAnthropic
         except ImportError as exc:
@@ -280,11 +280,11 @@ class MultiModelRouter:
     async def _call_local(
         self,
         model: ModelConfig,
-        task: Dict[str, Any],
-        context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        task: dict[str, Any],
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         api_key = os.environ.get(model.api_key_env, "default")
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "model": model.model_name,
             "messages": self._build_messages(model, task, context),
             "max_tokens": model.max_tokens,
@@ -304,11 +304,11 @@ class MultiModelRouter:
     async def _call_azure(
         self,
         model: ModelConfig,
-        task: Dict[str, Any],
-        context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        task: dict[str, Any],
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         api_key = os.environ.get(model.api_key_env, "")
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "model": model.model_name,
             "messages": self._build_messages(model, task, context),
             "max_tokens": model.max_tokens,
@@ -328,12 +328,12 @@ class MultiModelRouter:
     def _build_messages(
         self,
         model: ModelConfig,
-        task: Dict[str, Any],
-        context: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict[str, str]]:
+        task: dict[str, Any],
+        context: dict[str, Any] | None = None,
+    ) -> list[dict[str, str]]:
         system_prompt = self._get_system_prompt(model)
         user_prompt = self._build_user_prompt(model, task, context)
-        messages: List[Dict[str, str]] = []
+        messages: list[dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": user_prompt})
@@ -342,8 +342,8 @@ class MultiModelRouter:
     def _build_user_prompt(
         self,
         model: ModelConfig,
-        task: Dict[str, Any],
-        context: Optional[Dict[str, Any]] = None,
+        task: dict[str, Any],
+        context: dict[str, Any] | None = None,
     ) -> str:
         return json.dumps({"task": task, "context": context}, ensure_ascii=False)
 
@@ -425,28 +425,28 @@ class MultiModelRouter:
 
 class CollaborationPersistence:
     def __init__(self) -> None:
-        self._states: Dict[str, Dict[str, Any]] = {}
-        self._history: List[Dict[str, Any]] = []
+        self._states: dict[str, dict[str, Any]] = {}
+        self._history: list[dict[str, Any]] = []
         self._lock = asyncio.Lock()
 
-    async def save_state(self, key: str, value: Dict[str, Any]) -> None:
+    async def save_state(self, key: str, value: dict[str, Any]) -> None:
         async with self._lock:
             self._states[key] = value
         logger.info("Persisted state: %s", key)
 
-    async def load_state(self, key: str) -> Dict[str, Any]:
+    async def load_state(self, key: str) -> dict[str, Any]:
         async with self._lock:
             if key not in self._states:
                 raise KeyError(f"State not found: {key}")
             return dict(self._states[key])
 
-    async def append_history(self, entry: Dict[str, Any]) -> None:
+    async def append_history(self, entry: dict[str, Any]) -> None:
         async with self._lock:
             self._history.append(entry)
 
     async def get_history(
-        self, collaboration_id: Optional[str] = None, limit: int = 10
-    ) -> List[Dict[str, Any]]:
+        self, collaboration_id: str | None = None, limit: int = 10
+    ) -> list[dict[str, Any]]:
         async with self._lock:
             if collaboration_id is None:
                 return self._history[-limit:]
@@ -458,12 +458,12 @@ class CollaborationPersistence:
 
 
 class MCPCollaborationServer:
-    def __init__(self, settings: Dict[str, Any]) -> None:
+    def __init__(self, settings: dict[str, Any]) -> None:
         self._settings = settings
         self._router = MultiModelRouter(self._load_chains())
         self._persistence = CollaborationPersistence()
 
-    def _load_chains(self) -> Dict[str, CollaborationChain]:
+    def _load_chains(self) -> dict[str, CollaborationChain]:
         return {
             "task_planning": CollaborationChain(
                 chain_name="task_planning",
@@ -545,9 +545,9 @@ class MCPCollaborationServer:
     async def process_task(
         self,
         chain_name: str,
-        task_data: Dict[str, Any],
-        project_context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        task_data: dict[str, Any],
+        project_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         collaboration_id = f"collab_{int(time.monotonic())}_{chain_name}"
 
         try:
@@ -559,7 +559,7 @@ class MCPCollaborationServer:
                     "chain_name": chain_name,
                     "model": result.get("model", "unknown"),
                     "task_type": chain_name,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": datetime.now(UTC).isoformat(),
                     "result": result,
                 }
             )
@@ -568,7 +568,7 @@ class MCPCollaborationServer:
                 "collaboration_id": collaboration_id,
                 "status": "completed",
                 "result": result,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
         except Exception as exc:
             logger.error("Collaboration failed for %s: %s", collaboration_id, exc)
@@ -579,7 +579,7 @@ class MCPCollaborationServer:
                     "chain_name": chain_name,
                     "model": "failed",
                     "task_type": chain_name,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": datetime.now(UTC).isoformat(),
                     "error": str(exc),
                 }
             )
@@ -588,87 +588,17 @@ class MCPCollaborationServer:
                 "collaboration_id": collaboration_id,
                 "status": "failed",
                 "error": str(exc),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
 
 
-def _make_enhanced_tools() -> List[Tool]:
-    return [
-        Tool(
-            name="pcbflow_register_project",
-            description="Register a local PCB project with enhanced AI collaboration support",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "type": {"type": "string", "enum": ["kicad", "lceda", "easyeda", "zhongan", "others"]},
-                    "description": {"type": "string"},
-                    "collaboration_mode": {"type": "string", "enum": ["auto", "primary_only", "fallback_enabled"]},
-                },
-                "required": ["path", "type"],
-            },
-        ),
-        Tool(
-            name="pcbflow_run_workflow",
-            description="Run a PCB workflow with intelligent AI model selection and fallback",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "project_id": {"type": "string"},
-                    "workflow_name": {"type": "string"},
-                    "parameters": {"type": "object"},
-                    "collaboration_chain": {"type": "string"},
-                    "use_primary_only": {"type": "boolean"},
-                    "language": {"type": "string"},
-                },
-                "required": ["project_id", "workflow_name"],
-            },
-        ),
-        Tool(
-            name="pcbflow_query_chains",
-            description="Query available AI collaboration chains and their models",
-            inputSchema={
-                "type": "object",
-                "properties": {"chain_name": {"type": "string"}},
-            },
-        ),
-        Tool(
-            name="pcbflow_list_history",
-            description="List collaboration history with intelligent model usage",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "collaboration_id": {"type": "string"},
-                    "limit": {"type": "number", "default": 10},
-                },
-            },
-        ),
-        Tool(
-            name="pcbflow_list_projects",
-            description="List registered PCB projects",
-            inputSchema={"type": "object", "properties": {"eda_type": {"type": "string"}}},
-        ),
-        Tool(
-            name="pcbflow_read_artifacts",
-            description="Read project evidence artifacts",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "project_id": {"type": "string"},
-                    "artifact_type": {"type": "string"},
-                },
-                "required": ["project_id"],
-            },
-        ),
-        Tool(
-            name="pcbflow_query_eda_capabilities",
-            description="Query EDA capabilities",
-            inputSchema={"type": "object", "properties": {"eda_type": {"type": "string"}}},
-        ),
-    ]
+def _text_result(payload: dict[str, Any]) -> CallToolResult:
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
+    )
 
 
-async def _handle_register_project(args: Dict[str, Any]) -> CallToolResult:
+async def _handle_register_project(args: dict[str, Any]) -> CallToolResult:
     project_id = f"proj_{hash(str(args.get('path', ''))) % 10000}"
     result = {
         "project_id": project_id,
@@ -677,13 +607,13 @@ async def _handle_register_project(args: Dict[str, Any]) -> CallToolResult:
         "description": args.get("description"),
         "status": "created",
         "collaboration_mode": args.get("collaboration_mode", "auto"),
-        "created_at": datetime.now(timezone.utc).strftime(ISO_FORMAT),
+        "created_at": datetime.now(UTC).strftime(ISO_FORMAT),
         "supported_ai": ["claude-3-5-sonnet", "gpt-4o", "mistral-large", "codellama-34b"],
     }
-    return CallToolResult(content=[{"type": "text", "text": json.dumps(result, ensure_ascii=False)}])
+    return _text_result(result)
 
 
-async def _handle_run_workflow(args: Dict[str, Any], server: MCPCollaborationServer) -> CallToolResult:
+async def _handle_run_workflow(args: dict[str, Any], server: MCPCollaborationServer) -> CallToolResult:
     chain_name = args.get("collaboration_chain", "task_planning")
     project_context = {"project_id": args.get("project_id"), "workflow_name": args.get("workflow_name")}
     task_data = {
@@ -692,18 +622,16 @@ async def _handle_run_workflow(args: Dict[str, Any], server: MCPCollaborationSer
         "use_primary_only": args.get("use_primary_only", False),
     }
     result = await server.process_task(chain_name, task_data, project_context)
-    return CallToolResult(content=[{"type": "text", "text": json.dumps(result, ensure_ascii=False)}])
+    return _text_result(result)
 
 
-async def _handle_query_chains(args: Dict[str, Any], server: MCPCollaborationServer) -> CallToolResult:
+async def _handle_query_chains(args: dict[str, Any], server: MCPCollaborationServer) -> CallToolResult:
     chain_name = args.get("chain_name")
     chains = server._router._chains
 
     if chain_name:
         if chain_name not in chains:
-            return CallToolResult(
-                content=[{"type": "text", "text": json.dumps({"error": f"Chain not found: {chain_name}"}, ensure_ascii=False)}]
-            )
+            return _text_result({"error": f"Chain not found: {chain_name}"})
         chain = chains[chain_name]
         result = {
             "chain_name": chain.chain_name,
@@ -745,28 +673,28 @@ async def _handle_query_chains(args: Dict[str, Any], server: MCPCollaborationSer
                 for name, chain in chains.items()
             }
         }
-    return CallToolResult(content=[{"type": "text", "text": json.dumps(result, ensure_ascii=False)}])
+    return _text_result(result)
 
 
-async def _handle_list_history(args: Dict[str, Any], server: MCPCollaborationServer) -> CallToolResult:
+async def _handle_list_history(args: dict[str, Any], server: MCPCollaborationServer) -> CallToolResult:
     collab_id = args.get("collaboration_id")
     limit = int(args.get("limit", 10))
     history = await server._persistence.get_history(collab_id, limit)
     result = {"collaboration_id": collab_id, "total": len(history), "limit": limit, "entries": history}
-    return CallToolResult(content=[{"type": "text", "text": json.dumps(result, ensure_ascii=False)}])
+    return _text_result(result)
 
 
-async def _handle_list_projects(args: Dict[str, Any]) -> CallToolResult:
-    result = {"projects": [], "total": 0, "note": "No persistent project store in this MCP server"}
-    return CallToolResult(content=[{"type": "text", "text": json.dumps(result, ensure_ascii=False)}])
+async def _handle_list_projects(args: dict[str, Any]) -> CallToolResult:
+    result: dict[str, Any] = {"projects": [], "total": 0, "note": "No persistent project store in this MCP server"}
+    return _text_result(result)
 
 
-async def _handle_read_artifacts(args: Dict[str, Any]) -> CallToolResult:
-    result = {"project_id": args.get("project_id"), "artifacts": [], "total": 0}
-    return CallToolResult(content=[{"type": "text", "text": json.dumps(result, ensure_ascii=False)}])
+async def _handle_read_artifacts(args: dict[str, Any]) -> CallToolResult:
+    result: dict[str, Any] = {"project_id": args.get("project_id"), "artifacts": [], "total": 0}
+    return _text_result(result)
 
 
-async def _handle_query_capabilities(args: Dict[str, Any]) -> CallToolResult:
+async def _handle_query_capabilities(args: dict[str, Any]) -> CallToolResult:
     capabilities = {
         "kicad": {"supported": True, "ai_assisted": True, "features": ["DRC", "ERC", "3D", "gerber"]},
         "lceda": {"supported": True, "ai_assisted": False, "features": ["DFM", "simulation", "import-export"]},
@@ -776,7 +704,7 @@ async def _handle_query_capabilities(args: Dict[str, Any]) -> CallToolResult:
     }
     eda_type = args.get("eda_type", "all")
     result = {"eda_capabilities": capabilities if eda_type == "all" else {eda_type: capabilities.get(eda_type, {})}}
-    return CallToolResult(content=[{"type": "text", "text": json.dumps(result, ensure_ascii=False)}])
+    return _text_result(result)
 
 
 app = MCPServer(
@@ -787,17 +715,16 @@ app = MCPServer(
         "and log operations to compatible AI assistants with multi-model "
         "routing and intelligent fallback."
     ),
-    tools=[],
     debug=False,
 )
 
-_collab_server: Optional[MCPCollaborationServer] = None
+_collab_server: MCPCollaborationServer | None = None
 
 
 def _init_collab_server() -> MCPCollaborationServer:
     global _collab_server
     if _collab_server is None:
-        settings: Dict[str, Any] = {
+        settings: dict[str, Any] = {
             "anthropic_api_key": os.environ.get("ANTHROPIC_API_KEY", ""),
             "openai_api_key": os.environ.get("OPENAI_API_KEY", ""),
         }
@@ -805,31 +732,100 @@ def _init_collab_server() -> MCPCollaborationServer:
     return _collab_server
 
 
-async def _on_list_tools() -> ListToolsResult:
-    return ListToolsResult(tools=_make_enhanced_tools())
+@app.tool(
+    name="pcbflow_register_project",
+    description="Register a local PCB project with enhanced AI collaboration support",
+)
+async def pcbflow_register_project(
+    path: str,
+    type: str,
+    description: str | None = None,
+    collaboration_mode: str | None = None,
+) -> str:
+    args = {
+        "path": path,
+        "type": type,
+        "description": description,
+        "collaboration_mode": collaboration_mode,
+    }
+    return json.dumps(await _handle_register_project(args), ensure_ascii=False)
 
 
-async def _on_call_tool(name: str, arguments: Dict[str, Any]) -> CallToolResult:
+@app.tool(
+    name="pcbflow_run_workflow",
+    description="Run a PCB workflow with intelligent AI model selection and fallback",
+)
+async def pcbflow_run_workflow(
+    project_id: str,
+    workflow_name: str,
+    parameters: dict[str, Any] | None = None,
+    collaboration_chain: str | None = None,
+    use_primary_only: bool = False,
+    language: str | None = None,
+) -> str:
+    args = {
+        "project_id": project_id,
+        "workflow_name": workflow_name,
+        "parameters": parameters or {},
+        "collaboration_chain": collaboration_chain,
+        "use_primary_only": use_primary_only,
+        "language": language,
+    }
     server = _init_collab_server()
-    if name == "pcbflow_register_project":
-        return await _handle_register_project(arguments)
-    if name == "pcbflow_run_workflow":
-        return await _handle_run_workflow(arguments, server)
-    if name == "pcbflow_query_chains":
-        return await _handle_query_chains(arguments, server)
-    if name == "pcbflow_list_history":
-        return await _handle_list_history(arguments, server)
-    if name == "pcbflow_list_projects":
-        return await _handle_list_projects(arguments)
-    if name == "pcbflow_read_artifacts":
-        return await _handle_read_artifacts(arguments)
-    if name == "pcbflow_query_eda_capabilities":
-        return await _handle_query_capabilities(arguments)
-    return CallToolResult(content=[{"type": "text", "text": json.dumps({"error": f"Unknown tool: {name}"}, ensure_ascii=False)}])
+    return json.dumps(await _handle_run_workflow(args, server), ensure_ascii=False)
 
 
-app.on_list_tools = _on_list_tools
-app.on_call_tool = _on_call_tool
+@app.tool(
+    name="pcbflow_query_chains",
+    description="Query available AI collaboration chains and their models",
+)
+async def pcbflow_query_chains(chain_name: str | None = None) -> str:
+    args = {"chain_name": chain_name}
+    server = _init_collab_server()
+    return json.dumps(await _handle_query_chains(args, server), ensure_ascii=False)
+
+
+@app.tool(
+    name="pcbflow_list_history",
+    description="List collaboration history with intelligent model usage",
+)
+async def pcbflow_list_history(
+    collaboration_id: str | None = None,
+    limit: int = 10,
+) -> str:
+    args = {"collaboration_id": collaboration_id, "limit": limit}
+    server = _init_collab_server()
+    return json.dumps(await _handle_list_history(args, server), ensure_ascii=False)
+
+
+@app.tool(
+    name="pcbflow_list_projects",
+    description="List registered PCB projects",
+)
+async def pcbflow_list_projects(eda_type: str | None = None) -> str:
+    args = {"eda_type": eda_type}
+    return json.dumps(await _handle_list_projects(args), ensure_ascii=False)
+
+
+@app.tool(
+    name="pcbflow_read_artifacts",
+    description="Read project evidence artifacts",
+)
+async def pcbflow_read_artifacts(
+    project_id: str,
+    artifact_type: str | None = None,
+) -> str:
+    args = {"project_id": project_id, "artifact_type": artifact_type}
+    return json.dumps(await _handle_read_artifacts(args), ensure_ascii=False)
+
+
+@app.tool(
+    name="pcbflow_query_eda_capabilities",
+    description="Query EDA capabilities",
+)
+async def pcbflow_query_eda_capabilities(eda_type: str | None = None) -> str:
+    args = {"eda_type": eda_type}
+    return json.dumps(await _handle_query_capabilities(args), ensure_ascii=False)
 
 
 def main() -> None:

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import time
 import os
 import stat
+import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime
@@ -11,23 +11,24 @@ from tempfile import TemporaryDirectory
 
 from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.domain import ProjectMode, Task, TaskLease, utc_now
-from pcbflow.observability import MetricName, Metrics, ensure_trace_id
 from pcbflow.kicad import (
-    KicadPort,
     KicadDesignFormatError,
     KicadInputLimitError,
     KicadOperationUnsupportedError,
+    KicadPort,
     KicadProjectNotFoundError,
     KicadToolError,
     KicadUnavailableError,
     parse_kicad_report,
 )
+from pcbflow.observability import MetricName, Metrics, ensure_trace_id
 from pcbflow.repositories import (
     EvidenceRepository,
     FindingRepository,
     ProjectRepository,
     TaskRepository,
 )
+from pcbflow.revisions import RevisionService
 from pcbflow.tasks import RetryableTaskError, TerminalTaskError
 from pcbflow.workspaces import (
     WorkspaceCopier,
@@ -35,7 +36,6 @@ from pcbflow.workspaces import (
     WorkspaceLimitError,
     WorkspaceLinkError,
 )
-from pcbflow.revisions import RevisionService
 
 VALIDATION_TASK_KIND = "kicad.read_only_validation"
 

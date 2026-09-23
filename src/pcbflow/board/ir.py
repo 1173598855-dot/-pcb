@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Mapping, Self
+from typing import Any, Self
 
 from pcbflow.canonical import canonical_json_bytes, sha256_digest
-
 
 JsonObject = dict[str, object]
 
@@ -121,7 +121,7 @@ def _canonicalize_object_lists(
 class BoardObjectId(str):
     __slots__ = ()
 
-    def __new__(cls, value: str) -> BoardObjectId:
+    def __new__(cls, value: str) -> Self:
         _require_string(value, "board object id")
         if len(value) > 128:
             raise ValueError("board object id is too long")
@@ -359,7 +359,7 @@ class RouteSegment:
     def angle_degrees(self) -> int:
         """The undirected segment orientation, stable modulo 180 degrees."""
         angle = math.degrees(math.atan2(self.end.y - self.start.y, self.end.x - self.start.x))
-        return int(round(angle)) % 180
+        return round(angle) % 180
 
 
 @dataclass(frozen=True, slots=True)
@@ -725,7 +725,7 @@ class BoardSnapshot:
         def check_layers(values: tuple[str, ...], subject: BoardObjectId) -> None:
             invalid = set(values) - layers
             if invalid:
-                raise ValueError(f"invalid layer for {subject}: {sorted(invalid)[0]}")
+                raise ValueError(f"invalid layer for {subject}: {min(invalid)}")
 
         for net in self.nets:
             if net.net_class not in net_class_ids:

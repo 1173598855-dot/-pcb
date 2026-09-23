@@ -17,7 +17,6 @@ from pcbflow.board import (
     validate_proposed_snapshot,
 )
 
-
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "boardir"
 
 

@@ -7,8 +7,8 @@ import pytest
 
 from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.components import (
-    ComponentRevisionService,
     ComponentRevision,
+    ComponentRevisionService,
     component_manifest_digest,
     load_component_manifest,
 )

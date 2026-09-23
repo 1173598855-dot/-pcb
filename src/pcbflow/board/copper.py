@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.domain import NormalizedFinding
 
+from . import geometry
 from .ir import (
     BoardObjectId,
     BoardSnapshot,
@@ -17,13 +18,11 @@ from .ir import (
     RectUm,
     RouteSegment,
     Via,
+    _validate_string_tuple,
 )
-from .ir import _validate_string_tuple
-from . import geometry
 from .operations import AddGroundStitching, CreateCopperZones, ThermalPolicy
 from .rulepack import CopperPolicy, ManufacturingRulePack
 from .validation import BoardRuleChecker
-
 
 _GND = BoardObjectId("GND")
 _OBJECTIVE_VERSION = "copper-v1-rect-tile-1"

@@ -8,16 +8,16 @@ from sqlalchemy import select
 
 from pcbflow.design_tables import OutboxEventRow
 from pcbflow.domain import ProjectMode
-from pcbflow.revisions import ProjectWorktreeDirtyError, RevisionService
-from pcbflow.revision_store import (
-    ProjectRevisionNotFoundError,
-    ProjectRevisionStore,
-)
 from pcbflow.repositories import (
     IdempotencyConflictError,
     ProjectRepository,
     RevisionConflictError,
 )
+from pcbflow.revision_store import (
+    ProjectRevisionNotFoundError,
+    ProjectRevisionStore,
+)
+from pcbflow.revisions import ProjectWorktreeDirtyError, RevisionService
 
 
 def test_project_can_be_marked_managed_and_revision_compared(

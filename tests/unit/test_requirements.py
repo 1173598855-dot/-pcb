@@ -15,7 +15,6 @@ from pcbflow.requirements import (
     requirement_digest,
 )
 
-
 VALID = b"""
 schema_version: "1.0"
 requirements:

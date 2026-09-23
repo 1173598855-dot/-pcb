@@ -18,8 +18,8 @@ from pcbflow.design_tables import GateDecisionRow, OutboxEventRow, RequirementSe
 from pcbflow.repositories import IdempotencyConflictError, RevisionConflictError
 from pcbflow.requirement_store import RequirementSetNotFoundError, RequirementStore
 from pcbflow.requirements import (
-    RequirementSetStatus,
     RequirementsBlockedError,
+    RequirementSetStatus,
     load_requirement_payload,
 )
 from pcbflow.revisions import ProjectNotManagedError

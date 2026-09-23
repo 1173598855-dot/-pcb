@@ -12,7 +12,6 @@ from pcbflow.schematic.semantic import (
     parse_schematic,
 )
 
-
 RESISTOR_LIBRARY = """(lib_symbols
   (symbol "Test:R"
     (symbol "Test:R_1_1"
@@ -111,7 +110,7 @@ def test_reused_child_file_creates_symbols_in_each_sheet_instance(tmp_path: Path
         encoding="utf-8",
     )
     (tmp_path / "child.kicad_sch").write_text(
-        """(kicad_sch
+        f"""(kicad_sch
   (version 20250114)
   (uuid 00000000-0000-0000-0000-000000000023)
   {RESISTOR_LIBRARY}
@@ -120,7 +119,7 @@ def test_reused_child_file_creates_symbols_in_each_sheet_instance(tmp_path: Path
     (property "Reference" "R1")
     (property "Value" "1k")
     (pin "1" (uuid 00000000-0000-0000-0000-000000000025))))
-""".format(RESISTOR_LIBRARY=RESISTOR_LIBRARY),
+""",
         encoding="utf-8",
     )
 
@@ -152,7 +151,7 @@ def test_reused_child_file_creates_symbols_in_each_sheet_instance(tmp_path: Path
 
 def test_wire_junction_and_label_extract_stable_net_connectivity(tmp_path: Path) -> None:
     (tmp_path / "board.kicad_sch").write_text(
-        """(kicad_sch
+        f"""(kicad_sch
   (version 20250114)
   (uuid 00000000-0000-0000-0000-000000000030)
   {RESISTOR_LIBRARY}
@@ -168,7 +167,7 @@ def test_wire_junction_and_label_extract_stable_net_connectivity(tmp_path: Path)
     (uuid 00000000-0000-0000-0000-000000000034))
   (label "NET" (at 3 2 0)
     (uuid 00000000-0000-0000-0000-000000000035)))
-""".format(RESISTOR_LIBRARY=RESISTOR_LIBRARY),
+""",
         encoding="utf-8",
     )
 

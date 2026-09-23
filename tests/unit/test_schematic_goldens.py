@@ -12,7 +12,6 @@ from pcbflow.schematic.cst import apply_edits, parse_cst
 from pcbflow.schematic.diff import CommandAttribution, build_semantic_diff
 from pcbflow.schematic.modules import FileModuleCatalog
 
-
 GOLDENS = (
     ("blank", "blank.kicad_sch"),
     ("simple", "simple.kicad_sch"),

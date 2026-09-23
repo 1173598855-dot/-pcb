@@ -12,10 +12,6 @@ from pcbflow.schematic.adapter import (
     LabelTargetError,
     PropertyWriteNotAllowedError,
 )
-from pcbflow.schematic.modules import (
-    FileModuleCatalog,
-    FootprintRevisionNotFoundError,
-)
 from pcbflow.schematic.cst import (
     apply_edits,
     insert_before_close,
@@ -23,6 +19,10 @@ from pcbflow.schematic.cst import (
     make_list,
     make_string,
     parse_cst,
+)
+from pcbflow.schematic.modules import (
+    FileModuleCatalog,
+    FootprintRevisionNotFoundError,
 )
 
 

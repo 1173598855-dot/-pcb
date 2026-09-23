@@ -40,8 +40,9 @@ def test_worker_tracks_available_slots(tmp_path: Path) -> None:
         assert len(worker.active_tasks) == 0
 
         # Mock an active task
-        from pcbflow.worker_service import TaskExecution
         from datetime import UTC, datetime
+
+        from pcbflow.worker_service import TaskExecution
 
         execution = TaskExecution(
             task_id="test-task-1",

@@ -1,7 +1,7 @@
-from datetime import UTC, datetime, timedelta
 import time
-from threading import Barrier, Event, Lock
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
+from threading import Barrier, Event, Lock
 
 import pytest
 from sqlalchemy import select
@@ -389,7 +389,7 @@ def test_worker_does_not_complete_after_heartbeat_database_failure(
     task_repository: TaskRepository,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    task = task_repository.enqueue("db-failure", {}, "db-heartbeat", None)
+    task_repository.enqueue("db-failure", {}, "db-heartbeat", None)
     failed = Event()
     completed = False
 
@@ -425,7 +425,7 @@ def test_worker_does_not_wait_unboundedly_for_a_blocked_heartbeat(
     task_repository: TaskRepository,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    task = task_repository.enqueue("blocked", {}, "blocked-heartbeat", None)
+    task_repository.enqueue("blocked", {}, "blocked-heartbeat", None)
     entered = Event()
     release = Event()
     original_renew = task_repository.renew

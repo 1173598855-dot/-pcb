@@ -130,7 +130,7 @@ def test_project_source_cannot_be_a_top_level_reparse_point(
     repository = ProjectRepository(session_factory)
     source = tmp_path / "reparse-source"
     source.mkdir()
-    metadata = source.lstat()
+    source.lstat()
     original_lstat = Path.lstat
 
     def reparse_source(path: Path):

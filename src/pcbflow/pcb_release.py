@@ -18,10 +18,21 @@ from sqlalchemy.orm import Session, sessionmaker
 from pcbflow.approvals import ApprovalDigestMismatchError, GateDecisionStore
 from pcbflow.artifacts import ArtifactDescriptor, ContentAddressedStore, StagedArtifact
 from pcbflow.board.adapter import CandidateWorkspace, PcbEdaAdapter, ReleaseArtifacts
-from pcbflow.canonical import canonical_json_bytes
 from pcbflow.cancellation import TaskCancelledError
+from pcbflow.canonical import canonical_json_bytes
 from pcbflow.design_tables import GateDecisionRow, PcbCandidateRow
-from pcbflow.domain import EdaKind, EdaOperation, NormalizedFinding, ProjectMode, RequestInvalidError, Task, TaskLease, ValidationReport, new_id, utc_now
+from pcbflow.domain import (
+    EdaKind,
+    EdaOperation,
+    NormalizedFinding,
+    ProjectMode,
+    RequestInvalidError,
+    Task,
+    TaskLease,
+    ValidationReport,
+    new_id,
+    utc_now,
+)
 from pcbflow.eda import validate_idempotency_key
 from pcbflow.lceda_pro import LcedaProCapabilityError
 from pcbflow.manufacturing import (
@@ -45,7 +56,6 @@ from pcbflow.pcb_candidates import (
 )
 from pcbflow.repositories import EvidenceRepository, StaleLeaseError, TaskRepository
 from pcbflow.tasks import TerminalTaskError
-
 
 _G4_APPROVAL_MEDIA_TYPE = "application/vnd.pcbflow.g4-approval+json"
 _NATIVE_RELEASE_KINDS = frozenset({"gerber", "drill", "bom", "cpl", "assembly"})
@@ -389,7 +399,7 @@ class PcbReleaseTaskHandler:
                     "candidate_digest": candidate.result["candidate_digest"],
                 },
                 _ReleasePublication(
-                    descriptors=tuple((*descriptors.values(), manifest_descriptor)),
+                    descriptors=(*descriptors.values(), manifest_descriptor),
                     staged=tuple(staged.values()),
                 ),
             )
