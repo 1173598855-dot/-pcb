@@ -1,2 +1,10 @@
+# Normalize all text files to LF in the repository and the working tree.
+* text=auto eol=lf
+
+# KiCad fixtures with pinned line endings (tested byte-for-byte).
 tests/fixtures/kicad/controlled-design/board.kicad_sch text eol=crlf
 tests/fixtures/modules/**/*.kicad_sch text eol=lf
+
+# Windows scripts keep CRLF.
+*.bat text eol=crlf
+*.ps1 text eol=crlf

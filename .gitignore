@@ -5,6 +5,9 @@
 .pytest_cache/
 .pytest-*/
 .pytest-*.txt
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
 .coverage
 .coverage-*
 htmlcov/
