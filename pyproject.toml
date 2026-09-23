@@ -11,6 +11,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
   "alembic>=1.14,<2",
   "fastapi>=0.115,<1",
+  "mcp>=1.0,<3",
   "ortools>=9.14,<10",
   "pydantic>=2.10,<3",
   "PyYAML>=6.0.2,<7",
