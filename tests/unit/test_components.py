@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from tests.component_fixtures import build_component_directory, component_yaml
 
 from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.components import (
@@ -12,7 +13,6 @@ from pcbflow.components import (
     component_manifest_digest,
     load_component_manifest,
 )
-from tests.component_fixtures import build_component_directory, component_yaml
 
 
 class _NeverCalledStore:

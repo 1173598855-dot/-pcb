@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 import httpx
+from tests.component_fixtures import build_component_directory
 from typer.testing import CliRunner
 
 import pcbflow.api as api_module
@@ -17,7 +18,6 @@ from pcbflow.domain import EdaKind
 from pcbflow.eda import ProjectEdaAuthorityInput
 from pcbflow.kicad import KicadCapability, RawValidationReport
 from pcbflow.process import ProcessResult
-from tests.component_fixtures import build_component_directory
 
 
 class FakeKicad:

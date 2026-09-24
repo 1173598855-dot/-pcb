@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy.orm import Session
+from tests.component_fixtures import build_component_directory, component_yaml
 
 from pcbflow.artifacts import _STREAM_CHUNK_BYTES, ArtifactDescriptor
 from pcbflow.canonical import canonical_json_bytes
@@ -15,7 +16,6 @@ from pcbflow.components import (
     load_component_manifest,
 )
 from pcbflow.repositories import IdempotencyConflictError
-from tests.component_fixtures import build_component_directory, component_yaml
 
 
 @pytest.fixture

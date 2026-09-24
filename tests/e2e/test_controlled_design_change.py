@@ -12,6 +12,7 @@ import pytest
 import yaml
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import func, select
+from tests.component_fixtures import build_component_directory
 
 from pcbflow.api import create_app
 from pcbflow.config import Settings
@@ -25,7 +26,6 @@ from pcbflow.proposals import (
     NoFaults,
     _fault_active,
 )
-from tests.component_fixtures import build_component_directory
 
 PASSING_ERC = b'{"version":"1.0","source":"board.kicad_sch","violations":[]}'
 NOW = datetime(2026, 7, 29, 14, 0, tzinfo=UTC)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import update
+from tests.component_fixtures import build_component_directory
 
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.config import Settings
@@ -25,7 +26,6 @@ from pcbflow.repositories import StaleLeaseError
 from pcbflow.tables import ArtifactRow, EvidenceRow, TaskRow
 from pcbflow.tasks import TerminalTaskError
 from pcbflow.validation import ProjectCopyLimitError, assert_project_tree_safe
-from tests.component_fixtures import build_component_directory
 
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
 PASSING_ERC = b'{"version":"1.0","source":"board.kicad_sch","violations":[]}'

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from tests.component_fixtures import build_component_directory
 
 from pcbflow.component_binding_store import (
     ComponentModuleBindingConflictError,
@@ -19,7 +20,6 @@ from pcbflow.config import Settings
 from pcbflow.container import build_container
 from pcbflow.repositories import IdempotencyConflictError
 from pcbflow.schematic.modules import FileModuleCatalog
-from tests.component_fixtures import build_component_directory
 
 
 def _import_component(container):

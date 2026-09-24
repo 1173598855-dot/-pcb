@@ -6,13 +6,13 @@ import shutil
 from pathlib import Path
 
 import httpx
+from tests.component_fixtures import build_component_directory
 from typer.testing import CliRunner
 
 from pcbflow.api import create_app
 from pcbflow.cli import app
 from pcbflow.config import Settings
 from pcbflow.container import build_container
-from tests.component_fixtures import build_component_directory
 
 
 def _settings(
