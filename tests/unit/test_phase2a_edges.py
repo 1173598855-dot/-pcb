@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import UTC, datetime
 from io import BytesIO
@@ -24,6 +25,8 @@ from pcbflow.kicad import (
 )
 from pcbflow.process import ProcessResult, ProcessRunner, ProcessTimeoutError
 from pcbflow.proposal_store import ProposalNotFoundError
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 from pcbflow.proposals import (
     CandidateNotReviewableError,
     RevisionReconciliationRequiredError,
@@ -246,9 +249,13 @@ def test_worker_group_exposes_execution_options_and_health_subcommand() -> None:
     result = runner.invoke(cli.app, ["worker", "--help"])
 
     assert result.exit_code == 0, result.output
-    assert "--once" in result.output
-    assert "--run" in result.output
-    assert "health" in result.output
+    # typer/rich force ANSI styling when GITHUB_ACTIONS is set, and the
+    # highlighter can split literals like "--once" with escape codes; compare
+    # against a de-styled rendering instead.
+    plain = _ANSI_ESCAPE_RE.sub("", result.output)
+    assert "--once" in plain
+    assert "--run" in plain
+    assert "health" in plain
 
 
 def test_worker_execution_options_cannot_be_combined_with_subcommand() -> None:

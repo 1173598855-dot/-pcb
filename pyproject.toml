@@ -42,6 +42,9 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# pythonpath makes "from tests.component_fixtures import ..." work for any
+# pytest entry point (python -m pytest and the console script alike).
+pythonpath = ["."]
 addopts = "-ra --strict-markers --timeout=600"
 markers = [
   "kicad: requires a real supported kicad-cli",
