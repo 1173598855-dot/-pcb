@@ -383,7 +383,7 @@ def test_candidate_transition_uses_time_after_acquiring_database_lock(
         assert row is not None
         row.lease_expires_at = lease_expiry
     monkeypatch.setattr(
-        "pcbflow.pcb_candidates.utc_now", lambda: lease_expiry + timedelta(seconds=1)
+        "pcbflow.pcb_candidate_store.utc_now", lambda: lease_expiry + timedelta(seconds=1)
     )
 
     with pytest.raises(StaleLeaseError):

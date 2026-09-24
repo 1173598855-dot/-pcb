@@ -1,15 +1,14 @@
-"""PcbCandidateStore and the small service/handler wrappers around it.
+"""Durable PCB candidate lifecycle: creation, replay, transitions, release.
 
-This module owns the durable candidate lifecycle: creation, idempotent replay,
-state transitions, release reservation, and G4 promotion. It deliberately
-avoids the execution handler so that store concerns stay isolated from the
-adapter/workspace/runtime concerns.
+Verbatim extraction from the historical pcb_candidates monolith; behavior is
+unchanged. The pcbflow.pcb_candidates module now re-exports from here.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import exists, select, text, update
@@ -17,28 +16,36 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from pcbflow.artifacts import ArtifactDescriptor, StagedArtifact
-from pcbflow.canonical import canonical_digest, canonical_json_bytes, sha256_digest
+from pcbflow.board.operations import (
+    BoardOperation,
+)
 from pcbflow.cancellation import TaskCancelledError
 from pcbflow.design_tables import PcbCandidateRow
 from pcbflow.domain import (
     EdaKind,
     EdaOperation,
     RequestInvalidError,
-    TaskLease,
     TaskStatus,
     new_id,
     utc_now,
 )
 from pcbflow.eda import validate_idempotency_key
 from pcbflow.lceda_pro import LcedaProCapabilityError
+from pcbflow.pcb_candidate_codec import _operation_payload
 from pcbflow.pcb_candidate_validation import (
+    G3_REQUIRED_EVIDENCE,
     PCB_EXPORT_RELEASE_TASK_KIND,
     PCB_GENERATE_CANDIDATE_TASK_KIND,
+    PcbCandidate,
     PcbCandidateNotFoundError,
     PcbCandidateNotReviewableError,
     PcbCandidateStatus,
+    _canonical,
+    _digest,
     _release_task_idempotency_key,
     _task_idempotency_key,
+    _utc,
+    pcb_candidate_review_digest,
     validate_candidate_digest,
     validate_candidate_public_inputs,
 )
@@ -47,53 +54,60 @@ from pcbflow.repositories import (
     EvidenceRepository,
     IdempotencyConflictError,
     ProjectNotFoundError,
+    StaleLeaseError,
     TaskRepository,
 )
-from pcbflow.repository_errors import StaleLeaseError
 from pcbflow.tables import ArtifactRow, ProjectRow, TaskRow
-from pcbflow.tasks import TerminalTaskError
-
-G3_REQUIRED_EVIDENCE = frozenset(
-    {
-        "pcb_input_snapshot",
-        "eda_capability",
-        "rulepack",
-        "placement_evidence",
-        "routing_evidence",
-        "copper_evidence",
-        "boardir_validation",
-        "native_drc",
-        "board_semantic_diff",
-        "candidate_summary",
-    }
-)
 
 
-def _candidate(row: PcbCandidateRow | None) -> Any:
-    if row is None:
-        return None
-    from pcbflow.pcb_candidates import PcbCandidate
+def _candidate_output_kind(
+    status: PcbCandidateStatus,
+    _algorithm_evidence: dict[str, Any] | None,
+    result: dict[str, Any] | None,
+) -> str:
+    if (
+        status in {PcbCandidateStatus.READY_FOR_G4, PcbCandidateStatus.RELEASED}
+        and isinstance(result, dict)
+        and isinstance(result.get("release"), dict)
+        and isinstance(result["release"].get("manifest_digest"), str)
+    ):
+        return "release_candidate"
+    if (
+        status
+        in {
+            PcbCandidateStatus.READY_FOR_G3,
+            PcbCandidateStatus.G3_APPROVED,
+            PcbCandidateStatus.RELEASE_PENDING,
+            PcbCandidateStatus.READY_FOR_G4,
+            PcbCandidateStatus.RELEASED,
+        }
+        and isinstance(result, dict)
+        and result.get("native_candidate_verified") is True
+    ):
+        return "native_candidate"
+    return "boardir_only"
 
+
+def _public_algorithm_evidence(
+    algorithm_evidence: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(algorithm_evidence, dict):
+        return algorithm_evidence
+    return {**algorithm_evidence, "output_kind": "boardir_only"}
+
+
+def _candidate(row: PcbCandidateRow) -> PcbCandidate:
+    status = PcbCandidateStatus(row.status)
     return PcbCandidate(
-        id=row.id,
-        project_id=row.project_id,
-        task_id=row.task_id,
-        idempotency_key=row.idempotency_key,
-        base_revision=row.base_revision,
-        base_snapshot_digest=row.base_snapshot_digest,
-        board_snapshot_digest=row.board_snapshot_digest,
-        rulepack_digest=row.rulepack_digest,
-        capability_digest=row.capability_digest,
-        authority_digest=row.authority_digest,
-        operations=tuple(row.operations_json or ()),
-        operations_digest=row.operations_digest,
-        algorithm_evidence=row.algorithm_evidence_json or {},
-        status=PcbCandidateStatus(row.status),
-        result=row.result_json or {},
-        last_error_code=row.last_error_code,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-        version=row.version,
+        id=row.id, project_id=row.project_id, task_id=row.task_id, idempotency_key=row.idempotency_key,
+        base_revision=row.base_revision, base_snapshot_digest=row.base_snapshot_digest,
+        board_snapshot_digest=row.board_snapshot_digest, rulepack_digest=row.rulepack_digest,
+        capability_digest=row.capability_digest, authority_digest=row.authority_digest,
+        operations=tuple(row.operations_json), operations_digest=row.operations_digest,
+        algorithm_evidence=_public_algorithm_evidence(row.algorithm_evidence_json), status=status,
+        result=row.result_json, last_error_code=row.last_error_code, accepted_revision=row.accepted_revision,
+        created_at=_utc(row.created_at), updated_at=_utc(row.updated_at), version=row.version,
+        output_kind=_candidate_output_kind(status, row.algorithm_evidence_json, row.result_json),
     )
 
 
@@ -132,6 +146,7 @@ class PcbCandidateStore:
         algorithm_evidence: dict[str, Any] | None,
         idempotency_key: str,
     ) -> bool:
+        """Compare every value frozen into a candidate creation request."""
         return (
             row.project_id == project_id
             and row.idempotency_key == idempotency_key
@@ -166,7 +181,8 @@ class PcbCandidateStore:
         board_snapshot_digest: str | None,
         capability_digest: str | None,
         idempotency_key: str,
-    ) -> Any:
+    ) -> PcbCandidate:
+        """Resolve the frozen public inputs shared by the REST and CLI transports."""
         validate_candidate_public_inputs(
             seed=seed,
             net_ids=net_ids,
@@ -232,7 +248,7 @@ class PcbCandidateStore:
             idempotency_key=idempotency_key,
         )
 
-    def _source_snapshot_digest(self, source_path: Any) -> str:
+    def _source_snapshot_digest(self, source_path: Path) -> str:
         if self._revisions is None:
             raise RequestInvalidError("PCB_CANDIDATE_SOURCE_UNAVAILABLE")
         return self._revisions.snapshot_digest(source_path)
@@ -247,61 +263,48 @@ class PcbCandidateStore:
         capability_digest: str,
         idempotency_key: str,
         base_snapshot_digest: str | None = None,
-        operations: tuple[Any, ...] = (),
+        operations: tuple[BoardOperation, ...] = (),
         algorithm_evidence: dict[str, Any] | None = None,
         require_capability: bool = True,
-    ) -> Any:
+    ) -> PcbCandidate:
         validate_idempotency_key(idempotency_key)
-        try:
-            pass
-        except Exception:
-            pass
+        validate_candidate_digest(
+            base_snapshot_digest, field="base_snapshot_digest", allow_none=True
+        )
+        validate_candidate_digest(
+            board_snapshot_digest, field="board_snapshot_digest"
+        )
+        validate_candidate_digest(rulepack_digest, field="rulepack_digest")
+        validate_candidate_digest(capability_digest, field="capability_digest")
         project = self._projects.get(project_id)
         authority = self._authorities.find_by_project_id(project_id)
         if authority is None or authority.eda_kind is not EdaKind.LCEDA_PRO:
             raise RequestInvalidError("project EDA authority is required")
         if type(operations) is not tuple or any(
-            not isinstance(operation, (tuple, dict)) for operation in operations
+            not isinstance(operation, BoardOperation) for operation in operations
         ):
             raise RequestInvalidError("operations must be a tuple of typed board operations")
-        operation_json = tuple(
-            op._asdict() if hasattr(op, "_asdict") else dict(op)
-            for op in operations
-        )
-        operations_digest = sha256_digest(canonical_json_bytes(operation_json))
-        canonical_algorithm_evidence = (
-            canonical_json_bytes(algorithm_evidence) if algorithm_evidence is not None else b"null"
-        )
-        try:
-            canonical_decoded = canonical_digest(canonical_algorithm_evidence)
-        except Exception:
-            canonical_decoded = canonical_algorithm_evidence.decode("utf-8", errors="replace")
-        if isinstance(canonical_decoded, str):
-            if canonical_decoded.startswith("{"):
-                try:
-                    parsed = dict(__import__("json").loads(canonical_decoded))
-                except Exception:
-                    parsed = {}
-            else:
-                parsed = {}
-        else:
-            parsed = {}
-        if "seed" in parsed or "net_ids" in parsed:
-            from pcbflow.pcb_candidate_validation import (
-                validate_candidate_public_inputs,
-            )
-            validate_candidate_public_inputs(
-                seed=parsed.get("seed", 0),
-                net_ids=parsed.get("net_ids"),
-                board_snapshot_digest=board_snapshot_digest,
-                capability_digest=capability_digest,
-            )
-        output_kind = parsed.get("output_kind")
-        if output_kind not in {None, "boardir_only"}:
-            raise RequestInvalidError(
-                "output_kind must be boardir_only until native evidence is verified"
-            )
+        operation_json = tuple(_operation_payload(op) for op in operations)
+        operations_digest = _digest(operation_json)
+        canonical_algorithm_evidence = _canonical(algorithm_evidence)
+        if isinstance(canonical_algorithm_evidence, dict):
+            if "seed" in canonical_algorithm_evidence or "net_ids" in canonical_algorithm_evidence:
+                validate_candidate_public_inputs(
+                    seed=canonical_algorithm_evidence.get("seed", 0),
+                    net_ids=canonical_algorithm_evidence.get("net_ids"),
+                    board_snapshot_digest=board_snapshot_digest,
+                    capability_digest=capability_digest,
+                )
+            output_kind = canonical_algorithm_evidence.get("output_kind")
+            if output_kind not in {None, "boardir_only"}:
+                raise RequestInvalidError(
+                    "output_kind must be boardir_only until native evidence is verified"
+                )
         authority_digest = authority.canonical_digest
+
+        # Idempotent replays return the durable candidate before checking any
+        # mutable capability state. The gate is a precondition for creating a
+        # new candidate, not for reading an already-frozen result.
         existing = self._find_existing_row(project_id, idempotency_key)
         if existing is not None:
             if self._replay_matches(
@@ -315,11 +318,12 @@ class PcbCandidateStore:
                 authority_digest=authority_digest,
                 operation_json=operation_json,
                 operations_digest=operations_digest,
-                algorithm_evidence=parsed or None,
+                algorithm_evidence=canonical_algorithm_evidence,
                 idempotency_key=idempotency_key,
             ):
                 return _candidate(existing)
             raise IdempotencyConflictError(idempotency_key)
+
         if project.current_revision is not None and project.current_revision != base_revision:
             raise RequestInvalidError("PCB_CANDIDATE_STALE")
         verified_capability_digest: str | None = None
@@ -337,6 +341,9 @@ class PcbCandidateStore:
         now = utc_now()
         try:
             with self._sessions.begin() as session:
+                # Serialize candidate creation with revision updates. The
+                # earlier read is only a fast rejection; this is the source
+                # of truth for the insert transaction.
                 session.execute(text("BEGIN IMMEDIATE"))
                 project_row = session.get(ProjectRow, project_id)
                 if project_row is None:
@@ -364,11 +371,12 @@ class PcbCandidateStore:
                         authority_digest=authority_digest,
                         operation_json=operation_json,
                         operations_digest=operations_digest,
-                        algorithm_evidence=parsed or None,
+                        algorithm_evidence=canonical_algorithm_evidence,
                         idempotency_key=idempotency_key,
                     ):
                         return _candidate(existing)
                     raise IdempotencyConflictError(idempotency_key)
+                # 候选和内部任务共享该事务，候选失败不会遗留可领取的孤立任务。
                 task = self._tasks.enqueue_in_session(
                     session,
                     PCB_GENERATE_CANDIDATE_TASK_KIND,
@@ -376,32 +384,18 @@ class PcbCandidateStore:
                     _task_idempotency_key(project_id, idempotency_key),
                     project_id,
                 )
-                row = PcbCandidateRow(
-                    id=new_id("pcb"),
-                    project_id=project_id,
-                    task_id=task.id,
-                    idempotency_key=idempotency_key,
-                    base_revision=base_revision,
-                    base_snapshot_digest=base_snapshot_digest,
-                    board_snapshot_digest=board_snapshot_digest,
-                    rulepack_digest=rulepack_digest,
-                    capability_digest=capability_digest,
-                    authority_digest=authority_digest,
-                    operations_json=list(operation_json),
-                    operations_digest=operations_digest,
-                    algorithm_evidence_json=parsed or None,
-                    status=PcbCandidateStatus.QUEUED.value,
-                    result_json=None,
-                    last_error_code=None,
-                    accepted_revision=None,
-                    created_at=now,
-                    updated_at=now,
-                    version=1,
-                )
+                row = PcbCandidateRow(id=new_id("pcb"), project_id=project_id, task_id=task.id, idempotency_key=idempotency_key,
+                    base_revision=base_revision, base_snapshot_digest=base_snapshot_digest, board_snapshot_digest=board_snapshot_digest,
+                    rulepack_digest=rulepack_digest, capability_digest=capability_digest, authority_digest=authority_digest,
+                    operations_json=list(operation_json), operations_digest=operations_digest, algorithm_evidence_json=canonical_algorithm_evidence,
+                    status=PcbCandidateStatus.QUEUED.value, result_json=None, last_error_code=None, accepted_revision=None,
+                    created_at=now, updated_at=now, version=1)
                 session.add(row)
                 session.flush()
                 return _candidate(row)
         except IntegrityError:
+            # A concurrent request may have inserted the candidate after the
+            # initial lookup. Re-apply the complete idempotency contract.
             with self._sessions() as session:
                 existing = session.scalar(
                     select(PcbCandidateRow).where(
@@ -420,22 +414,21 @@ class PcbCandidateStore:
                     authority_digest=authority_digest,
                     operation_json=operation_json,
                     operations_digest=operations_digest,
-                    algorithm_evidence=parsed or None,
+                    algorithm_evidence=canonical_algorithm_evidence,
                     idempotency_key=idempotency_key,
                 ):
                     raise IdempotencyConflictError(idempotency_key)
                 return _candidate(existing)
 
-    def get(self, candidate_id: str) -> Any:
+    def get(self, candidate_id: str) -> PcbCandidate:
         with self._sessions() as session:
             row = session.get(PcbCandidateRow, candidate_id)
-            if row is None:
-                raise PcbCandidateNotFoundError(candidate_id)
+            if row is None: raise PcbCandidateNotFoundError(candidate_id)
             return _candidate(row)
 
     def find_by_idempotency_key(
         self, project_id: str, idempotency_key: str
-    ) -> Any | None:
+    ) -> PcbCandidate | None:
         with self._sessions() as session:
             row = session.scalar(
                 select(PcbCandidateRow).where(
@@ -445,20 +438,14 @@ class PcbCandidateStore:
             )
             return _candidate(row) if row is not None else None
 
-    def list_for_project(self, project_id: str) -> list[Any]:
+    def list_for_project(self, project_id: str) -> list[PcbCandidate]:
         with self._sessions() as session:
-            return [
-                _candidate(row)
-                for row in session.scalars(
-                    select(PcbCandidateRow)
-                    .where(PcbCandidateRow.project_id == project_id)
-                    .order_by(PcbCandidateRow.created_at, PcbCandidateRow.id)
-                )
-            ]
+            return [_candidate(row) for row in session.scalars(select(PcbCandidateRow).where(PcbCandidateRow.project_id == project_id).order_by(PcbCandidateRow.created_at, PcbCandidateRow.id))]
 
     def _mirror_cancelled_task(
         self, candidate_id: str, task_id: str, now: datetime
     ) -> None:
+        """将已持久取消的任务状态同步到尚未发布的候选。"""
         task = self._tasks.get(task_id)
         if getattr(task.status, "value", task.status) != "cancelled":
             return
@@ -484,12 +471,9 @@ class PcbCandidateStore:
                 row.version += 1
 
     def _assert_active_or_mirror_cancellation(
-        self,
-        candidate_id: str,
-        task_id: str,
-        lease_token: str,
-        now: datetime,
+        self, candidate_id: str, task_id: str, lease_token: str, now: datetime
     ) -> None:
+        """在每个候选状态变更边界执行围栏，并同步竞态取消。"""
         try:
             self._tasks.assert_active(task_id, lease_token, now)
         except (StaleLeaseError, TaskCancelledError):
@@ -507,6 +491,7 @@ class PcbCandidateStore:
         previous_error_code: str | None,
         now: datetime,
     ) -> None:
+        """仅在状态尚未被新租约推进时，撤销失效 Worker 的状态写入。"""
         with self._sessions.begin() as session:
             session.execute(
                 update(PcbCandidateRow)
@@ -566,13 +551,15 @@ class PcbCandidateStore:
         *,
         result: dict[str, Any] | None = None,
         error_code: str | None = None,
-    ) -> Any:
+    ) -> PcbCandidate:
         self._assert_active_or_mirror_cancellation(
             candidate_id, task_id, lease_token, now
         )
         transition_failed = False
         transition_now = now
         with self._sessions.begin() as session:
+            # Re-check the clock only after acquiring the write lock so a
+            # worker cannot publish a transition using a stale pre-lock time.
             session.execute(text("BEGIN IMMEDIATE"))
             transition_now = max(now, utc_now())
             row = session.get(PcbCandidateRow, candidate_id)
@@ -677,6 +664,11 @@ class PcbCandidateStore:
         for field in ("blocking_finding_count", "unconnected_net_count"):
             if type(result.get(field)) is not int or result[field] != 0:
                 raise PcbCandidateNotReviewableError()
+        try:
+            evidence_set_digest = result.get("evidence_set_digest")
+            validate_candidate_digest(evidence_set_digest, field="evidence_set_digest")
+        except RequestInvalidError as error:
+            raise PcbCandidateNotReviewableError() from error
         if candidate_digest != pcb_candidate_review_digest(
             candidate_id=row.id,
             project_id=row.project_id,
@@ -688,11 +680,11 @@ class PcbCandidateStore:
             capability_digest=row.capability_digest,
             authority_digest=row.authority_digest,
             operations_digest=row.operations_digest,
-            evidence_set_digest=result.get("evidence_set_digest", ""),
+            evidence_set_digest=evidence_set_digest,
         ):
             raise PcbCandidateNotReviewableError()
 
-    def mark_executing(self, candidate_id: str, task_id: str, lease_token: str, now: datetime) -> Any:
+    def mark_executing(self, candidate_id: str, task_id: str, lease_token: str, now: datetime) -> PcbCandidate:
         return self._transition(
             candidate_id,
             {PcbCandidateStatus.QUEUED, PcbCandidateStatus.EXECUTING},
@@ -702,7 +694,7 @@ class PcbCandidateStore:
             now,
         )
 
-    def mark_ready_for_g3(self, candidate_id: str, task_id: str, lease_token: str, now: datetime, *, result: dict[str, Any] | None = None) -> Any:
+    def mark_ready_for_g3(self, candidate_id: str, task_id: str, lease_token: str, now: datetime, *, result: dict[str, Any] | None = None) -> PcbCandidate:
         return self._transition(candidate_id, {PcbCandidateStatus.EXECUTING}, PcbCandidateStatus.READY_FOR_G3, task_id, lease_token, now, result=result)
 
     def mark_blocked(
@@ -714,7 +706,7 @@ class PcbCandidateStore:
         *,
         result: dict[str, Any] | None = None,
         error_code: str = "PCB_CAPABILITY_GATE_BLOCKED",
-    ) -> Any:
+    ) -> PcbCandidate:
         return self._transition(
             candidate_id,
             {PcbCandidateStatus.QUEUED, PcbCandidateStatus.EXECUTING},
@@ -735,7 +727,7 @@ class PcbCandidateStore:
         error_code: str,
         *,
         result: dict[str, Any] | None = None,
-    ) -> Any:
+    ) -> PcbCandidate:
         return self._transition(
             candidate_id,
             {PcbCandidateStatus.EXECUTING},
@@ -786,6 +778,7 @@ class PcbCandidateStore:
         descriptors: Sequence[ArtifactDescriptor],
         staged: Sequence[StagedArtifact],
     ) -> None:
+        """Safely settle published release objects against durable registrations."""
         if len(descriptors) != len(staged):
             raise ValueError("release publication descriptor/staging mismatch")
         pairs = tuple(zip(descriptors, staged, strict=True))
@@ -809,9 +802,11 @@ class PcbCandidateStore:
         descriptors: Sequence[ArtifactDescriptor],
         staged: Sequence[StagedArtifact],
     ) -> None:
+        """Backward-compatible alias for release publication settlement."""
         self.settle_publication(descriptors, staged)
 
     def enqueue_release_export(self, candidate_id: str, idempotency_key: str):
+        """Atomically enqueue a release task and reserve the G3-approved candidate."""
         validate_idempotency_key(idempotency_key)
         with self._sessions.begin() as session:
             session.execute(text("BEGIN IMMEDIATE"))
@@ -883,7 +878,7 @@ class PcbCandidateStore:
         *,
         release_result: dict[str, Any],
         descriptors: Sequence[ArtifactDescriptor],
-    ) -> Any:
+    ) -> PcbCandidate:
         self._assert_active_or_mirror_cancellation(
             candidate_id, task_id, lease_token, now
         )
@@ -962,7 +957,7 @@ class PcbCandidateStore:
         now: datetime,
         *,
         error_code: str,
-    ) -> Any:
+    ) -> PcbCandidate:
         self._tasks.assert_active(task_id, lease_token, now)
         with self._sessions.begin() as session:
             session.execute(text("BEGIN IMMEDIATE"))
@@ -1006,69 +1001,7 @@ class PcbCandidateStore:
                 raise RequestInvalidError("concurrent PCB release update")
         return self.get(candidate_id)
 
-
 class PcbCandidateService:
-    def __init__(self, store: PcbCandidateStore) -> None:
-        self._store = store
-
-    def create(self, **kwargs: Any) -> Any:
-        return self._store.create(**kwargs)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._store, name)
-
-
-class PcbCandidateTaskHandler:
-    def __init__(self, candidates: PcbCandidateStore, clock=utc_now) -> None:
-        self._candidates = candidates
-        self._clock = clock
-
-    def __call__(self, lease: TaskLease) -> dict[str, Any]:
-        project_id = lease.payload.get("project_id")
-        candidate_key = lease.payload.get("candidate_key")
-        if not isinstance(project_id, str) or not isinstance(candidate_key, str):
-            raise TerminalTaskError(
-                "PCB_CANDIDATE_NOT_FOUND",
-                "PCB candidate task has no durable candidate reference",
-            )
-        candidate = self._candidates.find_by_idempotency_key(project_id, candidate_key)
-        if candidate is None or candidate.task_id != lease.task_id:
-            raise TerminalTaskError("PCB_CANDIDATE_NOT_FOUND", "PCB candidate not found")
-        self._candidates.mark_blocked(
-            candidate.id,
-            lease.task_id,
-            lease.lease_token,
-            self._clock(),
-            result={"code": "PCB_CAPABILITY_GATE_BLOCKED"},
-        )
-        return {"candidate_id": candidate.id, "status": PcbCandidateStatus.BLOCKED.value}
-
-
-def pcb_candidate_review_digest(
-    *,
-    candidate_id: str,
-    project_id: str,
-    base_revision: str,
-    base_snapshot_digest: str | None,
-    board_snapshot_digest: str,
-    candidate_board_snapshot_digest: str,
-    rulepack_digest: str,
-    capability_digest: str,
-    authority_digest: str,
-    operations_digest: str,
-    evidence_set_digest: str,
-) -> str:
-    payload = {
-        "candidate_id": candidate_id,
-        "project_id": project_id,
-        "base_revision": base_revision,
-        "base_snapshot_digest": base_snapshot_digest,
-        "board_snapshot_digest": board_snapshot_digest,
-        "candidate_board_snapshot_digest": candidate_board_snapshot_digest,
-        "rulepack_digest": rulepack_digest,
-        "capability_digest": capability_digest,
-        "authority_digest": authority_digest,
-        "operations_digest": operations_digest,
-        "evidence_set_digest": evidence_set_digest,
-    }
-    return sha256_digest(canonical_json_bytes(payload))
+    def __init__(self, store: PcbCandidateStore) -> None: self._store = store
+    def create(self, **kwargs: Any) -> PcbCandidate: return self._store.create(**kwargs)
+    def __getattr__(self, name: str) -> Any: return getattr(self._store, name)

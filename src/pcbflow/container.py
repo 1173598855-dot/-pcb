@@ -6,11 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from alembic import command
 from alembic.config import Config
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from alembic import command
 from pcbflow.approvals import ApprovalService, GateDecisionStore, PcbApprovalService
 from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.board.adapter import PcbEdaAdapter

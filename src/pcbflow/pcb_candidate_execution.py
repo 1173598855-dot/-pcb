@@ -1,24 +1,36 @@
-"""PcbCandidateExecutionTaskHandler and execution helpers.
+"""Candidate execution handler and runtime helpers.
 
-Owns the runtime-only concerns: workspace setup, adapter execution,
-DRC validation, evidence publication, and finalization into READY_FOR_G3
-or terminal failure.
+Verbatim extraction from the historical pcb_candidates monolith; behavior is
+unchanged. The pcbflow.pcb_candidates module now re-exports from here.
 """
 
 from __future__ import annotations
 
 import io
 import json
+from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from pcbflow.board.adapter import BoardSemanticMismatchError, semantic_diff
+from pcbflow.artifacts import ArtifactDescriptor, ContentAddressedStore, StagedArtifact
+from pcbflow.board.adapter import (
+    BoardSemanticMismatchError,
+    PcbEdaAdapter,
+    semantic_diff,
+)
+from pcbflow.board.ir import (
+    BoardSnapshot,
+)
+from pcbflow.board.operations import (
+    BoardOperation,
+)
+from pcbflow.board.rulepack import ManufacturingRulePack
 from pcbflow.board.validation import BoardRuleChecker
-from pcbflow.canonical import canonical_json_bytes, sha256_digest
 from pcbflow.cancellation import TaskCancelledError
+from pcbflow.canonical import canonical_json_bytes, sha256_digest
 from pcbflow.domain import (
     EdaKind,
     EdaOperation,
@@ -29,178 +41,28 @@ from pcbflow.domain import (
     utc_now,
 )
 from pcbflow.lceda_pro import LcedaProCapabilityError
-from pcbflow.pcb_candidate_store import (
+from pcbflow.pcb_candidate_codec import deserialize_board_operations
+from pcbflow.pcb_candidate_store import PcbCandidateStore
+from pcbflow.pcb_candidate_validation import (
+    G3_EVIDENCE_SET_KIND,
+    PcbCandidate,
     PcbCandidateStatus,
-    PcbCandidateStore,
+    _digest,
     pcb_candidate_review_digest,
 )
 from pcbflow.repositories import (
     EvidenceRepository,
     FindingRepository,
     ProjectRepository,
+    StaleLeaseError,
     TaskRepository,
 )
-from pcbflow.repository_errors import StaleLeaseError
 from pcbflow.tasks import TerminalTaskError
-
-G3_REQUIRED_EVIDENCE = frozenset(
-    {
-        "pcb_input_snapshot",
-        "eda_capability",
-        "rulepack",
-        "placement_evidence",
-        "routing_evidence",
-        "copper_evidence",
-        "boardir_validation",
-        "native_drc",
-        "board_semantic_diff",
-        "candidate_summary",
-    }
-)
-G3_REQUIRED_EVIDENCE_MEDIA_TYPES = {
-    "pcb_input_snapshot": "application/vnd.pcbflow.boardir+json",
-    "eda_capability": "application/vnd.pcbflow.eda-capability+json",
-    "rulepack": "application/vnd.pcbflow.rulepack+json",
-    "placement_evidence": "application/vnd.pcbflow.pcb-placement-evidence+json",
-    "routing_evidence": "application/vnd.pcbflow.pcb-routing-evidence+json",
-    "copper_evidence": "application/vnd.pcbflow.pcb-copper-evidence+json",
-    "boardir_validation": "application/vnd.pcbflow.pcb-boardir-validation+json",
-    "native_drc": "application/vnd.pcbflow.pcb-native-drc+json",
-    "board_semantic_diff": "application/vnd.pcbflow.pcb-semantic-diff+json",
-    "candidate_summary": "application/vnd.pcbflow.pcb-candidate-summary+json",
-}
-G3_EVIDENCE_SET_KIND = "pcb_candidate_evidence_set"
-G3_EVIDENCE_SET_MEDIA_TYPE = (
-    "application/vnd.pcbflow.pcb-candidate-evidence-set+json"
-)
-
-
-@dataclass(frozen=True, slots=True)
-class _CandidateExecutionError(Exception):
-    code: str
-    message: str
-
-
-def _load_candidate_rulepack(candidate: Any) -> tuple[Any, dict[str, Any], bytes]:
-    from pcbflow.board.rulepack import ManufacturingRulePack
-
-    evidence = candidate.algorithm_evidence
-    if not isinstance(evidence, dict):
-        raise _CandidateExecutionError(
-            "PCB_CANDIDATE_EVIDENCE_INCOMPLETE", "candidate algorithm evidence is missing"
-        )
-    for kind in ("rulepack", "placement", "routing", "copper"):
-        if type(evidence.get(kind)) is not dict:
-            raise _CandidateExecutionError(
-                "PCB_CANDIDATE_EVIDENCE_INCOMPLETE",
-                f"candidate is missing {kind} evidence",
-            )
-    try:
-        rulepack = ManufacturingRulePack.load_json(
-            canonical_json_bytes(evidence["rulepack"])
-        )
-    except (TypeError, ValueError) as error:
-        raise _CandidateExecutionError(
-            "PCB_CANDIDATE_RULEPACK_INVALID", "candidate rulepack evidence is invalid"
-        ) from error
-    rulepack_bytes = rulepack.canonical_bytes()
-    if sha256_digest(rulepack_bytes) != candidate.rulepack_digest:
-        raise _CandidateExecutionError(
-            "PCB_CANDIDATE_RULEPACK_MISMATCH",
-            "candidate rulepack does not match its frozen digest",
-        )
-    return rulepack, evidence, rulepack_bytes
-
-
-def _validate_candidate_operations(
-    candidate: Any,
-    before: Any,
-    operations: tuple[Any, ...],
-    *,
-    expected_snapshot_digest: str | None = None,
-) -> None:
-    from pcbflow.board.operations import BoardOperation
-
-    if not operations:
-        return
-    if expected_snapshot_digest is None:
-        expected_snapshot_digest = before.canonical_digest()
-    for operation in operations:
-        if not isinstance(operation, BoardOperation):
-            continue
-        if (
-            operation.project_id != candidate.project_id
-            or operation.baseline_revision != candidate.base_revision
-            or operation.rulepack_digest != candidate.rulepack_digest
-            or operation.expected_snapshot_digest != expected_snapshot_digest
-        ):
-            raise _CandidateExecutionError(
-                "PCB_CANDIDATE_OPERATION_MISMATCH",
-                "typed operation does not match the frozen candidate inputs",
-            )
-
-
-def _findings_payload(
-    findings: Any,
-) -> list[dict[str, str]]:
-    return [
-        {
-            "rule_id": finding.rule_id,
-            "severity": finding.severity,
-            "subject": finding.subject,
-            "message": finding.message,
-        }
-        for finding in findings
-    ]
-
-
-def _is_blocking_finding(finding: Any) -> bool:
-    return finding.severity.casefold() in {"error", "critical", "fatal", "blocker"}
-
-
-def _unconnected_net_ids(
-    algorithm_evidence: dict[str, Any],
-    findings: Any,
-) -> tuple[str, ...]:
-    routing = algorithm_evidence["routing"]
-    value = routing.get("final_unconnected_nets")
-    if type(value) is not list or any(type(item) is not str for item in value):
-        raise _CandidateExecutionError(
-            "PCB_CANDIDATE_EVIDENCE_INCOMPLETE",
-            "routing evidence must include final_unconnected_nets",
-        )
-    disconnected = {
-        finding.subject
-        for finding in findings
-        if finding.rule_id == "PCB_ROUTE_DISCONNECTED"
-    }
-    return tuple(sorted(set(value) | disconnected))
-
-
-def _existing_artifact_descriptor(
-    artifacts: Any,
-    digest: str,
-    media_type: str,
-) -> Any:
-    from pcbflow.artifacts import ArtifactDescriptor
-
-    with artifacts.open(digest) as stream:
-        raw = stream.read()
-    actual_digest = sha256_digest(raw)
-    if actual_digest != digest:
-        raise _CandidateExecutionError(
-            "PCB_CANDIDATE_ARTIFACT_MISMATCH",
-            "frozen evidence artifact digest does not match its content",
-        )
-    return ArtifactDescriptor(
-        digest=digest,
-        size=len(raw),
-        media_type=media_type,
-        path=artifacts._path(digest),
-    )
 
 
 class PcbCandidateExecutionTaskHandler:
+    """Run a frozen candidate in an adapter-owned isolated workspace."""
+
     def __init__(
         self,
         candidates: PcbCandidateStore,
@@ -208,9 +70,9 @@ class PcbCandidateExecutionTaskHandler:
         tasks: TaskRepository,
         evidence: EvidenceRepository,
         findings: FindingRepository,
-        artifacts: Any,
+        artifacts: ContentAddressedStore,
         capability_gate: Any,
-        adapter: Any,
+        adapter: PcbEdaAdapter,
         workspaces_dir: Path,
         revisions: Any,
         clock=utc_now,
@@ -320,7 +182,7 @@ class PcbCandidateExecutionTaskHandler:
             "status": PcbCandidateStatus.READY_FOR_G3.value,
         }
 
-    def _candidate_for_lease(self, lease: TaskLease) -> Any:
+    def _candidate_for_lease(self, lease: TaskLease) -> PcbCandidate:
         project_id = lease.payload.get("project_id")
         candidate_key = lease.payload.get("candidate_key")
         if not isinstance(project_id, str) or not isinstance(candidate_key, str):
@@ -333,7 +195,7 @@ class PcbCandidateExecutionTaskHandler:
             raise TerminalTaskError("PCB_CANDIDATE_NOT_FOUND", "PCB candidate not found")
         return candidate
 
-    def _require_capabilities(self, candidate: Any) -> None:
+    def _require_capabilities(self, candidate: PcbCandidate) -> None:
         operations = (
             EdaOperation.SNAPSHOT,
             EdaOperation.CREATE_CANDIDATE,
@@ -356,11 +218,9 @@ class PcbCandidateExecutionTaskHandler:
                 raise LcedaProCapabilityError("LCEDA_PRO_WRITE_CAPABILITY_UNVERIFIED")
 
     def _execute(
-        self, candidate: Any, lease: TaskLease
-    ) -> tuple[dict[str, Any], tuple[Any, ...], tuple[Any, ...]]:
-        from pcbflow.board.operations import deserialize_board_operations
-
-        if sha256_digest(canonical_json_bytes(candidate.operations)) != candidate.operations_digest:
+        self, candidate: PcbCandidate, lease: TaskLease
+    ) -> tuple[dict[str, Any], tuple[NormalizedFinding, ...], tuple[NormalizedFinding, ...]]:
+        if _digest(candidate.operations) != candidate.operations_digest:
             raise _CandidateExecutionError(
                 "PCB_CANDIDATE_OPERATION_DIGEST_MISMATCH",
                 "persisted candidate operations do not match the frozen digest",
@@ -450,36 +310,36 @@ class PcbCandidateExecutionTaskHandler:
                     "PCB_CANDIDATE_SOURCE_CHANGED",
                     "candidate execution modified the registered source tree",
                 )
-            native_findings = tuple(
-                finding for report in reports for finding in report.findings
-            )
-            result = self._publish_evidence(
-                candidate,
-                lease,
-                before_bytes,
-                reread,
-                rulepack_bytes,
-                algorithm_evidence,
-                source_before,
-                source_after,
-                semantic_diff(before, reread),
-                board_findings,
-                reports,
-            )
-            return result, board_findings, native_findings
+        native_findings = tuple(
+            finding for report in reports for finding in report.findings
+        )
+        result = self._publish_evidence(
+            candidate,
+            lease,
+            before_bytes,
+            reread,
+            rulepack_bytes,
+            algorithm_evidence,
+            source_before,
+            source_after,
+            semantic_diff(before, reread),
+            board_findings,
+            reports,
+        )
+        return result, board_findings, native_findings
 
     def _publish_evidence(
         self,
-        candidate: Any,
+        candidate: PcbCandidate,
         lease: TaskLease,
         before_bytes: bytes,
-        after: Any,
+        after: BoardSnapshot,
         rulepack_bytes: bytes,
         algorithm_evidence: dict[str, Any],
         source_before: str,
         source_after: str,
         diff: Any,
-        board_findings: tuple[Any, ...],
+        board_findings: tuple[NormalizedFinding, ...],
         reports: tuple[Any, ...],
     ) -> dict[str, Any]:
         native_findings = tuple(
@@ -490,11 +350,11 @@ class PcbCandidateExecutionTaskHandler:
             _is_blocking_finding(finding)
             for finding in board_findings + native_findings
         )
-        staged: dict[str, Any] = {}
-        published: list[tuple[Any, Any]] = []
+        staged: dict[str, StagedArtifact] = {}
+        published: list[tuple[ArtifactDescriptor, StagedArtifact]] = []
         evidence_committed = False
 
-        def stage(kind: str, data: bytes, media_type: str) -> Any:
+        def stage(kind: str, data: bytes, media_type: str) -> StagedArtifact:
             self._tasks.assert_active(lease.task_id, lease.lease_token, self._clock())
             artifact = self._artifacts.stage_stream(io.BytesIO(data), media_type)
             staged[kind] = artifact
@@ -598,7 +458,7 @@ class PcbCandidateExecutionTaskHandler:
                 canonical_json_bytes(summary),
                 "application/vnd.pcbflow.pcb-candidate-summary+json",
             )
-            artifact_refs: dict[str, Any] = {
+            artifact_refs: dict[str, StagedArtifact | ArtifactDescriptor] = {
                 **staged,
                 "eda_capability": capability_descriptor,
             }
@@ -627,7 +487,7 @@ class PcbCandidateExecutionTaskHandler:
                 canonical_json_bytes(evidence_set),
                 "application/vnd.pcbflow.pcb-candidate-evidence-set+json",
             )
-            descriptors: dict[str, Any] = {}
+            descriptors: dict[str, ArtifactDescriptor] = {}
             for kind in sorted(staged):
                 self._tasks.assert_active(lease.task_id, lease.lease_token, self._clock())
                 if kind == "evidence_set":
@@ -704,7 +564,7 @@ class PcbCandidateExecutionTaskHandler:
                         artifact.discard()
 
     def _mark_failed(
-        self, candidate: Any, lease: TaskLease, code: str, message: str
+        self, candidate: PcbCandidate, lease: TaskLease, code: str, message: str
     ) -> None:
         self._candidates.mark_validation_failed(
             candidate.id,
@@ -723,3 +583,119 @@ class PcbCandidateExecutionTaskHandler:
                 "error_message": message,
             },
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateExecutionError(Exception):
+    code: str
+    message: str
+
+
+def _load_candidate_rulepack(
+    candidate: PcbCandidate,
+) -> tuple[ManufacturingRulePack, dict[str, Any], bytes]:
+    evidence = candidate.algorithm_evidence
+    if not isinstance(evidence, dict):
+        raise _CandidateExecutionError(
+            "PCB_CANDIDATE_EVIDENCE_INCOMPLETE", "candidate algorithm evidence is missing"
+        )
+    for kind in ("rulepack", "placement", "routing", "copper"):
+        if type(evidence.get(kind)) is not dict:
+            raise _CandidateExecutionError(
+                "PCB_CANDIDATE_EVIDENCE_INCOMPLETE",
+                f"candidate is missing {kind} evidence",
+            )
+    try:
+        rulepack = ManufacturingRulePack.load_json(
+            canonical_json_bytes(evidence["rulepack"])
+        )
+    except (TypeError, ValueError) as error:
+        raise _CandidateExecutionError(
+            "PCB_CANDIDATE_RULEPACK_INVALID", "candidate rulepack evidence is invalid"
+        ) from error
+    rulepack_bytes = rulepack.canonical_bytes()
+    if sha256_digest(rulepack_bytes) != candidate.rulepack_digest:
+        raise _CandidateExecutionError(
+            "PCB_CANDIDATE_RULEPACK_MISMATCH",
+            "candidate rulepack does not match its frozen digest",
+        )
+    return rulepack, evidence, rulepack_bytes
+
+
+def _validate_candidate_operations(
+    candidate: PcbCandidate,
+    before: BoardSnapshot,
+    operations: tuple[BoardOperation, ...],
+    *,
+    expected_snapshot_digest: str | None = None,
+) -> None:
+    if not operations:
+        return
+    if expected_snapshot_digest is None:
+        expected_snapshot_digest = before.canonical_digest()
+    for operation in operations:
+        if (
+            operation.project_id != candidate.project_id
+            or operation.baseline_revision != candidate.base_revision
+            or operation.rulepack_digest != candidate.rulepack_digest
+            or operation.expected_snapshot_digest != expected_snapshot_digest
+        ):
+            raise _CandidateExecutionError(
+                "PCB_CANDIDATE_OPERATION_MISMATCH",
+                "typed operation does not match the frozen candidate inputs",
+            )
+
+
+def _existing_artifact_descriptor(
+    artifacts: ContentAddressedStore, digest: str, media_type: str
+) -> ArtifactDescriptor:
+    with artifacts.open(digest) as stream:
+        raw = stream.read()
+    actual_digest = sha256_digest(raw)
+    if actual_digest != digest:
+        raise _CandidateExecutionError(
+            "PCB_CANDIDATE_ARTIFACT_MISMATCH",
+            "frozen evidence artifact digest does not match its content",
+        )
+    return ArtifactDescriptor(
+        digest=digest,
+        size=len(raw),
+        media_type=media_type,
+        path=artifacts._path(digest),
+    )
+
+
+def _findings_payload(
+    findings: Sequence[NormalizedFinding],
+) -> list[dict[str, str]]:
+    return [
+        {
+            "rule_id": finding.rule_id,
+            "severity": finding.severity,
+            "subject": finding.subject,
+            "message": finding.message,
+        }
+        for finding in findings
+    ]
+
+
+def _is_blocking_finding(finding: NormalizedFinding) -> bool:
+    return finding.severity.casefold() in {"error", "critical", "fatal", "blocker"}
+
+
+def _unconnected_net_ids(
+    algorithm_evidence: dict[str, Any], findings: Sequence[NormalizedFinding]
+) -> tuple[str, ...]:
+    routing = algorithm_evidence["routing"]
+    value = routing.get("final_unconnected_nets")
+    if type(value) is not list or any(type(item) is not str for item in value):
+        raise _CandidateExecutionError(
+            "PCB_CANDIDATE_EVIDENCE_INCOMPLETE",
+            "routing evidence must include final_unconnected_nets",
+        )
+    disconnected = {
+        finding.subject
+        for finding in findings
+        if finding.rule_id == "PCB_ROUTE_DISCONNECTED"
+    }
+    return tuple(sorted(set(value) | disconnected))
