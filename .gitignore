@@ -2,6 +2,7 @@
 .worktrees/
 .venv/
 .pcbflow-data/
+.zcodeignore
 .pytest_cache/
 .pytest-*/
 .pytest-*.txt

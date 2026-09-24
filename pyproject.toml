@@ -24,8 +24,13 @@ dependencies = [
 dev = [
   "httpx>=0.28,<1",
   "hypothesis>=6.120,<7",
+  "mypy>=1.14,<3",
+  "pre-commit>=4,<5",
   "pytest>=8.3,<9",
   "pytest-cov>=6,<7",
+  "pytest-timeout>=2.3,<3",
+  "pytest-xdist>=3.6,<4",
+  "ruff>=0.16,<0.17",
 ]
 
 [project.scripts]
@@ -37,8 +42,26 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers --timeout=600"
 markers = [
   "kicad: requires a real supported kicad-cli",
   "lceda_pro: requires a verified official LCEDA Pro automation bridge",
 ]
+
+[tool.ruff]
+line-length = 200
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E9 = runtime syntax errors, F = pyflakes (undefined/unused names),
+# I = import ordering. Rules with known-intentional findings (blind except,
+# simplify, bugbear) stay off until the existing findings are triaged.
+select = ["E9", "F", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+# Informational only: the codebase has ~215 pre-existing findings.
+# Do not gate CI on mypy until they are triaged down to zero.
+
