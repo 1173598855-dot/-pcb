@@ -1,5 +1,22 @@
 # PCBFlow 项目整理报告
 
+## 2026-09-24 仓库整理与工具链补全
+
+- 修复 d57f3df 提交引入的导入崩溃：pcb_candidate_store/execution 从不存在的
+  位置导入 ArtifactRow/ProjectRow/TaskRow/TaskCancelledError/StaleLeaseError，
+  且 pcb_candidate_validation 中存在无限自递归的 validate_candidate_digest。
+  该批次提交后全量测试从未运行过。
+- 完成 pcb_candidates.py（2155 行）向 pcb_candidate_validation / codec / store /
+  execution 四个模块的逐字拆分，原模块保留为兼容 re-export 门面；测试
+  monkeypatch 目标同步迁移到 pcbflow.pcb_candidate_store.utc_now。
+- 引入 ruff（E9/F/I，行宽 200）、mypy（仅 informational，现存约 215 个历史
+  findings）、pytest-timeout（每测试 600s）、pytest-xdist、pre-commit 和
+  GitHub Actions CI；新增 requirements-lock.txt 固定已验证依赖版本。
+- 行尾全面钉为 LF（KiCad 字节敏感 fixture 除外），.gitignore 补齐
+  .hypothesis/.mypy_cache/.ruff_cache。
+- 历史遗留的 DEVELOPMENT_SUMMARY.md 确认为未实现的愿景文档，移入 docs/ 并
+  加注声明。
+
 ## 2026-08-10 PCB 自动化实测完成记录
 
 BoardIR/算法、候选、G3/G4 正向 fixture、API/CLI、KiCad parity 和 release packaging 的

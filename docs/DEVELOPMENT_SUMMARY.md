@@ -1,3 +1,12 @@
+<!-- VISION DOCUMENT — NOT AN IMPLEMENTATION REPORT -->
+
+> [!WARNING]
+> **本文档是 2026 年 8 月的产品愿景草案，不是已实现功能的说明。**
+> 文中的 React Web UI、Docker 部署、Node.js MCP Server、多模型 AI 协作等
+> 均未实现；其中的代码片段是示意伪代码。当前仓库的真实能力边界以
+> 根目录 [README.md](../README.md) 的"当前限制"一节为准。
+> PCBFlow 现阶段提供 CLI、REST API 与 Python MCP Server，不含任何 Web UI。
+
 # PCBFlow 自动化开发平台
 # PCB Automation Development Platform
 

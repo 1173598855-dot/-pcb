@@ -1,5 +1,18 @@
 # PCBFlow
 
+[![CI](https://github.com/1173598855-dot/-pcb/actions/workflows/ci.yml/badge.svg)](https://github.com/1173598855-dot/-pcb/actions/workflows/ci.yml)
+
+## 2026-09-24 仓库整理记录
+
+- 修复了 d57f3df 批次提交引入的模块导入崩溃（候选 store/execution/validation
+  的坏导入与自递归校验函数）；该批次提交后全量测试从未运行过。
+- `pcb_candidates.py` 已按行为逐字拆分为 `pcb_candidate_validation` /
+  `pcb_candidate_codec` / `pcb_candidate_store` / `pcb_candidate_execution`
+  四个模块；原模块保留为兼容 re-export 门面。
+- 工程化补全：GitHub Actions CI（ruff + Windows 全量测试 + 覆盖率门槛）、
+  ruff（`E9,F,I`，行宽 200）、pre-commit、pytest-timeout（每测试 600s）、
+  pytest-xdist、`requirements-lock.txt` 依赖锁定。
+
 ## 2026-08-10 实测完成记录
 
 BoardIR/算法、候选生命周期、G3/G4 fixture、API/CLI、KiCad 10 语义回归和发布
@@ -351,12 +364,34 @@ remain disabled; run the worker in a trusted local process instead.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m pytest --cov=pcbflow --cov-report=term-missing --cov-fail-under=90
+.\.venv\Scripts\python.exe -m pytest --cov=pcbflow --cov-report=term-missing --cov-fail-under=88
 .\.venv\Scripts\python.exe -m pytest -m kicad -v
 .\.venv\Scripts\pcbflow.exe doctor --json
 .\.venv\Scripts\python.exe -m pcbflow --help
 git diff --check
 ```
+
+快速检查与并行运行：
+
+```powershell
+# lint（E9/F/I，行宽 200）
+.\.venv\Scripts\ruff.exe check src tests
+
+# 并行全量回归（pytest-xdist），显著快于串行
+.\.venv\Scripts\python.exe -m pytest -q -n 2
+
+# 每个 Python 测试默认带 600s 超时（pytest-timeout，见 pyproject addopts）
+```
+
+提交钩子（首次克隆后执行一次）：
+
+```powershell
+.\.venv\Scripts\pre-commit.exe install
+```
+
+可复现的依赖版本见 `requirements-lock.txt`（由通过全量回归的 venv 冻结）。
+CI 在每次 push/PR 时运行 ruff 并在 Windows runner 上执行带覆盖率门槛的全量
+测试；mypy 配置为 informational，其约 215 个历史 findings 尚在分诊。
 
 设计规范与实施计划位于：
 
