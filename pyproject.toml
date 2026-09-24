@@ -65,6 +65,5 @@ select = ["E9", "F", "I"]
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
-# Informational only: the codebase has ~215 pre-existing findings.
-# Do not gate CI on mypy until they are triaged down to zero.
+# Enforced: the package type-checks clean; keep it that way.
 

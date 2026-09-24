@@ -374,8 +374,9 @@ git diff --check
 快速检查与并行运行：
 
 ```powershell
-# lint（E9/F/I，行宽 200）
+# lint（E9/F/I，行宽 200）与类型检查（mypy 已清零并纳入 CI 门禁）
 .\.venv\Scripts\ruff.exe check src tests
+.\.venv\Scripts\mypy.exe src/pcbflow
 
 # 并行全量回归（pytest-xdist），显著快于串行
 .\.venv\Scripts\python.exe -m pytest -q -n 2
@@ -391,7 +392,7 @@ git diff --check
 
 可复现的依赖版本见 `requirements-lock.txt`（由通过全量回归的 venv 冻结）。
 CI 在每次 push/PR 时运行 ruff 并在 Windows runner 上执行带覆盖率门槛的全量
-测试；mypy 配置为 informational，其约 215 个历史 findings 尚在分诊。
+测试；mypy 全量清零（2026-09-25，原 215 个历史 findings）并纳入 CI 门禁。
 
 设计规范与实施计划位于：
 

@@ -1,5 +1,18 @@
 # PCBFlow 项目整理报告
 
+## 2026-09-25 CI 修复与 mypy 全量清零
+
+- 修复 CI 首跑失败的两个根因：`from tests.component_fixtures import ...` 在
+  pytest 命令行入口下因 cwd 不在 sys.path 而收集失败（pyproject 增加
+  `pythonpath = ["."]`）；typer 在 GITHUB_ACTIONS 下强制 rich 彩色渲染导致
+  `--once` 等字面量被 ANSI 转义码拆断（测试改为断言去样式文本）。
+- mypy 215 个历史 findings 全部清零（70 个源文件），无新增 type: ignore 除
+  fcntl/POSIX 分支与 pydantic 元类桩缺口两处定向标注；ortools 求解器调用从
+  已移除的驼峰 API（NewIntVar/Add/Minimize）迁移到官方 snake_case API，
+  属正确性修复。mypy 现为 CI lint job 的强制门禁。
+- 期间发现并修复 board/placement.py 的 ortools 求解器在已安装版本上无法
+  运行的问题（驼峰 API 已被移除）。
+
 ## 2026-09-24 仓库整理与工具链补全
 
 - 修复 d57f3df 提交引入的导入崩溃：pcb_candidate_store/execution 从不存在的
