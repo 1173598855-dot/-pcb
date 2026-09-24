@@ -519,8 +519,8 @@ class RevisionService:
             else:
                 import fcntl
 
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                unlock = lambda: fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)  # type: ignore[attr-defined]  # POSIX-only lock branch
+                unlock = lambda: fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]  # POSIX-only lock branch
             try:
                 yield
             finally:
@@ -1030,6 +1030,7 @@ class RevisionReconciler:
     def _scan_candidate_refs(self, project_id: str) -> None:
         if self._sessions is None:
             return
+        assert self._revisions is not None
         with self._sessions() as session:
             requirements = {
                 row.id: row for row in session.scalars(
@@ -1128,6 +1129,7 @@ class RevisionReconciler:
             return False
 
     def run_once(self) -> int:
+        assert self._revisions is not None
         repaired = 0
         for project in self._projects.list():
             if project.mode is not ProjectMode.MANAGED:

@@ -9,9 +9,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import exists, select, text, update
+from sqlalchemy import CursorResult, exists, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -584,23 +584,26 @@ class PcbCandidateStore:
                 TaskRow.lease_expires_at.is_not(None),
                 TaskRow.lease_expires_at > transition_now,
             )
-            changed = session.execute(
-                update(PcbCandidateRow)
-                .where(
-                    PcbCandidateRow.id == candidate_id,
-                    PcbCandidateRow.task_id == task_id,
-                    PcbCandidateRow.status.in_(item.value for item in allowed),
-                    PcbCandidateRow.version == row.version,
-                    active_task,
-                )
-                .values(
-                    status=status.value,
-                    result_json=result,
-                    last_error_code=error_code,
-                    updated_at=transition_now,
-                    version=row.version + 1,
-                )
-                .execution_options(synchronize_session=False)
+            changed = cast(
+                "CursorResult[Any]",
+                session.execute(
+                    update(PcbCandidateRow)
+                    .where(
+                        PcbCandidateRow.id == candidate_id,
+                        PcbCandidateRow.task_id == task_id,
+                        PcbCandidateRow.status.in_(item.value for item in allowed),
+                        PcbCandidateRow.version == row.version,
+                        active_task,
+                    )
+                    .values(
+                        status=status.value,
+                        result_json=result,
+                        last_error_code=error_code,
+                        updated_at=transition_now,
+                        version=row.version + 1,
+                    )
+                    .execution_options(synchronize_session=False)
+                ),
             )
             transition_failed = changed.rowcount != 1
         if transition_failed:
@@ -644,6 +647,9 @@ class PcbCandidateStore:
             validate_candidate_digest(
                 post_snapshot_digest, field="candidate_board_snapshot_digest"
             )
+            if not isinstance(post_snapshot_digest, str):
+                # Unreachable: validate_candidate_digest rejects non-str digests.
+                raise PcbCandidateNotReviewableError()
         except RequestInvalidError as error:
             raise PcbCandidateNotReviewableError() from error
         for field in ("rulepack_digest", "capability_digest", "authority_digest"):
@@ -667,6 +673,9 @@ class PcbCandidateStore:
         try:
             evidence_set_digest = result.get("evidence_set_digest")
             validate_candidate_digest(evidence_set_digest, field="evidence_set_digest")
+            if not isinstance(evidence_set_digest, str):
+                # Unreachable: validate_candidate_digest rejects non-str digests.
+                raise PcbCandidateNotReviewableError()
         except RequestInvalidError as error:
             raise PcbCandidateNotReviewableError() from error
         if candidate_digest != pcb_candidate_review_digest(
@@ -912,22 +921,25 @@ class PcbCandidateStore:
                 TaskRow.lease_expires_at.is_not(None),
                 TaskRow.lease_expires_at > transition_now,
             )
-            changed = session.execute(
-                update(PcbCandidateRow)
-                .where(
-                    PcbCandidateRow.id == candidate_id,
-                    PcbCandidateRow.status == PcbCandidateStatus.RELEASE_PENDING.value,
-                    PcbCandidateRow.version == row.version,
-                    active_task,
-                )
-                .values(
-                    status=PcbCandidateStatus.READY_FOR_G4.value,
-                    result_json={**result, "release": {**release, **release_result, "status": "ready_for_g4"}},
-                    last_error_code=None,
-                    updated_at=transition_now,
-                    version=row.version + 1,
-                )
-                .execution_options(synchronize_session=False)
+            changed = cast(
+                "CursorResult[Any]",
+                session.execute(
+                    update(PcbCandidateRow)
+                    .where(
+                        PcbCandidateRow.id == candidate_id,
+                        PcbCandidateRow.status == PcbCandidateStatus.RELEASE_PENDING.value,
+                        PcbCandidateRow.version == row.version,
+                        active_task,
+                    )
+                    .values(
+                        status=PcbCandidateStatus.READY_FOR_G4.value,
+                        result_json={**result, "release": {**release, **release_result, "status": "ready_for_g4"}},
+                        last_error_code=None,
+                        updated_at=transition_now,
+                        version=row.version + 1,
+                    )
+                    .execution_options(synchronize_session=False)
+                ),
             )
             if changed.rowcount != 1:
                 raise RequestInvalidError("concurrent PCB release update")
@@ -980,22 +992,25 @@ class PcbCandidateStore:
                 TaskRow.lease_expires_at.is_not(None),
                 TaskRow.lease_expires_at > transition_now,
             )
-            changed = session.execute(
-                update(PcbCandidateRow)
-                .where(
-                    PcbCandidateRow.id == candidate_id,
-                    PcbCandidateRow.status == PcbCandidateStatus.RELEASE_PENDING.value,
-                    PcbCandidateRow.version == row.version,
-                    active_task,
-                )
-                .values(
-                    status=PcbCandidateStatus.G3_APPROVED.value,
-                    result_json={**result, "release": {**release, "status": "failed", "error_code": error_code}},
-                    last_error_code=error_code,
-                    updated_at=transition_now,
-                    version=row.version + 1,
-                )
-                .execution_options(synchronize_session=False)
+            changed = cast(
+                "CursorResult[Any]",
+                session.execute(
+                    update(PcbCandidateRow)
+                    .where(
+                        PcbCandidateRow.id == candidate_id,
+                        PcbCandidateRow.status == PcbCandidateStatus.RELEASE_PENDING.value,
+                        PcbCandidateRow.version == row.version,
+                        active_task,
+                    )
+                    .values(
+                        status=PcbCandidateStatus.G3_APPROVED.value,
+                        result_json={**result, "release": {**release, "status": "failed", "error_code": error_code}},
+                        last_error_code=error_code,
+                        updated_at=transition_now,
+                        version=row.version + 1,
+                    )
+                    .execution_options(synchronize_session=False)
+                ),
             )
             if changed.rowcount != 1:
                 raise RequestInvalidError("concurrent PCB release update")

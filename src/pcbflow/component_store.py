@@ -160,12 +160,12 @@ class ComponentRevisionStore:
                 return _revision(row)
         except IntegrityError:
             with self._sessions() as session:
-                row = session.scalar(select(ComponentRevisionRow).where(ComponentRevisionRow.idempotency_key == idempotency_key))
-                if row is None:
-                    row = session.scalar(select(ComponentRevisionRow).where(ComponentRevisionRow.component_key == manifest.component_key, ComponentRevisionRow.revision == manifest.revision))
-                if row is None or not self._matches(session, row, manifest, canonical_digest, artifacts):
+                replayed = session.scalar(select(ComponentRevisionRow).where(ComponentRevisionRow.idempotency_key == idempotency_key))
+                if replayed is None:
+                    replayed = session.scalar(select(ComponentRevisionRow).where(ComponentRevisionRow.component_key == manifest.component_key, ComponentRevisionRow.revision == manifest.revision))
+                if replayed is None or not self._matches(session, replayed, manifest, canonical_digest, artifacts):
                     raise IdempotencyConflictError(idempotency_key)
-                return _revision(row)
+                return _revision(replayed)
 
     def get(self, revision_id: str) -> ComponentRevision:
         with self._sessions() as session:

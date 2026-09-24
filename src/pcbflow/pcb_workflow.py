@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import Protocol
+from typing import Protocol, cast
 
 from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.canonical import canonical_json_bytes
@@ -287,7 +287,8 @@ class CapabilityGateService:
                 or task.result.get("write_verified") is not payload["write_verified"]
                 or payload["write_verified"] is not True
                 or any(
-                    operation.value not in payload["operations"]
+                    operation.value
+                    not in cast("list[str]", payload["operations"])
                     for operation in operations
                 )
             ):

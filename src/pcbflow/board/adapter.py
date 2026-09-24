@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from pcbflow.domain import ValidationReport
 from pcbflow.eda import EdaCapability
@@ -93,8 +93,8 @@ def _objects(snapshot: BoardSnapshot) -> dict[str, object]:
 
 
 def _canonical_item(snapshot: BoardSnapshot, collection: str, object_id: str) -> object:
-    values = snapshot.to_canonical_dict()[collection]
-    return next(item for item in values if item["id"] == object_id)  # type: ignore[index]
+    values = cast("list[dict[str, object]]", snapshot.to_canonical_dict()[collection])
+    return next(item for item in values if item["id"] == object_id)
 
 
 def object_locks(snapshot: BoardSnapshot) -> dict[str, bool]:
@@ -102,8 +102,8 @@ def object_locks(snapshot: BoardSnapshot) -> dict[str, bool]:
     for item in snapshot.footprints:
         result[str(item.id)] = item.placement_lock
     for collection in (snapshot.routes, snapshot.vias, snapshot.copper_zones):
-        for item in collection:
-            result[str(item.id)] = item.route_lock
+        for route_item in collection:
+            result[str(route_item.id)] = route_item.route_lock
     return result
 
 

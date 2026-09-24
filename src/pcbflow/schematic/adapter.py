@@ -45,10 +45,13 @@ from pcbflow.schematic.modules import (
     derive_module_uuid,
 )
 from pcbflow.schematic.semantic import (
+    HierarchicalPort,
     KicadSemanticError,
+    Label,
     ParsedSchematic,
     Point,
     SchematicDocument,
+    Symbol,
     inspect_schematic,
     object_ref_key,
     parse_schematic,
@@ -240,8 +243,8 @@ class CstSchematicAdapter:
                 revision = self._module_catalog.get(
                     operation.payload.module_revision_id
                 )
-                bound_module_resolutions = ()
-            else:
+                bound_module_resolutions: tuple[BoundModuleResolutionReport, ...] = ()
+            elif isinstance(operation, InstantiateBoundModuleOperation):
                 if self._bound_module_resolver is None:
                     raise UnsupportedDesignCommandError(operation.type)
                 resolution = self._bound_module_resolver.resolve_for_instantiation(
@@ -259,6 +262,8 @@ class CstSchematicAdapter:
                         live_manifest_digest=revision.manifest_digest,
                     ),
                 )
+            else:
+                raise UnsupportedDesignCommandError(operation.type)
             result, after, modified = self._instantiate(
                 project_root, before, command, revision, kicad_major=kicad_major
             )
@@ -508,9 +513,9 @@ def _apply_controlled_operations(
         if isinstance(operation, AssignFootprintOperation):
             if module_catalog is None:
                 raise ModuleRevisionNotFoundError("MODULE_CATALOG_NOT_CONFIGURED")
-            payload = operation.payload
-            symbol = _resolve_symbol(before.document, payload.subject_ref)
-            footprint = module_catalog.get_footprint(payload.footprint_revision_id)
+            fp_payload = operation.payload
+            symbol = _resolve_symbol(before.document, fp_payload.subject_ref)
+            footprint = module_catalog.get_footprint(fp_payload.footprint_revision_id)
             location = before.location(symbol.ref)
             property_nodes = {
                 node.atom_text(1): node for node in location.node.find_children("property")
@@ -537,12 +542,12 @@ def _apply_controlled_operations(
             continue
 
         if isinstance(operation, AddLabelOperation):
-            payload = operation.payload
-            if payload.target_ref.kind not in LABEL_TARGET_KINDS:
-                raise LabelTargetError(payload.target_ref.kind)
-            path, position, target_net = _label_target(before, payload.target_ref)
-            _check_label_binding(before.document, payload.name, payload.scope, target_net)
-            binding_key = (payload.name, payload.scope)
+            label_payload = operation.payload
+            if label_payload.target_ref.kind not in LABEL_TARGET_KINDS:
+                raise LabelTargetError(label_payload.target_ref.kind)
+            path, position, target_net = _label_target(before, label_payload.target_ref)
+            _check_label_binding(before.document, label_payload.name, label_payload.scope, target_net)
+            binding_key = (label_payload.name, label_payload.scope)
             if binding_key in pending_bindings:
                 pending_net = pending_bindings[binding_key]
                 if pending_net != target_net and (
@@ -550,16 +555,19 @@ def _apply_controlled_operations(
                 ):
                     raise LabelTargetError("label name/scope is already bound to another net")
             pending_bindings[binding_key] = target_net
-            label_uuid = _label_uuid(command, payload.target_ref, payload.name, payload.scope)
+            label_uuid = _label_uuid(command, label_payload.target_ref, label_payload.name, label_payload.scope)
             head = {
                 "local": "label",
                 "global": "global_label",
                 "hierarchical": "hierarchical_label",
-            }[payload.scope]
-            nodes = [make_atom(head), make_string(payload.name)]
-            if payload.scope != "local":
-                nodes.append(make_list(make_atom("shape"), make_atom("input")))
-            nodes.extend(
+            }[label_payload.scope]
+            label_nodes: list[CstAtom | CstList] = [
+                make_atom(head),
+                make_string(label_payload.name),
+            ]
+            if label_payload.scope != "local":
+                label_nodes.append(make_list(make_atom("shape"), make_atom("input")))
+            label_nodes.extend(
                 (
                     make_list(
                         make_atom("at"),
@@ -570,12 +578,12 @@ def _apply_controlled_operations(
                     make_list(make_atom("uuid"), make_atom(label_uuid)),
                 )
             )
-            inserted_by_file.setdefault(path, []).append(make_list(*nodes))
+            inserted_by_file.setdefault(path, []).append(make_list(*label_nodes))
             original_bytes.setdefault(path, path.read_bytes())
             selector = ChangeSelector(
                 ChangeKind.LABEL_ADDED,
                 SchematicObjectRef(
-                    kind="label", sheet_uuid=payload.target_ref.sheet_uuid,
+                    kind="label", sheet_uuid=label_payload.target_ref.sheet_uuid,
                     object_uuid=label_uuid, pin_number=None,
                 ),
                 None,
@@ -752,11 +760,12 @@ def _net_position(parsed: ParsedSchematic, net, location) -> Point:
         pass
     for member in net.members:
         if member.startswith(("pin:", "hierarchical_port:", "label:")):
-            for candidate in (
+            candidates: list[Symbol | HierarchicalPort | Label] = [
                 *parsed.document.symbols,
                 *(port for sheet in parsed.document.sheets for port in sheet.ports),
                 *parsed.document.labels,
-            ):
+            ]
+            for candidate in candidates:
                 references = [candidate.ref]
                 if hasattr(candidate, "pins"):
                     references.extend(pin.ref for pin in candidate.pins)
@@ -1073,6 +1082,9 @@ def _validate_port_connectivity(
 ) -> None:
     if not ports:
         return
+    assert isinstance(
+        command.operation, (InstantiateModuleOperation, InstantiateBoundModuleOperation)
+    )
     sheet = next(
         (item for item in after.sheets if item.ref.object_uuid == sheet_uuid),
         None,

@@ -20,6 +20,8 @@ from .ir import (
 )
 from .rulepack import ManufacturingRulePack
 
+_ConductiveEntity = Pad | RouteSegment | Via | CopperZone
+
 
 class BoardWriteRejectedError(ValueError):
     """A proposed BoardIR write would violate preserved native constraints."""
@@ -189,12 +191,12 @@ def validate_proposed_snapshot(
                 raise BoardWriteRejectedError(f"locked {kind} changed: {item.id}")
 
     proposed_opaque = {item.id: item for item in proposed.opaque_nodes}
-    for item in original.opaque_nodes:
-        candidate = proposed_opaque.get(item.id)
-        if candidate is None:
-            raise BoardWriteRejectedError(f"opaque node omitted: {item.id}")
-        if candidate != item:
-            raise BoardWriteRejectedError(f"opaque node changed: {item.id}")
+    for opaque in original.opaque_nodes:
+        opaque_candidate = proposed_opaque.get(opaque.id)
+        if opaque_candidate is None:
+            raise BoardWriteRejectedError(f"opaque node omitted: {opaque.id}")
+        if opaque_candidate != opaque:
+            raise BoardWriteRejectedError(f"opaque node changed: {opaque.id}")
 
 
 def _check_net_class(
@@ -308,7 +310,7 @@ def _connectivity_findings(snapshot: BoardSnapshot, rulepack: ManufacturingRuleP
         vias = tuple(item for item in snapshot.vias if item.net_id == net.id)
         if len(pads) < 2 or not routes and not vias:
             continue
-        entities: tuple[object, ...] = pads + routes + vias
+        entities: tuple[_ConductiveEntity, ...] = pads + routes + vias
         parent = list(range(len(entities)))
 
         def root(item: int) -> int:
@@ -421,7 +423,7 @@ def _copper_connectivity_findings(
     zones = tuple(item for item in snapshot.copper_zones if item.net_id == BoardObjectId("GND"))
     if not zones:
         return
-    entities: tuple[object, ...] = tuple(item for item in snapshot.pads if item.net_id == BoardObjectId("GND")) + tuple(
+    entities: tuple[_ConductiveEntity, ...] = tuple(item for item in snapshot.pads if item.net_id == BoardObjectId("GND")) + tuple(
         item for item in snapshot.routes if item.net_id == BoardObjectId("GND")
     ) + tuple(item for item in snapshot.vias if item.net_id == BoardObjectId("GND")) + zones
     parent = list(range(len(entities)))
@@ -536,7 +538,7 @@ def _segment_rect_within(start: PointUm, end: PointUm, rect: RectUm, distance: i
     return geometry.segment_rect_within(start, end, rect, distance)
 
 
-def _pad_touches(pad: Pad, entity: object, rulepack: ManufacturingRulePack, snapshot: BoardSnapshot) -> bool:
+def _pad_touches(pad: Pad, entity: _ConductiveEntity, rulepack: ManufacturingRulePack, snapshot: BoardSnapshot) -> bool:
     if isinstance(entity, Pad):
         return False
     if isinstance(entity, RouteSegment):
@@ -550,7 +552,7 @@ def _pad_touches(pad: Pad, entity: object, rulepack: ManufacturingRulePack, snap
     return _point_rect_within(entity.position, _pad_bounds(pad), entity.diameter_um // 2)
 
 
-def _conductive_contact(left: object, right: object, rulepack: ManufacturingRulePack, snapshot: BoardSnapshot) -> bool:
+def _conductive_contact(left: _ConductiveEntity, right: _ConductiveEntity, rulepack: ManufacturingRulePack, snapshot: BoardSnapshot) -> bool:
     if isinstance(left, Pad):
         return _pad_touches(left, right, rulepack, snapshot)
     if isinstance(right, Pad):

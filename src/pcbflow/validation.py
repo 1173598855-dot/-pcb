@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 
 from pcbflow.artifacts import ContentAddressedStore
 from pcbflow.domain import ProjectMode, Task, TaskLease, utc_now
@@ -199,7 +200,7 @@ class ValidationTaskHandler:
                 self._assert_active(lease)
                 parsed = parse_kicad_report(raw.kind, raw.data)
                 descriptor = self._store.put_bytes(raw.data, "application/json")
-                fence = (
+                fence: dict[str, Any] = (
                     {"lease_token": lease.lease_token, "now": self._clock()}
                     if self._tasks is not None
                     else {}

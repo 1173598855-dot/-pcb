@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
-from pcbflow.commands import SchematicObjectRef
+from pcbflow.commands import SchematicObjectKind, SchematicObjectRef
 from pcbflow.schematic.cst import CstDocument, CstList, CstNode, parse_cst
 
 
@@ -1046,7 +1046,10 @@ def _optional_node_uuid(node: CstList, path: Path, description: str) -> str | No
 
 
 def _reference(
-    kind: str, sheet_uuid: str, object_uuid: str, pin_number: str | None = None
+    kind: SchematicObjectKind,
+    sheet_uuid: str,
+    object_uuid: str,
+    pin_number: str | None = None,
 ) -> SchematicObjectRef:
     return SchematicObjectRef(
         kind=kind,

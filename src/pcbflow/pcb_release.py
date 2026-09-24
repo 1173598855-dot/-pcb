@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -187,9 +187,11 @@ class PcbReleaseTaskHandler:
             raise TerminalTaskError("PCB_RELEASE_EXPORT_FAILED", str(error)) from error
         if publication is not None:
             self._discard_or_rollback(publication)
+        # mark_ready_for_g4 persisted release_result above, so result is set here.
+        ready_result = cast("dict[str, Any]", ready.result)
         return {
             "candidate_id": candidate.id,
-            "manifest_digest": ready.result["release"]["manifest_digest"],
+            "manifest_digest": ready_result["release"]["manifest_digest"],
             "status": PcbCandidateStatus.READY_FOR_G4.value,
         }
 
@@ -355,6 +357,8 @@ class PcbReleaseTaskHandler:
     ) -> tuple[dict[str, Any], _ReleasePublication]:
         staged: dict[str, StagedArtifact] = {}
         published: list[tuple[ArtifactDescriptor, StagedArtifact]] = []
+        # _export validated candidate.result via _frozen_result before staging.
+        candidate_result = cast("dict[str, Any]", candidate.result)
         try:
             for kind in sorted(_NATIVE_RELEASE_KINDS):
                 staged[kind] = self._artifacts.stage_stream(
@@ -368,7 +372,7 @@ class PcbReleaseTaskHandler:
             manifest = ReleaseManifest(
                 schema_version="1.0",
                 candidate_id=candidate.id,
-                candidate_digest=candidate.result["candidate_digest"],
+                candidate_digest=candidate_result["candidate_digest"],
                 authority_digest=candidate.authority_digest,
                 capability_digest=candidate.capability_digest,
                 rulepack_digest=candidate.rulepack_digest,
@@ -396,7 +400,7 @@ class PcbReleaseTaskHandler:
                 {
                     "manifest_digest": manifest_descriptor.digest,
                     "artifacts": release_artifacts,
-                    "candidate_digest": candidate.result["candidate_digest"],
+                    "candidate_digest": candidate_result["candidate_digest"],
                 },
                 _ReleasePublication(
                     descriptors=(*descriptors.values(), manifest_descriptor),
@@ -495,7 +499,9 @@ class PcbReleaseApprovalService:
                     decision,
                     normalized_actor,
                     comment,
-                    persisted_decision.get("approval_artifact_digest"),
+                    # The stored payload was produced by _g4_payload with a str
+                    # digest and is compared for equality below.
+                    cast(str, persisted_decision.get("approval_artifact_digest")),
                 )
                 expected_status = (
                     PcbCandidateStatus.RELEASED.value
@@ -644,6 +650,8 @@ def _validate_candidate_summary(
     descriptor: ArtifactDescriptor,
     candidate: PcbCandidate,
 ) -> None:
+    # Callers validated candidate.result via _frozen_result before this check.
+    candidate_result = cast("dict[str, Any]", candidate.result)
     payload = _canonical_json(artifacts, descriptor.digest)
     if type(payload) is not dict or any(
         payload.get(key) != value
@@ -652,7 +660,7 @@ def _validate_candidate_summary(
             "project_id": candidate.project_id,
             "base_revision": candidate.base_revision,
             "board_snapshot_digest": candidate.board_snapshot_digest,
-            "candidate_board_snapshot_digest": candidate.result["candidate_board_snapshot_digest"],
+            "candidate_board_snapshot_digest": candidate_result["candidate_board_snapshot_digest"],
             "rulepack_digest": candidate.rulepack_digest,
             "capability_digest": candidate.capability_digest,
             "authority_digest": candidate.authority_digest,

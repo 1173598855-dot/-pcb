@@ -272,13 +272,17 @@ class FileModuleCatalog:
             if not isinstance(value, dict):
                 raise ValueError("manifest must be a mapping")
             schema_version = value.get("schema_version")
+            if not isinstance(schema_version, str):
+                raise ValueError("unsupported manifest schema version")
             model = {
                 "1.0": _ManifestModelV1,
                 "1.1": _ManifestModelV1_1,
             }.get(schema_version)
             if model is None:
                 raise ValueError("unsupported manifest schema version")
-            return model.model_validate(value, strict=True)
+            # pydantic exposes model_validate on the metaclass at runtime; the
+            # shipped stubs only declare it on the instance class.
+            return model.model_validate(value, strict=True)  # type: ignore[attr-defined]
         except (OSError, yaml.YAMLError, ValidationError, TypeError, ValueError) as error:
             raise ModuleIntegrityError("invalid module manifest") from error
 

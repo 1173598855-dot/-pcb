@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from secrets import compare_digest
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import FastAPI, Header, Request, Response
 from fastapi.encoders import jsonable_encoder
@@ -28,7 +28,11 @@ from pcbflow.api_schemas import (
 )
 from pcbflow.approvals import ApprovalDigestMismatchError
 from pcbflow.canonical import canonical_json_bytes
-from pcbflow.commands import DesignCommandSchemaError, load_command_batch
+from pcbflow.commands import (
+    Actor,
+    DesignCommandSchemaError,
+    load_command_batch,
+)
 from pcbflow.component_binding_store import ComponentModuleBindingConflictError
 from pcbflow.component_bindings import (
     ModuleCatalogUnavailableError,
@@ -223,7 +227,7 @@ def _validation_details(error: RequestValidationError) -> dict[str, object]:
 
 
 def _request_actor(
-    request: Request, actor: ActorRequest
+    request: Request, actor: ActorRequest | Actor
 ) -> tuple[str, str]:
     authenticated = getattr(request.state, "authenticated_actor", None)
     if authenticated is not None:
@@ -869,8 +873,15 @@ def create_app(container: Container | None = None) -> FastAPI:
                 "requirement payload failed strict schema validation",
                 details={
                     "fields": [
-                        ".".join(str(part) for part in item["loc"])
-                        for item in error.errors()[:32]
+                        ".".join(
+                            str(part)
+                            for part in cast("list[object]", item["loc"])
+                        )
+                        for item in (
+                            cast("list[dict[str, object]]", error.errors())
+                            if isinstance(error, ValidationError)
+                            else []
+                        )[:32]
                     ]
                 },
                 actions=["send a JSON requirement payload matching schema 1.0"],

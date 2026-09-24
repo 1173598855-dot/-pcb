@@ -230,9 +230,8 @@ def _open_regular_file(path: Path) -> Iterator[BinaryIO]:
 def _is_link_or_reparse_point(metadata: object) -> bool:
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     attributes = getattr(metadata, "st_file_attributes", 0)
-    return stat.S_ISLNK(metadata.st_mode) or bool(
-        attributes & reparse_flag
-    )
+    mode = getattr(metadata, "st_mode", 0)
+    return stat.S_ISLNK(mode) or bool(attributes & reparse_flag)
 
 
 def _read_regular_file(path: Path, max_bytes: int) -> bytes:

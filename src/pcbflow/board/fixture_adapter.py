@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from pcbflow.domain import EdaOperation, NormalizedFinding, ValidationReport
 from pcbflow.workspaces import WorkspaceCopier
@@ -15,7 +16,7 @@ from .adapter import (
     object_locks,
     semantic_diff,
 )
-from .ir import BoardSnapshot
+from .ir import BoardSnapshot, JsonObject
 from .operations import (
     AddGroundStitching,
     BoardOperation,
@@ -90,53 +91,55 @@ class FixtureBoardAdapter:
                 allowed_ids.update(placements)
                 data = proposed.to_canonical_dict()
                 deltas: dict[str, tuple[int, int]] = {}
-                for item in data["footprints"]:  # type: ignore[index]
-                    placement = placements.get(item["id"])  # type: ignore[index]
+                for item in _json_object_list(data, "footprints"):
+                    placement = placements.get(item["id"])
                     if placement is not None:
-                        previous = item["position"]  # type: ignore[index]
-                        deltas[item["id"]] = (  # type: ignore[index]
-                            placement.position.x - previous["x"],  # type: ignore[index]
-                            placement.position.y - previous["y"],  # type: ignore[index]
+                        previous = item["position"]
+                        deltas[item["id"]] = (
+                            placement.position.x - previous["x"],
+                            placement.position.y - previous["y"],
                         )
-                        item["position"] = {"x": placement.position.x, "y": placement.position.y}  # type: ignore[index]
-                        item["layer"] = placement.layer  # type: ignore[index]
-                for pad in data["pads"]:  # type: ignore[index]
-                    delta = deltas.get(pad["footprint_id"])  # type: ignore[index]
+                        item["position"] = {"x": placement.position.x, "y": placement.position.y}
+                        item["layer"] = placement.layer
+                for pad in _json_object_list(data, "pads"):
+                    delta = deltas.get(pad["footprint_id"])
                     if delta is not None:
-                        allowed_ids.add(pad["id"])  # type: ignore[index]
-                        position = pad["position"]  # type: ignore[index]
-                        pad["position"] = {  # type: ignore[index]
-                            "x": position["x"] + delta[0],  # type: ignore[index]
-                            "y": position["y"] + delta[1],  # type: ignore[index]
+                        allowed_ids.add(pad["id"])
+                        position = pad["position"]
+                        pad["position"] = {
+                            "x": position["x"] + delta[0],
+                            "y": position["y"] + delta[1],
                         }
                 proposed = BoardSnapshot.load_json(json.dumps(data, separators=(",", ":")).encode())
             elif isinstance(operation, RouteNets):
                 data = proposed.to_canonical_dict()
-                routes = {str(item["id"]): item for item in data["routes"]}  # type: ignore[index]
+                existing_routes = _json_object_list(data, "routes")
+                routes = {str(item["id"]): item for item in existing_routes}
                 removed = {str(item) for item in operation.removed_route_ids}
                 for identifier in removed:
                     route = routes.get(identifier)
                     if route is None:
                         raise ValueError(f"route removal target is missing: {identifier}")
-                    if route["route_lock"]:  # type: ignore[index]
+                    if route["route_lock"]:
                         raise ValueError(f"route removal target is locked: {identifier}")
                 existing_ids = {
                     str(item["id"])
                     for collection in ("net_classes", "nets", "keepouts", "footprints", "pads", "routes", "vias", "copper_zones", "opaque_nodes")
-                    for item in data[collection]  # type: ignore[index]
+                    for item in _json_object_list(data, collection)
                 } - removed
                 additions = operation.segments + operation.vias
-                for item in additions:
-                    if str(item.id) in existing_ids:
-                        raise ValueError(f"route addition identifier collides: {item.id}")
-                data["routes"] = [item for item in data["routes"] if str(item["id"]) not in removed] + [  # type: ignore[index]
+                for addition in additions:
+                    if str(addition.id) in existing_ids:
+                        raise ValueError(f"route addition identifier collides: {addition.id}")
+                data["routes"] = [item for item in existing_routes if str(item["id"]) not in removed] + [
                     {
                         "id": str(item.id), "net_id": str(item.net_id),
                         "start": {"x": item.start.x, "y": item.start.y}, "end": {"x": item.end.x, "y": item.end.y},
                         "width_um": item.width_um, "layer": item.layer, "route_lock": item.route_lock,
                     } for item in operation.segments
                 ]
-                data["vias"] = data["vias"] + [  # type: ignore[index]
+                existing_vias = _json_object_list(data, "vias")
+                data["vias"] = existing_vias + [
                     {
                         "id": str(item.id), "net_id": str(item.net_id),
                         "position": {"x": item.position.x, "y": item.position.y},
@@ -153,25 +156,26 @@ class FixtureBoardAdapter:
                 for zone in operation.zones:
                     if str(zone.id) in existing_ids:
                         raise ValueError(f"copper zone identifier collides: {zone.id}")
-                pads = {str(item["id"]): item for item in data["pads"]}  # type: ignore[index]
+                pads = {str(item["id"]): item for item in _json_object_list(data, "pads")}
                 for policy in operation.thermal_policies:
-                    pad = pads.get(str(policy.pad_id))
-                    if pad is None:
+                    policy_pad = pads.get(str(policy.pad_id))
+                    if policy_pad is None:
                         raise ValueError(f"thermal policy pad is missing: {policy.pad_id}")
-                    if pad["net_id"] != str(policy.net_id):
+                    if policy_pad["net_id"] != str(policy.net_id):
                         raise ValueError(
                             f"thermal policy net does not match pad: {policy.pad_id}"
                         )
                     payload = _thermal_policy_payload(policy)
                     if (
-                        pad.get("thermal_policy") is not None
-                        and pad["thermal_policy"] != payload
+                        policy_pad.get("thermal_policy") is not None
+                        and policy_pad["thermal_policy"] != payload
                     ):
                         raise ValueError(
                             f"thermal policy is locked: {policy.pad_id}"
                         )
-                    pad["thermal_policy"] = payload
-                data["copper_zones"] = data["copper_zones"] + [  # type: ignore[index]
+                    policy_pad["thermal_policy"] = payload
+                existing_zones = _json_object_list(data, "copper_zones")
+                data["copper_zones"] = existing_zones + [
                     {
                         "id": str(zone.id),
                         "net_id": str(zone.net_id),
@@ -198,7 +202,8 @@ class FixtureBoardAdapter:
                 for via in operation.vias:
                     if str(via.id) in existing_ids:
                         raise ValueError(f"ground stitching via identifier collides: {via.id}")
-                data["vias"] = data["vias"] + [  # type: ignore[index]
+                existing_vias = _json_object_list(data, "vias")
+                data["vias"] = existing_vias + [
                     {
                         "id": str(via.id),
                         "net_id": str(via.net_id),
@@ -267,6 +272,14 @@ def _snapshot_path(project_dir: Path) -> Path:
     raise FileNotFoundError(f"BoardIR fixture not found in {project_dir}")
 
 
+def _json_object_list(data: JsonObject, key: str) -> list[dict[str, Any]]:
+    """Narrow a BoardIR canonical-dict collection to a list of JSON objects."""
+    value = data[key]
+    if not isinstance(value, list):
+        raise TypeError(f"BoardIR collection {key!r} is not a list")
+    return value
+
+
 def _existing_ids(data: dict[str, object]) -> set[str]:
     collections = (
         "net_classes",
@@ -282,7 +295,7 @@ def _existing_ids(data: dict[str, object]) -> set[str]:
     return {
         str(item["id"])
         for collection in collections
-        for item in data[collection]  # type: ignore[index]
+        for item in _json_object_list(data, collection)
     }
 
 

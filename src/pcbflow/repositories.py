@@ -4,10 +4,10 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
-from sqlalchemy import and_, or_, select, text, update
+from sqlalchemy import CursorResult, and_, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -275,7 +275,9 @@ class ProjectRepository:
                     )
 
                 now = utc_now()
-                changed = session.execute(
+                changed = cast(
+                    "CursorResult[Any]",
+                    session.execute(
                     update(ProjectRow)
                     .where(
                         ProjectRow.id == project_id,
@@ -293,7 +295,7 @@ class ProjectRepository:
                         version=ProjectRow.version + 1,
                     )
                     .execution_options(synchronize_session=False)
-                )
+                ))
                 if changed.rowcount != 1:
                     session.expire_all()
                     actual = session.get(ProjectRow, project_id)
@@ -392,7 +394,9 @@ class ProjectRepository:
         expected_version: int,
     ) -> Project:
         with self._sessions.begin() as session:
-            changed = session.execute(
+            changed = cast(
+                "CursorResult[Any]",
+                session.execute(
                 update(ProjectRow)
                 .where(
                     ProjectRow.id == project_id,
@@ -405,7 +409,7 @@ class ProjectRepository:
                     version=ProjectRow.version + 1,
                 )
                 .execution_options(synchronize_session=False)
-            )
+            ))
             if changed.rowcount != 1:
                 actual = session.get(ProjectRow, project_id)
                 if actual is None:
@@ -550,7 +554,9 @@ class TaskRepository:
                 if row.status not in cancellable:
                     raise TaskNotCancellableError(task_id, row.status)
                 lease_token = row.lease_token
-                changed = session.execute(
+                changed = cast(
+                    "CursorResult[Any]",
+                    session.execute(
                     update(TaskRow)
                     .where(
                         TaskRow.id == task_id,
@@ -571,7 +577,7 @@ class TaskRepository:
                         version=row.version + 1,
                     )
                     .execution_options(synchronize_session=False)
-                )
+                ))
                 if changed.rowcount != 1:
                     continue
                 if lease_token is not None:
@@ -688,7 +694,9 @@ class TaskRepository:
                 attempt_number = row.attempt_count + 1
                 lease_token = uuid4().hex
                 lease_expires_at = now + timedelta(seconds=lease_seconds)
-                claimed = session.execute(
+                claimed = cast(
+                    "CursorResult[Any]",
+                    session.execute(
                     update(TaskRow)
                     .where(
                         TaskRow.id == row.id,
@@ -706,7 +714,7 @@ class TaskRepository:
                         version=old_version + 1,
                     )
                     .execution_options(synchronize_session=False)
-                )
+                ))
                 if claimed.rowcount != 1:
                     continue
                 session.execute(
@@ -760,7 +768,9 @@ class TaskRepository:
             raise ValueError("lease_seconds must be positive")
         lease_expires_at = now + timedelta(seconds=lease_seconds)
         with self._sessions.begin() as session:
-            changed = session.execute(
+            changed = cast(
+                "CursorResult[Any]",
+                session.execute(
                 update(TaskRow)
                 .where(
                     TaskRow.id == task_id,
@@ -777,7 +787,7 @@ class TaskRepository:
                     version=TaskRow.version + 1,
                 )
                 .execution_options(synchronize_session=False)
-            )
+            ))
             if changed.rowcount != 1:
                 raise StaleLeaseError(task_id)
         return lease_expires_at
@@ -856,7 +866,9 @@ class TaskRepository:
         **values: Any,
     ) -> None:
         with self._sessions.begin() as session:
-            changed = session.execute(
+            changed = cast(
+                "CursorResult[Any]",
+                session.execute(
                 update(TaskRow)
                 .where(
                     TaskRow.id == task_id,
@@ -867,7 +879,7 @@ class TaskRepository:
                 )
                 .values(**values, version=TaskRow.version + 1)
                 .execution_options(synchronize_session=False)
-            )
+            ))
             if changed.rowcount != 1:
                 raise StaleLeaseError(task_id)
 
@@ -885,7 +897,9 @@ class TaskRepository:
         **values: Any,
     ) -> None:
         with self._sessions.begin() as session:
-            changed = session.execute(
+            changed = cast(
+                "CursorResult[Any]",
+                session.execute(
                 update(TaskRow)
                 .where(
                     TaskRow.id == task_id,
@@ -905,7 +919,7 @@ class TaskRepository:
                     version=TaskRow.version + 1,
                 )
                 .execution_options(synchronize_session=False)
-            )
+            ))
             if changed.rowcount != 1:
                 raise StaleLeaseError(task_id)
             session.execute(
@@ -998,7 +1012,7 @@ class EvidenceRepository:
                 if evidence is None:
                     raise EvidenceConflictError(f"{task_id}:{kind}")
                 for finding in finding_values:
-                    row = session.scalar(
+                    finding_row = session.scalar(
                         select(FindingRow).where(
                             FindingRow.evidence_id == evidence.id,
                             FindingRow.rule_id == finding.rule_id,
@@ -1006,7 +1020,7 @@ class EvidenceRepository:
                             FindingRow.message == finding.message,
                         )
                     )
-                    if row is None:
+                    if finding_row is None:
                         session.add(
                             FindingRow(
                                 id=new_id("fnd"),
@@ -1021,7 +1035,7 @@ class EvidenceRepository:
                                 created_at=timestamp,
                             )
                         )
-                    elif row.severity != finding.severity:
+                    elif finding_row.severity != finding.severity:
                         raise EvidenceConflictError(finding.rule_id)
             session.flush()
             return {kind: _evidence(row) for kind, row in rows.items()}

@@ -8,7 +8,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import Any, BinaryIO, Protocol
 
 from pcbflow.cancellation import TaskCancelledError, current_cancellation_checker
 
@@ -101,7 +101,7 @@ class ProcessRunner:
         if env is not None:
             process_env.update({str(key): str(value) for key, value in env.items()})
 
-        options: dict[str, object] = {}
+        options: dict[str, Any] = {}
         if os.name == "nt":
             options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
@@ -212,6 +212,6 @@ class ProcessRunner:
                     process.kill()
         else:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
+                os.killpg(process.pid, signal.SIGKILL)  # type: ignore[attr-defined]  # POSIX-only branch
             except ProcessLookupError:
                 pass

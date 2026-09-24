@@ -463,7 +463,7 @@ class PcbCandidateExecutionTaskHandler:
                 "eda_capability": capability_descriptor,
             }
             evidence_kinds = tuple(sorted(artifact_refs))
-            evidence_set = {
+            evidence_set: dict[str, Any] = {
                 "schema_version": "1.0",
                 "candidate_id": candidate.id,
                 "project_id": candidate.project_id,

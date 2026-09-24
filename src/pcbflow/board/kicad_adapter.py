@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable
 from pathlib import Path
+from typing import NoReturn, cast
 
 from pcbflow.eda import EdaCapability
 from pcbflow.kicad import KicadPort, parse_kicad_report
@@ -100,7 +101,10 @@ class KicadBoardAdapter:
         self._kicad = kicad_cli
 
     def probe(self) -> EdaCapability:
-        return self._kicad.probe()
+        # Identity passthrough by contract (see test_adapter_probe_delegates_to_the_kicad_port);
+        # the KicadPort protocol declares KicadCapability while the board adapter interface
+        # widens it to EdaCapability.
+        return cast(EdaCapability, self._kicad.probe())
 
     def load_snapshot(self, project_dir: Path) -> BoardSnapshot:
         paths = sorted(project_dir.glob("*.kicad_pcb"))
@@ -232,7 +236,8 @@ class KicadBoardAdapter:
                     keepouts.append(Keepout(native_id, "zone", bounds, zone_layers, prohibited))
                 else:
                     net = (_atoms(_child(node, "net")) or [""])[0]
-                    clearance = _atoms(_child(_child(node, "connect_pads"), "clearance")) if _child(node, "connect_pads") else []
+                    connect_pads = _child(node, "connect_pads")
+                    clearance = _atoms(_child(connect_pads, "clearance")) if connect_pads else []
                     zones.append(CopperZone(native_id, BoardObjectId(net_names[net]), zone_layers[0], bounds, _um(clearance[0]) if clearance else rule("min_clearance", 0.2), _locked(node)))
             elif kind == "gr_rect" and (_atoms(_child(node, "layer")) or [""])[0] == "Edge.Cuts":
                 start, end = _point(_child(node, "start")), _point(_child(node, "end"))
@@ -247,7 +252,7 @@ class KicadBoardAdapter:
         return BoardSnapshot("1.0", self.profile_id, 1, outline, layers, net_classes, nets, tuple(keepouts), tuple(footprints), tuple(pads), tuple(routes), tuple(vias), tuple(zones), tuple(opaque))
 
     @staticmethod
-    def _unpreservable(kind: str) -> None:
+    def _unpreservable(kind: str) -> NoReturn:
         raise KicadBoardFormatError(f"KICAD_BOARD_UNPRESERVABLE_NODE: {kind}")
 
     def create_candidate(self, source_dir: Path, destination_dir: Path) -> CandidateWorkspace:

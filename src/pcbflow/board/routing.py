@@ -113,7 +113,7 @@ class Autorouter:
         unconnected: set[BoardObjectId] = set()
         nets = {item.id: item for item in snapshot.nets}
         congestion: dict[tuple[int, int, str], int] = {}
-        routable: dict[BoardObjectId, tuple[Net, tuple[object, ...]]] = {}
+        routable: dict[BoardObjectId, tuple[Net, tuple[Pad, ...]]] = {}
         routing_snapshot = snapshot
         solutions: dict[BoardObjectId, _Solution] = {}
         candidate_archive: dict[tuple[BoardObjectId, int], _Solution] = {}
@@ -243,16 +243,16 @@ class Autorouter:
                 ):
                     attempt_obstacles.append((None, obstacle.id))
                 attempt_obstacles.sort(key=lambda item: (item[0] is None, str(item[0] or ""), str(item[1] or "")))
-                for candidate_net, obstacle_id in attempt_obstacles:
+                for strip_net, strip_obstacle_id in attempt_obstacles:
                     cross_net_strip: set[BoardObjectId] = set()
-                    if candidate_net is not None:
+                    if strip_net is not None:
                         cross_net_strip = {
                             item.id
                             for item in routing_snapshot.routes
-                            if item.net_id == candidate_net and not item.route_lock
+                            if item.net_id == strip_net and not item.route_lock
                         }
-                    elif obstacle_id is not None:
-                        cross_net_strip = {obstacle_id}
+                    elif strip_obstacle_id is not None:
+                        cross_net_strip = {strip_obstacle_id}
                     strip = cross_net_strip | own_unlocked
                     trial = replace(
                         routing_snapshot,
@@ -265,30 +265,30 @@ class Autorouter:
                     routing_snapshot = trial
                     ripped = sorted(strip & original_unlocked_route_ids, key=str)
                     ripped_this_round.extend(ripped)
-                    if candidate_net is not None and candidate_net in solutions:
-                        solutions.pop(candidate_net, None)
-                        unresolved.append(candidate_net)
+                    if strip_net is not None and strip_net in solutions:
+                        solutions.pop(strip_net, None)
+                        unresolved.append(strip_net)
                     install(net_id, (route_segments, route_vias, path, score), strip)
                     unconnected.discard(net_id)
                     if net_id in unresolved:
                         unresolved.remove(net_id)
                     findings = [item for item in findings if not (item.rule_id == "PCB_ROUTE_UNROUTABLE" and item.subject == str(net_id))]
-                    if candidate_net is not None:
-                        candidate_info = routable.get(candidate_net)
+                    if strip_net is not None:
+                        candidate_info = routable.get(strip_net)
                         if candidate_info is not None:
                             reroute_segments, reroute_vias, reroute_path, reroute_score = _route_net(
                                 routing_snapshot, rulepack, candidate_info[0], candidate_info[1], congestion
                             )
                             if reroute_path is not None:
-                                install(candidate_net, (reroute_segments, reroute_vias, reroute_path, reroute_score), set())
-                                unconnected.discard(candidate_net)
-                                if candidate_net in unresolved:
-                                    unresolved.remove(candidate_net)
-                                findings = [item for item in findings if not (item.rule_id == "PCB_ROUTE_UNROUTABLE" and item.subject == str(candidate_net))]
+                                install(strip_net, (reroute_segments, reroute_vias, reroute_path, reroute_score), set())
+                                unconnected.discard(strip_net)
+                                if strip_net in unresolved:
+                                    unresolved.remove(strip_net)
+                                findings = [item for item in findings if not (item.rule_id == "PCB_ROUTE_UNROUTABLE" and item.subject == str(strip_net))]
                             else:
-                                unconnected.add(candidate_net)
-                                if not any(item.rule_id == "PCB_ROUTE_UNROUTABLE" and item.subject == str(candidate_net) for item in findings):
-                                    findings.append(_finding("PCB_ROUTE_UNROUTABLE", candidate_net, "no legal constrained route exists"))
+                                unconnected.add(strip_net)
+                                if not any(item.rule_id == "PCB_ROUTE_UNROUTABLE" and item.subject == str(strip_net) for item in findings):
+                                    findings.append(_finding("PCB_ROUTE_UNROUTABLE", strip_net, "no legal constrained route exists"))
                     progress = True
                     break
                 if progress:
@@ -346,14 +346,14 @@ class Autorouter:
 def _validate_candidate(
     snapshot: BoardSnapshot,
     net: Net,
-    pads: tuple[object, ...],
+    pads: tuple[Pad, ...],
     rulepack: ManufacturingRulePack,
 ) -> bool:
     """Validate candidate endpoints and layer coverage before installation."""
     if not pads or not any(candidate.layers for candidate in pads):
         return False
     for pad in pads:
-        if not any(layer in snapshot.layers for layer in pad.layers):  # type: ignore[attr-defined]
+        if not any(layer in snapshot.layers for layer in pad.layers):
             return False
     return True
 
@@ -362,7 +362,7 @@ def _route_net(
     snapshot: BoardSnapshot,
     rulepack: ManufacturingRulePack,
     net: Net,
-    pads: tuple[object, ...],
+    pads: tuple[Pad, ...],
     congestion: dict[tuple[int, int, str], int],
 ) -> tuple[list[RouteSegment], list[Via], list[tuple[PointUm, str]] | None, int]:
     # Connect each deterministic pad pair.  This creates one connected tree for

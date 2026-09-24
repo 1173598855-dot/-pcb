@@ -4,9 +4,9 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import select, text, update
+from sqlalchemy import CursorResult, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -386,8 +386,10 @@ class GateDecisionStore:
                                 raise RuntimeError("active requirement set is not frozen")
                             superseded.status = RequirementSetStatus.SUPERSEDED.value
 
-                    changed = session.execute(
-                        update(ProjectRow)
+                    changed = cast(
+                        "CursorResult[Any]",
+                        session.execute(
+                            update(ProjectRow)
                         .where(
                             ProjectRow.id == project_id,
                             ProjectRow.version == expected_project_version,
@@ -400,6 +402,7 @@ class GateDecisionStore:
                             version=ProjectRow.version + 1,
                         )
                         .execution_options(synchronize_session=False)
+                        )
                     )
                     if changed.rowcount != 1:
                         session.expire_all()
@@ -702,7 +705,7 @@ class PcbApprovalService:
                         **replay_values,
                     )
                 )
-                result = dict(row.result_json)
+                result = dict(cast("dict[str, Any]", row.result_json))
                 result["g3_decision"] = self._g3_decision_payload(
                     gate_id,
                     idempotency_key,
@@ -733,6 +736,7 @@ class PcbApprovalService:
         actor_id: str,
         comment: str,
     ) -> ArtifactDescriptor:
+        assert isinstance(candidate.result, dict)
         return self._artifacts.put_bytes(
             canonical_json_bytes(
                 {
@@ -806,12 +810,12 @@ class PcbApprovalService:
             base_revision=candidate.base_revision,
             base_snapshot_digest=candidate.base_snapshot_digest,
             board_snapshot_digest=candidate.board_snapshot_digest,
-            candidate_board_snapshot_digest=post_snapshot_digest,
+            candidate_board_snapshot_digest=cast(str, post_snapshot_digest),
             rulepack_digest=candidate.rulepack_digest,
             capability_digest=candidate.capability_digest,
             authority_digest=candidate.authority_digest,
             operations_digest=candidate.operations_digest,
-            evidence_set_digest=evidence_set_digest,
+            evidence_set_digest=cast(str, evidence_set_digest),
         )
 
     def _verify_evidence_set(self, candidate: PcbCandidate) -> bool:
@@ -1021,7 +1025,7 @@ class PcbApprovalService:
         }
         if set(payload) != expected_keys or payload["schema_version"] != "1.0":
             return False
-        expected = {
+        expected: dict[str, object] = {
             "candidate_id": candidate.id,
             "project_id": candidate.project_id,
             "base_revision": candidate.base_revision,

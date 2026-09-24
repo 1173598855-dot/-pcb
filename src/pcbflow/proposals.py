@@ -14,13 +14,18 @@ from pydantic import BaseModel, ConfigDict
 
 from pcbflow.artifacts import ArtifactDescriptor
 from pcbflow.canonical import canonical_digest, canonical_json_bytes
-from pcbflow.commands import ValidationKind, evaluate_precondition, load_command_batch
+from pcbflow.commands import (
+    CommandBatch,
+    ValidationKind,
+    evaluate_precondition,
+    load_command_batch,
+)
 from pcbflow.component_bindings import (
     ComponentModuleBindingDigestMismatchError,
     ComponentModuleBindingKicadMajorMismatchError,
     ComponentModuleBindingNotFoundError,
 )
-from pcbflow.domain import ProjectMode, RequestInvalidError, TaskLease
+from pcbflow.domain import Project, ProjectMode, RequestInvalidError, TaskLease
 from pcbflow.kicad import (
     KicadCapability,
     KicadCapabilityBoundPort,
@@ -41,7 +46,7 @@ from pcbflow.repositories import (
     TaskRepository,
 )
 from pcbflow.requirement_store import RequirementStore
-from pcbflow.requirements import RequirementSetStatus
+from pcbflow.requirements import RequirementSet, RequirementSetStatus
 from pcbflow.revisions import RevisionService
 from pcbflow.schematic.adapter import CstSchematicAdapter
 from pcbflow.schematic.diff import (
@@ -901,7 +906,9 @@ class ProposalDecisionService:
             raise IdempotencyConflictError(idempotency_key)
         return self._proposal_store.get(proposal_id)
 
-    def _validate_candidate(self, proposal: ChangeProposal, candidate_digest: str) -> tuple[object, object, object, dict[str, EvidenceItem]]:
+    def _validate_candidate(
+        self, proposal: ChangeProposal, candidate_digest: str
+    ) -> tuple[Project, CommandBatch, RequirementSet, dict[str, EvidenceItem]]:
         if proposal.status is not ProposalStatus.READY_FOR_REVIEW:
             raise CandidateNotReviewableError("candidate is not ready_for_review")
         if proposal.review_digest != candidate_digest:

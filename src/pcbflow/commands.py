@@ -33,16 +33,19 @@ class ValidationKind(StrEnum):
     KICAD_ERC = "kicad_erc"
 
 
+SchematicObjectKind = Literal[
+    "sheet",
+    "symbol",
+    "pin",
+    "hierarchical_port",
+    "label",
+    "net",
+    "wire_endpoint",
+]
+
+
 class SchematicObjectRef(StrictCommandModel):
-    kind: Literal[
-        "sheet",
-        "symbol",
-        "pin",
-        "hierarchical_port",
-        "label",
-        "net",
-        "wire_endpoint",
-    ]
+    kind: SchematicObjectKind
     sheet_uuid: str = Field(min_length=1)
     object_uuid: str = Field(min_length=1)
     pin_number: str | None

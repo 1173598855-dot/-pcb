@@ -2,13 +2,25 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict
 
 from pcbflow.canonical import canonical_json_bytes
 from pcbflow.commands import RiskLevel, SchematicObjectRef
-from pcbflow.schematic.semantic import SchematicDocument, object_ref_key
+from pcbflow.schematic.semantic import (
+    FootprintAssignment,
+    Label,
+    NetConnectivity,
+    SchematicDocument,
+    Sheet,
+    Symbol,
+    object_ref_key,
+)
+
+# Every diffed semantic object carries a `.ref`; the value restriction keeps
+# `asdict()` and attribute access precise per call site.
+_Diffable = TypeVar("_Diffable", Sheet, Symbol, Label, NetConnectivity)
 
 
 class ChangeKind(StrEnum):
@@ -105,7 +117,8 @@ def build_semantic_diff(
         previous = before_nets.get(key)
         current = after_nets.get(key)
         if previous != current:
-            reference = current.ref if current is not None else previous.ref
+            # The inequality guard means previous and current are never both None.
+            reference = current.ref if current is not None else cast(NetConnectivity, previous).ref
             pending.append(
                 (
                     ChangeKind.NET_CONNECTIVITY_CHANGED,
@@ -135,8 +148,8 @@ def build_semantic_diff(
     )
 
 
-def _index_by_ref(items: tuple[object, ...]) -> dict[str, object]:
-    indexed: dict[str, object] = {}
+def _index_by_ref(items: tuple[_Diffable, ...]) -> dict[str, _Diffable]:
+    indexed: dict[str, _Diffable] = {}
     for item in items:
         reference = item.ref
         key = object_ref_key(reference)
@@ -146,8 +159,8 @@ def _index_by_ref(items: tuple[object, ...]) -> dict[str, object]:
     return indexed
 
 
-def _index_footprints(items: tuple[object, ...]) -> dict[str, object]:
-    indexed: dict[str, object] = {}
+def _index_footprints(items: tuple[FootprintAssignment, ...]) -> dict[str, FootprintAssignment]:
+    indexed: dict[str, FootprintAssignment] = {}
     for item in items:
         key = object_ref_key(item.symbol_ref)
         if key in indexed:
@@ -159,8 +172,8 @@ def _index_footprints(items: tuple[object, ...]) -> dict[str, object]:
 def _added_removed(
     added_kind: ChangeKind,
     removed_kind: ChangeKind,
-    before: dict[str, object],
-    after: dict[str, object],
+    before: dict[str, _Diffable],
+    after: dict[str, _Diffable],
 ) -> list[tuple[ChangeKind, SchematicObjectRef, object | None, object | None, str | None]]:
     changes: list[tuple[ChangeKind, SchematicObjectRef, object | None, object | None, str | None]] = []
     for key in sorted(set(after) - set(before)):
@@ -173,7 +186,7 @@ def _added_removed(
 
 
 def _symbol_changes(
-    before: dict[str, object], after: dict[str, object]
+    before: dict[str, Symbol], after: dict[str, Symbol]
 ) -> list[tuple[ChangeKind, SchematicObjectRef, object | None, object | None, str | None]]:
     changes: list[tuple[ChangeKind, SchematicObjectRef, object | None, object | None, str | None]] = []
     for key in sorted(set(before) & set(after)):
@@ -209,8 +222,8 @@ def _symbol_changes(
     return changes
 
 
-def _symbol_property_values(symbol: object) -> dict[str, str | None]:
-    values = {property_.name: property_.value for property_ in symbol.properties}
+def _symbol_property_values(symbol: Symbol) -> dict[str, str | None]:
+    values: dict[str, str | None] = {property_.name: property_.value for property_ in symbol.properties}
     values["Reference"] = symbol.reference
     values["Value"] = symbol.value
     values["Footprint"] = symbol.footprint
@@ -218,8 +231,8 @@ def _symbol_property_values(symbol: object) -> dict[str, str | None]:
 
 
 def _footprint_assignment_changes(
-    before: dict[str, object],
-    after: dict[str, object],
+    before: dict[str, FootprintAssignment],
+    after: dict[str, FootprintAssignment],
     already_changed: set[str],
     unchanged_symbol_identity: set[str],
 ) -> list[tuple[ChangeKind, SchematicObjectRef, object | None, object | None, str | None]]:
@@ -234,7 +247,12 @@ def _footprint_assignment_changes(
             and key not in already_changed
             and old_library_id != new_library_id
         ):
-            reference = current.symbol_ref if current is not None else previous.symbol_ref
+            # The inequality guard means previous and current are never both None.
+            reference = (
+                current.symbol_ref
+                if current is not None
+                else cast(FootprintAssignment, previous).symbol_ref
+            )
             changes.append(
                 (
                     ChangeKind.FOOTPRINT_CHANGED,

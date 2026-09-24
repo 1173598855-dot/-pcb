@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any, cast
 
-from sqlalchemy import and_, or_, select, text, update
+from sqlalchemy import CursorResult, and_, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -404,10 +405,10 @@ class ProposalStore:
                 raise ProposalNotFoundError(proposal_id)
             if row.status not in (ProposalStatus.QUEUED.value, ProposalStatus.EXECUTING.value):
                 return _proposal(row)
-            changed = session.execute(update(ChangeProposalRow).where(ChangeProposalRow.id == proposal_id,
+            changed = cast("CursorResult[Any]", session.execute(update(ChangeProposalRow).where(ChangeProposalRow.id == proposal_id,
                 ChangeProposalRow.task_id == task_id, ChangeProposalRow.version == row.version,
                 ChangeProposalRow.status.in_([ProposalStatus.QUEUED.value, ProposalStatus.EXECUTING.value])).values(
-                    status=ProposalStatus.EXECUTING.value, updated_at=now, version=ChangeProposalRow.version + 1))
+                    status=ProposalStatus.EXECUTING.value, updated_at=now, version=ChangeProposalRow.version + 1)))
             if changed.rowcount != 1:
                 raise StaleLeaseError(task_id)
             session.expire_all(); refreshed = session.get(ChangeProposalRow, proposal_id); assert refreshed is not None
@@ -423,10 +424,10 @@ class ProposalStore:
             if row is None or row.task_id != task_id: raise ProposalNotFoundError(proposal_id)
             if row.status != ProposalStatus.VALIDATION_FAILED.value:
                 if row.status not in (ProposalStatus.EXECUTING.value, ProposalStatus.QUEUED.value): raise StaleLeaseError(task_id)
-                changed = session.execute(update(ChangeProposalRow).where(ChangeProposalRow.id == proposal_id, ChangeProposalRow.version == row.version).values(
+                changed = cast("CursorResult[Any]", session.execute(update(ChangeProposalRow).where(ChangeProposalRow.id == proposal_id, ChangeProposalRow.version == row.version).values(
                     status=ProposalStatus.VALIDATION_FAILED.value, last_error_code=error_code,
                     semantic_diff_digest=semantic_diff_digest, evidence_set_digest=evidence_set_digest,
-                    result_json=result, updated_at=now, version=ChangeProposalRow.version + 1))
+                    result_json=result, updated_at=now, version=ChangeProposalRow.version + 1)))
                 if changed.rowcount != 1: raise StaleLeaseError(task_id)
             self._register_evidence(session, row, evidence, now, proposal_id)
             batch = session.get(DesignCommandBatchRow, row.command_batch_id)
@@ -489,11 +490,11 @@ class ProposalStore:
                     )):
                 raise ValueError("invalid proposal evidence set contents")
             self._register_evidence(session, row, evidence, now, f"{proposal_id}@{candidate_revision}")
-            changed = session.execute(update(ChangeProposalRow).where(ChangeProposalRow.id == proposal_id, ChangeProposalRow.task_id == task_id, ChangeProposalRow.version == row.version).values(
+            changed = cast("CursorResult[Any]", session.execute(update(ChangeProposalRow).where(ChangeProposalRow.id == proposal_id, ChangeProposalRow.task_id == task_id, ChangeProposalRow.version == row.version).values(
                 status=ProposalStatus.READY_FOR_REVIEW.value, candidate_revision=candidate_revision,
                 candidate_snapshot_digest=candidate_snapshot_digest, review_digest=review_digest,
                 semantic_diff_digest=semantic_diff_digest, evidence_set_digest=evidence_set_digest,
-                result_json=result, updated_at=now, version=ChangeProposalRow.version + 1))
+                result_json=result, updated_at=now, version=ChangeProposalRow.version + 1)))
             if changed.rowcount != 1: raise StaleLeaseError(task_id)
             payload = audit_payload(
                 actor_type="service",
@@ -661,13 +662,13 @@ class ProposalStore:
                     subject=f"{proposal_id}@{candidate_revision}", verdict="pass",
                     created_at=now,
                 ))
-                changed = session.execute(update(ProjectRow).where(
+                changed = cast("CursorResult[Any]", session.execute(update(ProjectRow).where(
                     ProjectRow.id == row.project_id,
                     ProjectRow.current_revision == base_revision,
                     ProjectRow.version == expected_project_version,
                 ).values(current_revision=candidate_revision,
                          project_snapshot_digest=candidate_snapshot_digest,
-                         version=ProjectRow.version + 1))
+                         version=ProjectRow.version + 1)))
                 if changed.rowcount != 1:
                     session.expire_all()
                     actual = session.get(ProjectRow, row.project_id)

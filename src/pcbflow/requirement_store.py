@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -207,7 +207,7 @@ class RequirementStore:
                 )
 
         descriptor = self._artifacts.put_bytes(canonical, _REQUIREMENT_MEDIA_TYPE)
-        values = {
+        values: dict[str, Any] = {
             "project_id": project_id,
             "base_revision": base_revision,
             "payload_json": payload_json,
@@ -271,19 +271,22 @@ class RequirementStore:
         descriptor = self._artifacts.put_bytes(canonical, _REQUIREMENT_MEDIA_TYPE)
         with self._sessions.begin() as session:
             self._register_artifact(session, descriptor)
-            changed = session.execute(
-                update(RequirementSetRow)
-                .where(
-                    RequirementSetRow.id == requirement_set_id,
-                    RequirementSetRow.status == RequirementSetStatus.DRAFT.value,
-                )
-                .values(
-                    schema_version=payload.schema_version,
-                    payload_json=payload_json,
-                    canonical_digest=requirement_digest(payload),
-                    canonical_artifact_digest=descriptor.digest,
-                )
-                .execution_options(synchronize_session=False)
+            changed = cast(
+                "CursorResult[Any]",
+                session.execute(
+                    update(RequirementSetRow)
+                    .where(
+                        RequirementSetRow.id == requirement_set_id,
+                        RequirementSetRow.status == RequirementSetStatus.DRAFT.value,
+                    )
+                    .values(
+                        schema_version=payload.schema_version,
+                        payload_json=payload_json,
+                        canonical_digest=requirement_digest(payload),
+                        canonical_artifact_digest=descriptor.digest,
+                    )
+                    .execution_options(synchronize_session=False)
+                ),
             )
             if changed.rowcount != 1:
                 raise ValueError("submitted requirement content is immutable")
