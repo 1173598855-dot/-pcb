@@ -8,6 +8,8 @@ network access.
 from __future__ import annotations
 
 import asyncio
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -243,17 +245,13 @@ def test_default_chains_are_well_formed() -> None:
 
 
 def test_post_json_sync_reports_transport_failure(monkeypatch) -> None:
-    # A closed local port refuses immediately. Disable any ambient proxy so
-    # the failure is a connection error rather than a slow proxied timeout.
-    for variable in (
-        "http_proxy",
-        "https_proxy",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "all_proxy",
-        "ALL_PROXY",
-    ):
-        monkeypatch.delenv(variable, raising=False)
+    # Hermetic: a real closed port can be intercepted by proxies, security
+    # software, or registry-level Windows proxy settings, so raise the
+    # transport error directly instead of depending on the network stack.
+    def refuse(request, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
 
     with pytest.raises(RuntimeError, match="Local model"):
         _post_json_sync(
