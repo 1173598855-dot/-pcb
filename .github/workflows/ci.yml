@@ -20,7 +20,6 @@ jobs:
           python-version: "3.13"
       - run: pip install -e ".[dev]"
       - run: ruff check src tests
-      - run: mypy src/pcbflow
 
   test:
     # The project is Windows-first (PowerShell workflows, Windows process
@@ -34,4 +33,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -e ".[dev]"
+      # The codebase guards Windows/POSIX names behind os.name checks that
+      # mypy does not fold, so type-check on the project's primary platform.
+      - run: mypy src/pcbflow
       - run: pytest -q -n auto --cov=pcbflow --cov-report=term --cov-fail-under=88
