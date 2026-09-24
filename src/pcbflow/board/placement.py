@@ -424,54 +424,54 @@ def _solve_cp_sat(
     for footprint in snapshot.footprints:
         identifier = str(footprint.id)
         candidates = cells[identifier]
-        choice = model.NewIntVar(0, len(candidates) - 1, f"choice_{identifier}")
+        choice = model.new_int_var(0, len(candidates) - 1, f"choice_{identifier}")
         lefts = [2 * item.x - footprint.width_um for item in candidates]
         tops = [2 * item.y - footprint.height_um for item in candidates]
-        x = model.NewIntVar(min(lefts), max(lefts), f"left_{identifier}")
-        y = model.NewIntVar(min(tops), max(tops), f"top_{identifier}")
-        model.AddElement(choice, lefts, x)
-        model.AddElement(choice, tops, y)
-        end_x = model.NewIntVar(
+        x = model.new_int_var(min(lefts), max(lefts), f"left_{identifier}")
+        y = model.new_int_var(min(tops), max(tops), f"top_{identifier}")
+        model.add_element(choice, lefts, x)
+        model.add_element(choice, tops, y)
+        end_x = model.new_int_var(
             min(lefts) + 2 * footprint.width_um + 1,
             max(lefts) + 2 * footprint.width_um + 1,
             f"end_x_{identifier}",
         )
-        end_y = model.NewIntVar(
+        end_y = model.new_int_var(
             min(tops) + 2 * footprint.height_um + 1,
             max(tops) + 2 * footprint.height_um + 1,
             f"end_y_{identifier}",
         )
-        model.Add(end_x == x + 2 * footprint.width_um + 1)
-        model.Add(end_y == y + 2 * footprint.height_um + 1)
-        x_intervals.append(model.NewIntervalVar(x, 2 * footprint.width_um + 1, end_x, f"ix_{identifier}"))
-        y_intervals.append(model.NewIntervalVar(y, 2 * footprint.height_um + 1, end_y, f"iy_{identifier}"))
+        model.add(end_x == x + 2 * footprint.width_um + 1)
+        model.add(end_y == y + 2 * footprint.height_um + 1)
+        x_intervals.append(model.new_interval_var(x, 2 * footprint.width_um + 1, end_x, f"ix_{identifier}"))
+        y_intervals.append(model.new_interval_var(y, 2 * footprint.height_um + 1, end_y, f"iy_{identifier}"))
         if not footprint.placement_lock:
             original_left = 2 * footprint.position.x - footprint.width_um
             original_top = 2 * footprint.position.y - footprint.height_um
-            dx = model.NewIntVar(
+            dx = model.new_int_var(
                 0,
                 max(abs(left - original_left) for left in lefts),
                 f"dx_{identifier}",
             )
-            dy = model.NewIntVar(
+            dy = model.new_int_var(
                 0,
                 max(abs(top - original_top) for top in tops),
                 f"dy_{identifier}",
             )
-            model.AddAbsEquality(dx, x - original_left)
-            model.AddAbsEquality(dy, y - original_top)
+            model.add_abs_equality(dx, x - original_left)
+            model.add_abs_equality(dy, y - original_top)
             displacements.extend((dx, dy))
         choices[identifier] = choice
         candidate_sets[identifier] = candidates
     for key in sorted(excluded or ()):
         positions = {identifier: PointUm(x, y) for identifier, x, y in key}
-        model.AddForbiddenAssignments(
+        model.add_forbidden_assignments(
             list(choices.values()),
             [[candidate_sets[identifier].index(positions[identifier]) for identifier in choices]],
         )
-    model.AddNoOverlap2D(x_intervals, y_intervals)
+    model.add_no_overlap_2d(x_intervals, y_intervals)
     if displacements:
-        model.Minimize(sum(displacements))
+        model.minimize(sum(displacements))
     solver = cp_model.CpSolver()
     solver.parameters.num_search_workers = 1
     solver.parameters.random_seed = seed
