@@ -10,7 +10,8 @@
   `pcb_candidate_codec` / `pcb_candidate_store` / `pcb_candidate_execution`
   四个模块；原模块保留为兼容 re-export 门面。
 - 工程化补全：GitHub Actions CI（ruff + Windows 全量测试 + 覆盖率门槛）、
-  ruff（`E9,F,I`，行宽 200）、pre-commit、pytest-timeout（每测试 600s）、
+  ruff（pycodestyle/pyflakes/isort/bugbear/simplify/pyupgrade，行宽 200）、
+  pre-commit、pytest-timeout（每测试 600s）、
   pytest-xdist、`requirements-lock.txt` 依赖锁定。
 
 ## 2026-08-10 实测完成记录
@@ -374,7 +375,8 @@ git diff --check
 快速检查与并行运行：
 
 ```powershell
-# lint（E9/F/I，行宽 200）与类型检查（mypy 已清零并纳入 CI 门禁）
+# lint（pycodestyle 实用子集 + pyflakes + isort + bugbear + simplify + pyupgrade）
+# 类型检查已清零并纳入 CI 门禁
 .\.venv\Scripts\ruff.exe check src tests
 .\.venv\Scripts\mypy.exe src/pcbflow
 
