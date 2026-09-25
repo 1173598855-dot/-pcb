@@ -401,13 +401,16 @@ def _is_legal(snapshot: BoardSnapshot, footprint: Footprint, position: PointUm) 
             return False
         if keepout.kind in {"crystal_near_field", "power_zone"} and str(keepout.id) in allowed and not intersects:
             return False
-    if str(footprint.id) in _footprints_with_net_class(snapshot, "quiet_signal"):
-        if any(
-            bounds.intersects(_doubled_rect(item.bounds))
-            for item in snapshot.keepouts
-            if item.kind == "power_zone"
-        ):
-            return False
+    quiet_signal_footprint = str(footprint.id) in _footprints_with_net_class(
+        snapshot, "quiet_signal"
+    )
+    if not quiet_signal_footprint:
+        return True
+    return not any(
+        bounds.intersects(_doubled_rect(item.bounds))
+        for item in snapshot.keepouts
+        if item.kind == "power_zone"
+    )
     return True
 
 

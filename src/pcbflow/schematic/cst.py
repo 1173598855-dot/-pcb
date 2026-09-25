@@ -93,7 +93,9 @@ class CstEdit:
 _ASCII_WHITESPACE = frozenset(b" \t\r\n\v\f")
 
 
-def parse_cst(data: bytes, limits: CstLimits = CstLimits()) -> CstDocument:
+def parse_cst(
+    data: bytes, limits: CstLimits = CstLimits()  # noqa: B008  # CstLimits is a frozen, immutable dataclass used as a shared default
+) -> CstDocument:
     if not isinstance(data, bytes):
         raise TypeError("CST source must be bytes")
     if len(data) > limits.max_file_bytes:

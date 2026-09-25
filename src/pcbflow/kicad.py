@@ -238,8 +238,8 @@ class KicadCli:
 
         if os.name == "nt":
             roots = (
-                Path(os.environ.get("ProgramFiles", "C:/Program Files")),
-                Path(os.environ.get("LocalAppData", "C:/Users/Default/AppData/Local"))
+                Path(os.environ.get("PROGRAMFILES", "C:/Program Files")),
+                Path(os.environ.get("LOCALAPPDATA", "C:/Users/Default/AppData/Local"))
                 / "Programs",
             )
             candidates: list[tuple[tuple[int, int], Path]] = []

@@ -171,7 +171,7 @@ def test_module_catalog_uses_literal_raw_template_digest() -> None:
         (module_dir / "status-led.kicad_sch").read_bytes()
     ).hexdigest()
 
-    assert TEMPLATE_DIGEST == template_digest
+    assert template_digest == TEMPLATE_DIGEST
     assert f"digest: {TEMPLATE_DIGEST}" in manifest
 
 

@@ -141,7 +141,7 @@ class ProjectRepository:
                     )
                     session.flush()
             return _project(row), True
-        except IntegrityError:
+        except IntegrityError as error:
             # A concurrent creator may win between the read and the insert.
             # Re-read the durable row and apply the same idempotency contract.
             with self._sessions() as session:
@@ -153,7 +153,7 @@ class ProjectRepository:
                 if row is None:
                     raise
                 if row.name != name or Path(row.source_path) != resolved:
-                    raise IdempotencyConflictError(idempotency_key)
+                    raise IdempotencyConflictError(idempotency_key) from error
                 self._assert_registration_replay(
                     row, name, resolved, authority, idempotency_key
                 )
@@ -455,7 +455,7 @@ class TaskRepository:
                 return self.enqueue_in_session(
                     session, kind, payload, idempotency_key, project_id
                 )
-        except IntegrityError:
+        except IntegrityError as error:
             with self._sessions() as session:
                 row = session.scalar(
                     select(TaskRow).where(TaskRow.idempotency_key == idempotency_key)
@@ -467,7 +467,7 @@ class TaskRepository:
                     or row.project_id != project_id
                     or row.payload_json != payload
                 ):
-                    raise IdempotencyConflictError(idempotency_key)
+                    raise IdempotencyConflictError(idempotency_key) from error
                 return _task(row)
 
     def enqueue_in_session(

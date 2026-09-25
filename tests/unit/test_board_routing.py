@@ -72,7 +72,13 @@ def test_gpio_routes_deterministically_with_replayable_evidence(snapshot: BoardS
 
 @pytest.mark.parametrize(
     ("net_id", "rule_id"),
-    [("I2C", "PCB_ROUTE_ENDPOINTS_INSUFFICIENT"), ("3V3", "PCB_POWER_ROUTE_REQUIRES_TOPOLOGY"), ("RELAY_LOAD", "PCB_POWER_ROUTE_REQUIRES_TOPOLOGY"), ("GND", "PCB_ROUTE_NET_CLASS_UNSUPPORTED"), ("NO_SUCH_NET", "PCB_ROUTE_UNKNOWN_NET")],
+    [
+        ("I2C", "PCB_ROUTE_ENDPOINTS_INSUFFICIENT"),
+        ("3V3", "PCB_POWER_ROUTE_REQUIRES_TOPOLOGY"),
+        ("RELAY_LOAD", "PCB_POWER_ROUTE_REQUIRES_TOPOLOGY"),
+        ("GND", "PCB_ROUTE_NET_CLASS_UNSUPPORTED"),
+        ("NO_SUCH_NET", "PCB_ROUTE_UNKNOWN_NET"),
+    ],
 )
 def test_router_returns_stable_non_geometry_findings(snapshot: BoardSnapshot, rulepack: ManufacturingRulePack, net_id: str, rule_id: str) -> None:
     result = Autorouter().route(snapshot, rulepack, (net_id,), seed=7)
@@ -85,7 +91,13 @@ def test_router_returns_stable_non_geometry_findings(snapshot: BoardSnapshot, ru
 def test_router_reports_off_grid_and_unrouteable_without_relaxing_constraints(snapshot: BoardSnapshot, rulepack: ManufacturingRulePack) -> None:
     pads = tuple(replace(pad, position=PointUm(15_500, 30_000)) if str(pad.id) == "pad_J_SWD" else pad for pad in snapshot.pads)
     off_grid = Autorouter().route(replace(snapshot, pads=pads), rulepack, ("GPIO",), seed=1)
-    blocked = replace(snapshot, keepouts=snapshot.keepouts + (replace(snapshot.keepouts[0], id=BoardObjectId("ko_all"), bounds=__import__("pcbflow.board", fromlist=["RectUm"]).RectUm(0, 0, 100_000, 80_000), prohibited=("route", "via")),))
+    wide_keepout = replace(
+        snapshot.keepouts[0],
+        id=BoardObjectId("ko_all"),
+        bounds=__import__("pcbflow.board", fromlist=["RectUm"]).RectUm(0, 0, 100_000, 80_000),
+        prohibited=("route", "via"),
+    )
+    blocked = replace(snapshot, keepouts=snapshot.keepouts + (wide_keepout,))
     impossible = Autorouter().route(blocked, rulepack, ("GPIO",), seed=1)
 
     assert off_grid.findings[0].rule_id == "PCB_ROUTE_ENDPOINT_OFF_GRID"
@@ -119,10 +131,8 @@ def test_router_respects_quiet_zone_exclusion_via_cap_and_locked_geometry(snapsh
 def test_fixture_adapter_rejects_missing_locked_and_colliding_route_targets(snapshot: BoardSnapshot, rulepack: ManufacturingRulePack, tmp_path: Path) -> None:
     # 清理 .pytest-tmp 目录，防止权限冲突
     import shutil
-    try:
-        shutil.rmtree(".pytest-tmp", ignore_errors=True)
-    except Exception:
-        pass
+
+    shutil.rmtree(".pytest-tmp", ignore_errors=True)
 
     source = tmp_path / "source"
     source.mkdir()

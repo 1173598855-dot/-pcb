@@ -410,12 +410,11 @@ def test_windows_file_lock_propagates_non_contention_errors(tmp_path: Path) -> N
     def locking(_descriptor: int, _mode: int, _length: int) -> None:
         raise OSError(errno.EIO, "disk error")
 
-    with lock_path.open("w+b") as lock_file:
-        with pytest.raises(OSError, match="disk error"):
-            _acquire_windows_file_lock(
-                lock_file,
-                locking=locking,
-                wait=waits.append,
-            )
+    with lock_path.open("w+b") as lock_file, pytest.raises(OSError, match="disk error"):
+        _acquire_windows_file_lock(
+            lock_file,
+            locking=locking,
+            wait=waits.append,
+        )
 
     assert waits == []

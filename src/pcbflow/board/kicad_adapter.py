@@ -126,7 +126,10 @@ class KicadBoardAdapter:
         net_names = {values[0]: values[1] for node in _children(root, "net") if len(values := _atoms(node)) >= 2 and values[0] != "0"}
         setup = _child(root, "setup")
         rules = _child(setup, "rules") if setup else None
-        rule = lambda name, default: _um((_atoms(_child(rules, name)) or [str(default)])[0]) if rules else _um(str(default))
+        def rule(name: str, default: float) -> int:
+            if rules:
+                return _um((_atoms(_child(rules, name)) or [str(default)])[0])
+            return _um(str(default))
         min_via = rule("min_via_size", 0.6)
         min_hole = rule("min_through_hole", 0.3)
         if min_hole >= min_via:
@@ -197,7 +200,8 @@ class KicadBoardAdapter:
                     width, height = max(1, bounds.width), max(1, bounds.height)
                 footprints.append(Footprint(native_id, origin, width, height, layer, tuple(pad_ids), (), _locked(node)))
             elif kind == "segment":
-                if native_id is None: self._unpreservable(kind)
+                if native_id is None:
+                    self._unpreservable(kind)
                 net = (_atoms(_child(node, "net")) or [""])[0]
                 routes.append(
                     RouteSegment(
@@ -211,7 +215,8 @@ class KicadBoardAdapter:
                     )
                 )
             elif kind == "via":
-                if native_id is None: self._unpreservable(kind)
+                if native_id is None:
+                    self._unpreservable(kind)
                 net = (_atoms(_child(node, "net")) or [""])[0]
                 vias.append(
                     Via(
@@ -225,7 +230,8 @@ class KicadBoardAdapter:
                     )
                 )
             elif kind == "zone":
-                if native_id is None: self._unpreservable(kind)
+                if native_id is None:
+                    self._unpreservable(kind)
                 polygon = _child(node, "polygon")
                 pts = tuple(_point(point) for point in _children(_child(polygon, "pts") or polygon, "xy")) if polygon else ()
                 bounds = _rect(pts)

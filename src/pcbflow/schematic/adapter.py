@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import time
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -650,10 +651,8 @@ def _apply_controlled_operations(
         build_semantic_diff(before.document, after, attributions)
     except Exception:
         for path, data in original_bytes.items():
-            try:
+            with suppress(OSError):
                 _atomic_replace(path, data)
-            except OSError:
-                pass
         raise
     command_results = tuple(
         CommandResult(

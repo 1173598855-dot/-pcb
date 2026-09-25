@@ -161,7 +161,7 @@ class Autorouter:
                     vias=routing_snapshot.vias + tuple(value[1]),
                 )
             solutions[net_id] = value
-            paths.append(RoutePathEvidence(net_id, tuple(p[0] for p in value[2]), tuple(l for _, l in value[2]), value[3], len(value[1])))
+            paths.append(RoutePathEvidence(net_id, tuple(p[0] for p in value[2]), tuple(layer for _, layer in value[2]), value[3], len(value[1])))
             _record_congestion(congestion, value[2])
 
         # Negotiation is intentionally bounded. The initial round replaces only
@@ -227,7 +227,7 @@ class Autorouter:
                     and item.id in original_unlocked_route_ids
                 }
                 attempt_obstacles: list[tuple[BoardObjectId | None, BoardObjectId | None]] = []
-                for candidate_net, candidate in sorted(solutions.items(), key=lambda item: str(item[0])):
+                for candidate_net, _candidate in sorted(solutions.items(), key=lambda item: str(item[0])):
                     if candidate_net == net_id:
                         continue
                     attempt_obstacles.append((candidate_net, None))
@@ -352,10 +352,10 @@ def _validate_candidate(
     """Validate candidate endpoints and layer coverage before installation."""
     if not pads or not any(candidate.layers for candidate in pads):
         return False
-    for pad in pads:
-        if not any(layer in snapshot.layers for layer in pad.layers):
-            return False
-    return True
+    return all(
+        any(layer in snapshot.layers for layer in pad.layers)
+        for pad in pads
+    )
 
 
 def _route_net(

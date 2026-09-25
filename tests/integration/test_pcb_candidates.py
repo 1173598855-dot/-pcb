@@ -24,7 +24,7 @@ from pcbflow.pcb_candidates import (
     PcbCandidateNotReviewableError,
     PcbCandidateStatus,
 )
-from pcbflow.repositories import StaleLeaseError
+from pcbflow.repositories import IdempotencyConflictError, StaleLeaseError
 from pcbflow.tables import TaskRow
 
 _DIGEST = "sha256:" + "a" * 64
@@ -226,7 +226,7 @@ def test_candidate_replay_rejects_changed_frozen_inputs(container, lceda_project
         "require_capability": False,
     }
     original = container.pcb_candidates.create(**kwargs)
-    with pytest.raises(Exception):
+    with pytest.raises(IdempotencyConflictError):
         container.pcb_candidates.create(
             **{**kwargs, "board_snapshot_digest": "sha256:" + "9" * 64}
         )

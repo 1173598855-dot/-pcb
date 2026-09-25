@@ -78,9 +78,8 @@ def test_structured_log_context_is_allowlisted_and_trace_bound(
     assert record.result == "pass"
     assert "C:\\Users" not in record.getMessage()
 
-    with pytest.raises(ValueError, match="unsupported log field"):
-        with bind_log_context(source_path="C:/secret/project"):
-            pass
+    with pytest.raises(ValueError, match="unsupported log field"), bind_log_context(source_path="C:/secret/project"):
+        pass
 
 
 def test_audit_payload_contains_complete_reviewable_context() -> None:

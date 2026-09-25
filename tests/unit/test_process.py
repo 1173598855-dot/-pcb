@@ -101,28 +101,27 @@ def test_runner_reaps_process_when_cancellation_probe_raises(tmp_path: Path) -> 
         return False
 
     try:
-        with pytest.raises(RuntimeError, match="cancellation state"):
-            with task_cancellation_scope(broken_checker):
-                ProcessRunner(max_output_bytes=1_024).run(
-                    [
-                        sys.executable,
-                        "-c",
-                        (
-                            "from pathlib import Path\n"
-                            "import sys\n"
-                            "import time\n"
-                            "heartbeat = Path(sys.argv[1])\n"
-                            "stop = Path(sys.argv[2])\n"
-                            "while not stop.exists():\n"
-                            "    heartbeat.write_text(str(time.monotonic()), encoding='utf-8')\n"
-                            "    time.sleep(0.01)\n"
-                        ),
-                        str(heartbeat),
-                        str(stop),
-                    ],
-                    tmp_path,
-                    30,
-                )
+        with pytest.raises(RuntimeError, match="cancellation state"), task_cancellation_scope(broken_checker):
+            ProcessRunner(max_output_bytes=1_024).run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path\n"
+                        "import sys\n"
+                        "import time\n"
+                        "heartbeat = Path(sys.argv[1])\n"
+                        "stop = Path(sys.argv[2])\n"
+                        "while not stop.exists():\n"
+                        "    heartbeat.write_text(str(time.monotonic()), encoding='utf-8')\n"
+                        "    time.sleep(0.01)\n"
+                    ),
+                    str(heartbeat),
+                    str(stop),
+                ],
+                tmp_path,
+                30,
+            )
 
         deadline = monotonic() + 2
         while not heartbeat.exists() and monotonic() < deadline:

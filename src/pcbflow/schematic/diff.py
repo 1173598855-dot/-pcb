@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import StrEnum
-from typing import Literal, TypeVar, cast
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict
 
@@ -17,10 +17,6 @@ from pcbflow.schematic.semantic import (
     Symbol,
     object_ref_key,
 )
-
-# Every diffed semantic object carries a `.ref`; the value restriction keeps
-# `asdict()` and attribute access precise per call site.
-_Diffable = TypeVar("_Diffable", Sheet, Symbol, Label, NetConnectivity)
 
 
 class ChangeKind(StrEnum):
@@ -148,8 +144,8 @@ def build_semantic_diff(
     )
 
 
-def _index_by_ref(items: tuple[_Diffable, ...]) -> dict[str, _Diffable]:
-    indexed: dict[str, _Diffable] = {}
+def _index_by_ref[Diffable: (Sheet, Symbol, Label, NetConnectivity)](items: tuple[Diffable, ...]) -> dict[str, Diffable]:
+    indexed: dict[str, Diffable] = {}
     for item in items:
         reference = item.ref
         key = object_ref_key(reference)
@@ -169,11 +165,11 @@ def _index_footprints(items: tuple[FootprintAssignment, ...]) -> dict[str, Footp
     return indexed
 
 
-def _added_removed(
+def _added_removed[Diffable: (Sheet, Symbol, Label, NetConnectivity)](
     added_kind: ChangeKind,
     removed_kind: ChangeKind,
-    before: dict[str, _Diffable],
-    after: dict[str, _Diffable],
+    before: dict[str, Diffable],
+    after: dict[str, Diffable],
 ) -> list[tuple[ChangeKind, SchematicObjectRef, object | None, object | None, str | None]]:
     changes: list[tuple[ChangeKind, SchematicObjectRef, object | None, object | None, str | None]] = []
     for key in sorted(set(after) - set(before)):

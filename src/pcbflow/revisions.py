@@ -513,14 +513,16 @@ class RevisionService:
                     wait=time.sleep,
                     lock_mode=msvcrt.LK_NBLCK,
                 )
-                unlock = lambda: msvcrt.locking(
-                    lock_file.fileno(), msvcrt.LK_UNLCK, 1
-                )
+                def unlock() -> None:
+                    msvcrt.locking(
+                        lock_file.fileno(), msvcrt.LK_UNLCK, 1
+                    )
             else:
                 import fcntl
 
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)  # type: ignore[attr-defined]  # POSIX-only lock branch
-                unlock = lambda: fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]  # POSIX-only lock branch
+                def unlock() -> None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]  # POSIX-only lock branch
             try:
                 yield
             finally:
@@ -569,7 +571,7 @@ class RevisionService:
         normalized = normalize_snapshot_excludes(registered_excludes)
         files: list[dict[str, object]] = []
         total_bytes = 0
-        for path, relative, metadata in _snapshot_files(
+        for path, relative, _metadata in _snapshot_files(
             root, normalized, max_files=self._max_files
         ):
             digest, size, mode, total_bytes = self._hash_snapshot_file(
@@ -591,7 +593,7 @@ class RevisionService:
         normalized = normalize_snapshot_excludes(excludes)
         files: list[dict[str, object]] = []
         total_bytes = 0
-        for path, relative, metadata in _snapshot_files(
+        for path, relative, _metadata in _snapshot_files(
             root, normalized, max_files=self._max_files
         ):
             digest, size, mode, total_bytes = self._hash_snapshot_file(
@@ -725,9 +727,11 @@ class RevisionService:
             except Exception:
                 if not repo_existed:
                     persisted = self._projects.get(project.id)
-                    if persisted.mode is ProjectMode.REGISTERED:
-                        if repo.exists():
-                            shutil.rmtree(repo, onexc=_remove_readonly_entry)
+                    if (
+                        persisted.mode is ProjectMode.REGISTERED
+                        and repo.exists()
+                    ):
+                        shutil.rmtree(repo, onexc=_remove_readonly_entry)
                 raise
 
     @contextmanager

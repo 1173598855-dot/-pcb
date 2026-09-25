@@ -496,7 +496,7 @@ class GateDecisionStore:
                 session.flush()
                 result = _requirement_set(requirement_row)
             return result
-        except IntegrityError:
+        except IntegrityError as error:
             with self._sessions() as session:
                 existing = session.scalar(
                     select(GateDecisionRow).where(
@@ -509,7 +509,7 @@ class GateDecisionStore:
                 self._replay(existing, **replay_values)
                 requirement_row = session.get(RequirementSetRow, requirement_set_id)
                 if requirement_row is None:
-                    raise RequirementSetNotFoundError(requirement_set_id)
+                    raise RequirementSetNotFoundError(requirement_set_id) from error
                 return _requirement_set(requirement_row)
 
 

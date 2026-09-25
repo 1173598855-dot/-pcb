@@ -371,12 +371,11 @@ def test_release_artifact_registration_rejects_descriptor_deleted_by_other_publi
     owner.rollback()
     assert not reused_descriptor.path.exists()
 
-    with pytest.raises(RequestInvalidError, match="PCB_RELEASE_ARTIFACT_UNAVAILABLE"):
-        with release_container.sessions.begin() as session:
-            session.execute(text("BEGIN IMMEDIATE"))
-            release_container.pcb_candidates._register_release_artifacts(
-                session, (reused_descriptor,), utc_now()
-            )
+    with pytest.raises(RequestInvalidError, match="PCB_RELEASE_ARTIFACT_UNAVAILABLE"), release_container.sessions.begin() as session:
+        session.execute(text("BEGIN IMMEDIATE"))
+        release_container.pcb_candidates._register_release_artifacts(
+            session, (reused_descriptor,), utc_now()
+        )
 
     with release_container.sessions() as session:
         assert session.get(ArtifactRow, reused_descriptor.digest) is None

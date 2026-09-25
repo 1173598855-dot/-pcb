@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Protocol
@@ -211,7 +212,5 @@ class ProcessRunner:
                 if result.returncode != 0 and process.poll() is None:
                     process.kill()
         else:
-            try:
+            with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)  # type: ignore[attr-defined]  # POSIX-only branch
-            except ProcessLookupError:
-                pass

@@ -313,13 +313,13 @@ def _connectivity_findings(snapshot: BoardSnapshot, rulepack: ManufacturingRuleP
         entities: tuple[_ConductiveEntity, ...] = pads + routes + vias
         parent = list(range(len(entities)))
 
-        def root(item: int) -> int:
+        def root(item: int, parent: list[int] = parent) -> int:
             while parent[item] != item:
                 parent[item] = parent[parent[item]]
                 item = parent[item]
             return item
 
-        def union(left: int, right: int) -> None:
+        def union(left: int, right: int, parent: list[int] = parent) -> None:
             left, right = root(left), root(right)
             if left != right:
                 parent[right] = left

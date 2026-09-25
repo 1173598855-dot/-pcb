@@ -92,7 +92,7 @@ class ProjectEdaAuthorityStore:
                 session.add(row)
                 session.flush()
                 return _authority(row)
-        except IntegrityError:
+        except IntegrityError as error:
             with self._sessions() as session:
                 existing = session.get(ProjectEdaAuthorityRow, project_id)
                 if existing is not None:
@@ -100,7 +100,7 @@ class ProjectEdaAuthorityStore:
                         return _authority(existing)
                     raise EdaAuthorityConflictError(
                         "project EDA authority is already immutable"
-                    )
+                    ) from error
             raise
 
     def find_by_project_id(self, project_id: str) -> ProjectEdaAuthority | None:

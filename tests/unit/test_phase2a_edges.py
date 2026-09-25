@@ -25,8 +25,6 @@ from pcbflow.kicad import (
 )
 from pcbflow.process import ProcessResult, ProcessRunner, ProcessTimeoutError
 from pcbflow.proposal_store import ProposalNotFoundError
-
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 from pcbflow.proposals import (
     CandidateNotReviewableError,
     RevisionReconciliationRequiredError,
@@ -46,6 +44,8 @@ from pcbflow.revisions import (
 from pcbflow.revisions import (
     ProjectNotManagedError as RevisionProjectNotManagedError,
 )
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 @pytest.mark.parametrize(

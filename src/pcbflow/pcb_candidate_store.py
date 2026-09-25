@@ -393,7 +393,7 @@ class PcbCandidateStore:
                 session.add(row)
                 session.flush()
                 return _candidate(row)
-        except IntegrityError:
+        except IntegrityError as error:
             # A concurrent request may have inserted the candidate after the
             # initial lookup. Re-apply the complete idempotency contract.
             with self._sessions() as session:
@@ -417,13 +417,14 @@ class PcbCandidateStore:
                     algorithm_evidence=canonical_algorithm_evidence,
                     idempotency_key=idempotency_key,
                 ):
-                    raise IdempotencyConflictError(idempotency_key)
+                    raise IdempotencyConflictError(idempotency_key) from error
                 return _candidate(existing)
 
     def get(self, candidate_id: str) -> PcbCandidate:
         with self._sessions() as session:
             row = session.get(PcbCandidateRow, candidate_id)
-            if row is None: raise PcbCandidateNotFoundError(candidate_id)
+            if row is None:
+                raise PcbCandidateNotFoundError(candidate_id)
             return _candidate(row)
 
     def find_by_idempotency_key(

@@ -26,8 +26,8 @@ _LOG_FIELDS = frozenset(
     }
 )
 _METRIC_LABELS = frozenset({"result", "code", "contract"})
-_context: ContextVar[dict[str, str]] = ContextVar(
-    "pcbflow_log_context", default={}
+_context: ContextVar[dict[str, str] | None] = ContextVar(
+    "pcbflow_log_context", default=None
 )
 
 
@@ -40,7 +40,7 @@ def _fields(values: Mapping[str, object]) -> dict[str, str]:
 
 @contextmanager
 def bind_log_context(**values: object) -> Iterator[None]:
-    token = _context.set({**_context.get(), **_fields(values)})
+    token = _context.set({**(_context.get() or {}), **_fields(values)})
     try:
         yield
     finally:
@@ -48,7 +48,7 @@ def bind_log_context(**values: object) -> Iterator[None]:
 
 
 def ensure_trace_id() -> str:
-    current = _context.get()
+    current = _context.get() or {}
     if trace_id := current.get("trace_id"):
         return trace_id
     trace_id = new_id("trc")
@@ -59,7 +59,7 @@ def ensure_trace_id() -> str:
 def log_event(
     logger: logging.Logger, level: int, event: str, **values: object
 ) -> None:
-    context = {**_context.get(), **_fields(values)}
+    context = {**(_context.get() or {}), **_fields(values)}
     context.setdefault("trace_id", ensure_trace_id())
     logger.log(level, event, extra={"event": event, **context})
 

@@ -435,11 +435,10 @@ def test_gate_decision_store_rejects_conflicting_artifact_metadata(
         media_type=descriptor.media_type,
         path=descriptor.path,
     )
-    with session_factory.begin() as session:
-        with pytest.raises(RuntimeError, match="artifact descriptor conflict"):
-            GateDecisionStore._register_artifact(
-                session, conflicting, managed_project.created_at
-            )
+    with session_factory.begin() as session, pytest.raises(RuntimeError, match="artifact descriptor conflict"):
+        GateDecisionStore._register_artifact(
+            session, conflicting, managed_project.created_at
+        )
 
 
 def test_gate_decision_rejects_digest_reuse_with_different_subject(

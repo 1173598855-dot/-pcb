@@ -260,15 +260,47 @@ def test_cp_sat_no_good_finds_second_layout_requiring_two_footprints_to_swap_tog
         schema_version="1.0", profile_id=rulepack.profile_id, copper_oz=1,
         outline=(PointUm(0, 0), PointUm(30_000, 0), PointUm(30_000, 10_000), PointUm(0, 10_000)),
         layers=("F.Cu",), net_classes=(), nets=(),
-        keepouts=(Keepout(BoardObjectId("ko_middle"), "mechanical", RectUm(10_001, 0, 9_998, 10_000), ("F.Cu",), ("footprint",)),),
-        footprints=(Footprint(BoardObjectId("A"), PointUm(5_000, 5_000), 10_000, 10_000, "F.Cu", (), (), False), Footprint(BoardObjectId("B"), PointUm(25_000, 5_000), 10_000, 10_000, "F.Cu", (), (), False)),
+        keepouts=(
+            Keepout(
+                BoardObjectId("ko_middle"),
+                "mechanical",
+                RectUm(10_001, 0, 9_998, 10_000),
+                ("F.Cu",),
+                ("footprint",),
+            ),
+        ),
+        footprints=(
+            Footprint(BoardObjectId("A"), PointUm(5_000, 5_000), 10_000, 10_000, "F.Cu", (), (), False),
+            Footprint(BoardObjectId("B"), PointUm(25_000, 5_000), 10_000, 10_000, "F.Cu", (), (), False),
+        ),
         pads=(), routes=(), vias=(), copper_zones=(), opaque_nodes=(),
     )
     result = PlacementSolver().solve(swapped, rulepack, seed=47, starts=2, iterations=0)
-    locked_left_right = replace(swapped, footprints=(replace(swapped.footprint("A"), placement_lock=True), replace(swapped.footprint("B"), placement_lock=True)))
-    locked_right_left = replace(locked_left_right, footprints=(replace(locked_left_right.footprint("A"), position=PointUm(25_000, 5_000)), replace(locked_left_right.footprint("B"), position=PointUm(5_000, 5_000))))
-    locked_same_left = replace(locked_left_right, footprints=(locked_left_right.footprint("A"), replace(locked_left_right.footprint("B"), position=PointUm(5_000, 5_000))))
-    expected = {PlacementSolver().solve(locked_left_right, rulepack, seed=47, starts=1, iterations=0).evidence.placement_digest, PlacementSolver().solve(locked_right_left, rulepack, seed=47, starts=1, iterations=0).evidence.placement_digest}
+    locked_left_right = replace(
+        swapped,
+        footprints=(
+            replace(swapped.footprint("A"), placement_lock=True),
+            replace(swapped.footprint("B"), placement_lock=True),
+        ),
+    )
+    locked_right_left = replace(
+        locked_left_right,
+        footprints=(
+            replace(locked_left_right.footprint("A"), position=PointUm(25_000, 5_000)),
+            replace(locked_left_right.footprint("B"), position=PointUm(5_000, 5_000)),
+        ),
+    )
+    locked_same_left = replace(
+        locked_left_right,
+        footprints=(
+            locked_left_right.footprint("A"),
+            replace(locked_left_right.footprint("B"), position=PointUm(5_000, 5_000)),
+        ),
+    )
+    expected = {
+        PlacementSolver().solve(locked_left_right, rulepack, seed=47, starts=1, iterations=0).evidence.placement_digest,
+        PlacementSolver().solve(locked_right_left, rulepack, seed=47, starts=1, iterations=0).evidence.placement_digest,
+    }
     assert PlacementSolver().solve(locked_same_left, rulepack, seed=47, starts=1, iterations=0).findings[0].rule_id == "PCB_PLACEMENT_INFEASIBLE"
     runs = result.evidence.seed_runs
     assert len(runs) == 2

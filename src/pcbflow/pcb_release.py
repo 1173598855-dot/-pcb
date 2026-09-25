@@ -5,7 +5,7 @@ import hashlib
 import io
 import json
 from collections.abc import Mapping, Sequence
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -202,7 +202,8 @@ class PcbReleaseTaskHandler:
         )
 
     def _restore(self, candidate: PcbCandidate, lease: TaskLease, code: str) -> None:
-        try:
+        # A cancellation or lease takeover owns the durable outcome.
+        with suppress(StaleLeaseError, PcbCandidateNotReviewableError):
             self._candidates.restore_g3_after_release_failure(
                 candidate.id,
                 lease.task_id,
@@ -210,9 +211,6 @@ class PcbReleaseTaskHandler:
                 self._clock(),
                 error_code=code,
             )
-        except (StaleLeaseError, PcbCandidateNotReviewableError):
-            # A cancellation or lease takeover owns the durable outcome.
-            pass
 
     def _candidate_for_lease(self, lease: TaskLease) -> PcbCandidate:
         candidate_id = lease.payload.get("candidate_id")

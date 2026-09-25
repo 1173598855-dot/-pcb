@@ -269,13 +269,72 @@ def _prepare(container, tmp_path: Path):
     requirements = (fixtures / "requirements" / "reference-controller.yaml").read_bytes()
     draft = container.requirements.import_draft(managed.id, requirements, "proposal-requirements")
     pending = container.requirements.submit(draft.id, "proposal-requirements-submit")
-    frozen = container.approvals.decide_g1(requirement_set_id=pending.id, subject_digest=pending.subject_digest(), decision="approve", actor_type="human", actor_id="local-user", comment="approved", idempotency_key="proposal-g1")
+    frozen = container.approvals.decide_g1(
+        requirement_set_id=pending.id,
+        subject_digest=pending.subject_digest(),
+        decision="approve",
+        actor_type="human",
+        actor_id="local-user",
+        comment="approved",
+        idempotency_key="proposal-g1",
+    )
     return source, container.projects.get(managed.id), frozen
 
 
 def _instantiate_batch(project, requirement_set) -> bytes:
     actor = {"type": "human", "id": "local-user"}
-    value = {"schema_version": "1.0", "batch_id": "bat_execute_status_led", "project_id": project.id, "base_revision": project.current_revision, "requirement_set_id": requirement_set.id, "idempotency_key": "execute-status-led", "actor": actor, "intent": "Instantiate the verified status LED", "risk": "medium", "commands": [{"schema_version": "1.0", "command_id": "cmd_execute_status_led", "batch_id": "bat_execute_status_led", "project_id": project.id, "base_revision": project.current_revision, "idempotency_key": "execute-status-led:1", "actor": actor, "intent": "Instantiate the verified status LED", "risk": "medium", "preconditions": [{"type": "project.revision_equals", "revision": project.current_revision}, {"type": "requirements.digest_equals", "digest": requirement_set.canonical_digest}, {"type": "schematic.module_absent", "instance_name": "STATUS_LED"}, {"type": "tool.capability_available", "capability": "kicad.cst.write.v1"}], "operation": {"type": "schematic.instantiate_module", "payload": {"module_revision_id": "modrev_status_led_v1", "instance_name": "STATUS_LED", "target_sheet_ref": {"kind": "sheet", "sheet_uuid": "00000000-0000-0000-0000-000000000001", "object_uuid": "00000000-0000-0000-0000-000000000001", "pin_number": None}, "parameter_bindings": {"LED_VALUE": "GREEN"}, "port_bindings": {}, "placement_slot": "auto"}}, "required_validations": ["semantic_diff"], "provenance": {"requirement_ids": ["REQ-FUNC-001"], "evidence_ids": [], "module_revision_ids": ["modrev_status_led_v1"]}}]}
+    value = {
+        "schema_version": "1.0",
+        "batch_id": "bat_execute_status_led",
+        "project_id": project.id,
+        "base_revision": project.current_revision,
+        "requirement_set_id": requirement_set.id,
+        "idempotency_key": "execute-status-led",
+        "actor": actor,
+        "intent": "Instantiate the verified status LED",
+        "risk": "medium",
+        "commands": [
+            {
+                "schema_version": "1.0",
+                "command_id": "cmd_execute_status_led",
+                "batch_id": "bat_execute_status_led",
+                "project_id": project.id,
+                "base_revision": project.current_revision,
+                "idempotency_key": "execute-status-led:1",
+                "actor": actor,
+                "intent": "Instantiate the verified status LED",
+                "risk": "medium",
+                "preconditions": [
+                    {"type": "project.revision_equals", "revision": project.current_revision},
+                    {"type": "requirements.digest_equals", "digest": requirement_set.canonical_digest},
+                    {"type": "schematic.module_absent", "instance_name": "STATUS_LED"},
+                    {"type": "tool.capability_available", "capability": "kicad.cst.write.v1"},
+                ],
+                "operation": {
+                    "type": "schematic.instantiate_module",
+                    "payload": {
+                        "module_revision_id": "modrev_status_led_v1",
+                        "instance_name": "STATUS_LED",
+                        "target_sheet_ref": {
+                            "kind": "sheet",
+                            "sheet_uuid": "00000000-0000-0000-0000-000000000001",
+                            "object_uuid": "00000000-0000-0000-0000-000000000001",
+                            "pin_number": None,
+                        },
+                        "parameter_bindings": {"LED_VALUE": "GREEN"},
+                        "port_bindings": {},
+                        "placement_slot": "auto",
+                    },
+                },
+                "required_validations": ["semantic_diff"],
+                "provenance": {
+                    "requirement_ids": ["REQ-FUNC-001"],
+                    "evidence_ids": [],
+                    "module_revision_ids": ["modrev_status_led_v1"],
+                },
+            }
+        ],
+    }
     return json.dumps(value, separators=(",", ":")).encode()
 
 
@@ -351,7 +410,18 @@ def test_worker_builds_one_reviewable_candidate_and_complete_evidence(tmp_path: 
         )
         assert "local-user" in commit_metadata.stdout
         evidence = container.evidence.list_for_project(project.id)
-        assert {"design_command_batch", "project_snapshot_before", "project_snapshot_after", "git_text_diff", "schematic_semantic_diff", "kicad_erc", "command_execution_log", "adapter_capability_report", "proposal_evidence_set"} <= {item.kind for item in evidence}
+        expected_kinds = {
+            "design_command_batch",
+            "project_snapshot_before",
+            "project_snapshot_after",
+            "git_text_diff",
+            "schematic_semantic_diff",
+            "kicad_erc",
+            "command_execution_log",
+            "adapter_capability_report",
+            "proposal_evidence_set",
+        }
+        assert expected_kinds <= {item.kind for item in evidence}
         assert all(container.artifacts.verify(item.artifact_digest) for item in evidence)
         object_digests = {
             f"sha256:{path.name}"
@@ -837,10 +907,29 @@ def test_ready_replay_rejects_invalid_evidence_set_contract(
 
 def _no_effect_batch(project, requirement_set) -> bytes:
     value = json.loads(_instantiate_batch(project, requirement_set))
-    value["batch_id"] = "bat_no_effect"; value["idempotency_key"] = "proposal-no-effect"; value["intent"] = "Write the existing value"
+    value["batch_id"] = "bat_no_effect"
+    value["idempotency_key"] = "proposal-no-effect"
+    value["intent"] = "Write the existing value"
     command = value["commands"][0]
-    command["batch_id"] = "bat_no_effect"; command["command_id"] = "cmd_no_effect"; command["idempotency_key"] = "proposal-no-effect:1"; command["intent"] = "Write the existing value"; command["preconditions"] = []
-    command["operation"] = {"type": "schematic.set_property", "payload": {"subject_ref": {"kind": "symbol", "sheet_uuid": "00000000-0000-0000-0000-000000000001", "object_uuid": "00000000-0000-0000-0000-000000000002", "pin_number": None}, "property_name": "Value", "value": "状态LED", "expected_old_value": "状态LED"}}
+    command["batch_id"] = "bat_no_effect"
+    command["command_id"] = "cmd_no_effect"
+    command["idempotency_key"] = "proposal-no-effect:1"
+    command["intent"] = "Write the existing value"
+    command["preconditions"] = []
+    command["operation"] = {
+        "type": "schematic.set_property",
+        "payload": {
+            "subject_ref": {
+                "kind": "symbol",
+                "sheet_uuid": "00000000-0000-0000-0000-000000000001",
+                "object_uuid": "00000000-0000-0000-0000-000000000002",
+                "pin_number": None,
+            },
+            "property_name": "Value",
+            "value": "状态LED",
+            "expected_old_value": "状态LED",
+        },
+    }
     command["provenance"]["module_revision_ids"] = []
     return json.dumps(value, separators=(",", ":")).encode()
 
@@ -852,8 +941,12 @@ def test_no_effect_batch_fails_without_candidate_or_revision_change(tmp_path: Pa
         _source, project, requirement_set = _prepare(container, tmp_path)
         proposal = container.proposals.create(_no_effect_batch(project, requirement_set), "proposal-no-effect")
         assert container.worker.run_once()
-        failed = container.proposal_store.get(proposal.id); task = container.tasks.get(proposal.task_id)
-        assert failed.status is ProposalStatus.VALIDATION_FAILED; assert failed.candidate_revision is None; assert failed.evidence_set_digest is not None; assert task.last_error_code == "DESIGN_COMMAND_NO_EFFECT"
+        failed = container.proposal_store.get(proposal.id)
+        task = container.tasks.get(proposal.task_id)
+        assert failed.status is ProposalStatus.VALIDATION_FAILED
+        assert failed.candidate_revision is None
+        assert failed.evidence_set_digest is not None
+        assert task.last_error_code == "DESIGN_COMMAND_NO_EFFECT"
         assert container.revisions.resolve_proposal_ref(project.id, proposal.id) is None
         assert container.projects.get(project.id).current_revision == project.current_revision
     finally:

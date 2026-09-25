@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
@@ -281,10 +282,19 @@ class ProposalExecutor:
                  max_bytes: int = 512 * 1024 * 1024, metrics: Metrics | None = None,
                  monotonic=time.monotonic,
                  faults: FaultInjector | None = None) -> None:
-        self._proposal_store = proposal_store; self._command_batches = command_batches; self._projects = projects
-        self._requirements = requirements; self._tasks = tasks; self._revisions = revisions; self._adapter = adapter
-        self._kicad = kicad; self._artifacts = artifacts; self._evidence = evidence; self._clock = clock
-        self._max_files = max_files; self._max_bytes = max_bytes
+        self._proposal_store = proposal_store
+        self._command_batches = command_batches
+        self._projects = projects
+        self._requirements = requirements
+        self._tasks = tasks
+        self._revisions = revisions
+        self._adapter = adapter
+        self._kicad = kicad
+        self._artifacts = artifacts
+        self._evidence = evidence
+        self._clock = clock
+        self._max_files = max_files
+        self._max_bytes = max_bytes
         self._metrics = metrics
         self._monotonic = monotonic
         self._faults = faults if faults is not None else NoFaults()
@@ -354,7 +364,8 @@ class ProposalExecutor:
                     )
 
     def _execute(self, lease: TaskLease) -> dict[str, object]:
-        now = self._clock(); proposal_id = str(lease.payload["proposal_id"])
+        now = self._clock()
+        proposal_id = str(lease.payload["proposal_id"])
         proposal = self._proposal_store.get(proposal_id)
         batch = self._command_batches.get(proposal.command_batch_id)
         project = self._projects.get(batch.project_id)
@@ -651,7 +662,8 @@ class ProposalExecutor:
                     "application/json",
                 )
                 ercs = [report for report in reports if report.kind == "erc"]
-                if len(ercs) != 1: raise TerminalTaskError("CANDIDATE_VALIDATION_FAILED", "exactly one ERC report is required")
+                if len(ercs) != 1:
+                    raise TerminalTaskError("CANDIDATE_VALIDATION_FAILED", "exactly one ERC report is required")
                 erc_descriptor = add("kicad_erc", ercs[0].data, "application/json", "pass")
                 parsed = parse_kicad_report("erc", ercs[0].data)
                 if parsed.findings:
@@ -1128,10 +1140,12 @@ class ProposalDecisionService:
             approval_artifact=descriptor, now=now,
         )
         self._faults.hit(FaultPoint.AFTER_ACCEPT_DATABASE_BEFORE_DESIGN_REF)
-        try:
-            self._revisions.promote_design_ref(project.id, proposal.candidate_revision or "", project.current_revision)
-        except Exception:
-            pass
+        with suppress(Exception):
+            self._revisions.promote_design_ref(
+                project.id,
+                proposal.candidate_revision or "",
+                project.current_revision,
+            )
         return result
 
     def reject(

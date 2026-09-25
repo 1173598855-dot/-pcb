@@ -119,7 +119,7 @@ class ComponentModuleBindingStore:
                 session.add(row)
                 session.flush()
                 return _binding(row)
-        except IntegrityError:
+        except IntegrityError as error:
             with self._sessions() as session:
                 keyed = session.scalar(
                     select(ComponentModuleBindingRow).where(
@@ -135,7 +135,7 @@ class ComponentModuleBindingStore:
                         module_manifest_digest=module_manifest_digest,
                     ):
                         return _binding(keyed)
-                    raise IdempotencyConflictError(idempotency_key)
+                    raise IdempotencyConflictError(idempotency_key) from error
                 slot = session.scalar(
                     select(ComponentModuleBindingRow).where(
                         ComponentModuleBindingRow.component_revision_id
@@ -154,7 +154,7 @@ class ComponentModuleBindingStore:
                         return _binding(slot)
                     raise ComponentModuleBindingConflictError(
                         component_revision_id, kicad_major
-                    )
+                    ) from error
             raise
 
     def list_for_component_revision(
