@@ -20,6 +20,7 @@ from pcbflow.config import Settings
 from pcbflow.container import build_container
 from pcbflow.repositories import IdempotencyConflictError
 from pcbflow.schematic.modules import FileModuleCatalog
+from pcbflow.tables import ComponentModuleBindingRow
 
 
 def _import_component(container):
@@ -71,14 +72,21 @@ def _force_integrity_error_after_hidden_binding_reads(
 
     def hide_initial_reads(self, statement, *args, **kwargs):
         nonlocal hidden_reads
-        if hidden_reads < 2:
+        if hidden_reads < 2 and "component_module_binding" in str(statement):
             hidden_reads += 1
             return None
         return scalar(self, statement, *args, **kwargs)
 
     def fail_flush(self, *args, **kwargs):
         nonlocal failed_flushes
-        if failed_flushes == 0:
+        # Force the failure only on the flush that actually carries the new
+        # binding row (pending rows live in `new`, mutated rows in `dirty`), so
+        # ambient autoflushes (which SQLAlchemy 2.1 fires on every execute)
+        # cannot consume the one-shot forcing.
+        if failed_flushes == 0 and any(
+            isinstance(obj, ComponentModuleBindingRow)
+            for obj in (*self.new, *self.dirty)
+        ):
             failed_flushes += 1
             raise IntegrityError("INSERT", {}, RuntimeError("forced duplicate"))
         return flush(self, *args, **kwargs)
