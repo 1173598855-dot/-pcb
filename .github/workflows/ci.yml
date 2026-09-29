@@ -29,14 +29,18 @@ jobs:
   test:
     # The project is Windows-first (PowerShell workflows, Windows process
     # management); tests are validated on Windows. KiCad contract tests
-    # skip automatically when kicad-cli is absent from the runner.
+    # skip automatically when kicad-cli is absent from the runner. Both
+    # supported Python majors (3.12 and 3.13) run the full suite.
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: requirements-lock.txt
       - run: pip install -r requirements-lock.txt
@@ -44,4 +48,22 @@ jobs:
       # The codebase guards Windows/POSIX names behind os.name checks that
       # mypy does not fold, so type-check on the project's primary platform.
       - run: mypy src/pcbflow
-      - run: pytest -q -n auto --cov=pcbflow --cov-report=term --cov-fail-under=88
+      - run: pytest -q -n auto --cov=pcbflow --cov-report=term --cov-fail-under=90
+
+  test-posix:
+    # Advisory POSIX job: the suite was Windows-only for its whole history, so
+    # this runner exercises the POSIX workspace-copy and process branches
+    # (pcbflow.workspaces copy_posix_directory) for the first time. It is
+    # allowed to fail while that platform evidence accumulates; promote it to
+    # a required gate once it has been green across several runs. The pinned
+    # lockfile carries pywin32, so this job installs from pyproject extras.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e ".[dev]"
+      - run: pytest -q -n auto
