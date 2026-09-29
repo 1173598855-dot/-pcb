@@ -57,7 +57,12 @@ def test_put_bytes_is_content_addressed_and_idempotent(tmp_path: Path) -> None:
 
 
 @given(st.binary(max_size=65_536))
-@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+    # Parallel CI scheduling can stall a single example past hypothesis's
+    # default 200ms deadline; the property is timing-independent.
+    deadline=None,
+)
 def test_arbitrary_payload_round_trips(tmp_path: Path, payload: bytes) -> None:
     store = ContentAddressedStore(tmp_path)
     descriptor = store.put_bytes(payload, "application/octet-stream")

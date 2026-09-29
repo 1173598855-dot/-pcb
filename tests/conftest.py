@@ -1,3 +1,6 @@
+import gc
+import time
+import weakref
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -11,6 +14,38 @@ from pcbflow.config import Settings
 from pcbflow.container import build_container
 from pcbflow.db import create_engine_and_session
 from pcbflow.domain import Project
+
+# Engines created by the container and migrated-database fixtures register
+# themselves here so the collector probe can drain them before forcing GC.
+_TEST_ENGINES: weakref.WeakSet[Engine] = weakref.WeakSet()
+
+
+def _drain_engine(engine: Engine, timeout_seconds: float = 5.0) -> None:
+    """Wait for checked-out connections to return to ``engine``'s pool.
+
+    Background worker threads (heartbeat renewal, concurrency fixtures) may
+    still be finishing a database operation while a fixture tears down.
+    Disposing the engine at that moment strands their connection in the
+    abandoned pool object, which the garbage collector then reports as an
+    unclosed database. Waiting for checked-out()==0 before dispose() closes
+    that race window.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while engine.pool.checkedout() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+@pytest.fixture(autouse=True)
+def _collect_abandoned_connections() -> Iterator[None]:
+    """Force collection after every test so leaked sqlite connections surface
+    deterministically (ResourceWarning) instead of at a random later GC pass.
+    In-flight connections are drained first so only genuinely abandoned ones
+    are reported.
+    """
+    yield
+    for engine in list(_TEST_ENGINES):
+        _drain_engine(engine)
+    gc.collect()
 
 
 @pytest.fixture
@@ -27,9 +62,11 @@ def migrated_database(
     config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(config, "head")
     engine, sessions = create_engine_and_session(database_url)
+    _TEST_ENGINES.add(engine)
     try:
         yield engine, sessions
     finally:
+        _drain_engine(engine)
         engine.dispose()
 
 
@@ -56,9 +93,11 @@ def container(database_url: str, tmp_path: Path):
         }
     )
     services = build_container(settings)
+    _TEST_ENGINES.add(services.engine)
     try:
         yield services
     finally:
+        _drain_engine(services.engine)
         services.dispose()
 
 
