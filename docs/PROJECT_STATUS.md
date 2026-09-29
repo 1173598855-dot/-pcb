@@ -1,5 +1,38 @@
 # PCBFlow 项目整理报告
 
+## 2026-09-29 文档整理与候选 store 边缘覆盖
+
+- README 全面重排：项目定位移到开头，两段日志式记录（2026-09-24、
+  2026-08-10）移出（本页已有对应条目），环境变量合并为与 `config.py` 逐一
+  对应的单张表（补齐此前遗漏的 5 个 `PCBFLOW_MAX_KICAD_*`/`PCBFLOW_TASK_RETRY_*`
+  变量），原先散落的英文章节统一为中文，新增 MCP 服务器章节。
+- QUICK_REFERENCE 去除与 README 重复的环境变量与工作流内容，保留故障排查、
+  部署与性能调优。
+- 删除文件下半部分 2026-08-03 的历史自动质量报告：其中"316 个测试""无需
+  重构"等结论早已失效，与顶部按日期的增量记录并存容易误导。
+- 新增 `tests/integration/test_pcb_candidate_store_edges.py`（15 个测试）：
+  覆盖候选 store 的公开输入解析（无 base revision、无 LCEDA authority、
+  BoardIR digest 缺失、capability digest 从证据解析）、创建路径守卫
+  （非元组操作、未验证 output_kind、算法证据内 seed 校验、前置与事务内
+  stale 双防线）以及 IntegrityError 竞态恢复（隐藏预查询后的事务内重放、
+  强制候选行 flush 失败后的重放与冲突映射）。`pcb_candidate_store` 覆盖率
+  82% → 87%（剩余缺口集中在发布状态迁移与取消镜像分支）。
+- 已知怪癖记录：pytest-cov 子模块覆盖目标（如 `--cov=pcbflow.approvals`）
+  在 coverage 7.15.2 下于收集阶段触发 numpy
+  "cannot load module more than once per process"；完整包目标
+  `--cov=pcbflow` 不受影响。
+
+## 2026-09-28 MCP 契约与覆盖硬化
+
+- 修复两个 P0：所有 MCP 工具调用因 `json.dumps(CallToolResult)` 抛
+  `TypeError`（处理器改为返回 payload dict，由工具函数序列化）；工具包装器
+  把省略的参数传成显式 `None`，使文档默认值永远不生效（改为真值判断）。
+- 证据关键模块覆盖率：`pcb_candidate_codec` 58% → 100%，`mcp_server`
+  66% → 96%，`worker_service` 75% → 99%；全量覆盖率门禁从 88 提到 90
+  （实测 91.72%）。计划与验证数据见
+  `docs/superpowers/plans/2026-09-28-mcp-contract-and-coverage-hardening.md`
+  与 `docs/OPTIMIZATION_GUIDE.md`。
+
 ## 2026-09-25 CI 修复与 mypy 全量清零
 
 - 修复 CI 首跑失败的两个根因：`from tests.component_fixtures import ...` 在
@@ -10,8 +43,6 @@
   fcntl/POSIX 分支与 pydantic 元类桩缺口两处定向标注；ortools 求解器调用从
   已移除的驼峰 API（NewIntVar/Add/Minimize）迁移到官方 snake_case API，
   属正确性修复。mypy 现为 CI lint job 的强制门禁。
-- 期间发现并修复 board/placement.py 的 ortools 求解器在已安装版本上无法
-  运行的问题（驼峰 API 已被移除）。
 
 ## 2026-09-24 仓库整理与工具链补全
 
@@ -58,7 +89,7 @@ BoardIR/算法、候选、G3/G4 正向 fixture、API/CLI、KiCad parity 和 rele
 
 ## 2026-08-07 PCB 候选增量状态
 
-本节是对下方 2026-08-03 Phase 5A 历史整理报告的增量记录。
+本节是对 2026-08-03 Phase 5A 历史整理报告的增量记录。
 
 - 已实现 `pcb_candidates` 持久化状态机、项目级候选幂等键、冻结输入比较和
   `pcb.generate_candidate` Worker 入口。
@@ -75,155 +106,5 @@ BoardIR/算法、候选、G3/G4 正向 fixture、API/CLI、KiCad parity 和 rele
 - 原生 LCEDA Pro 写入仍未通过官方 bridge capability gate，当前 PCB 候选明确为
   `boardir_only`，不宣称原生写入、DRC 或制造发布能力已经完成。
 
-**日期**: 2026-08-03  
-**状态**: ✅ 代码整洁，结构良好
-
-## 代码质量检查
-
-### ✅ 源代码组织
-- **核心模块**: 34 个 Python 文件
-- **测试文件**: 22 个单元测试文件
-- **代码结构**: 清晰的分层架构
-- **命名规范**: 一致的 snake_case 命名
-
-### ✅ 新增代码质量
-- `worker_service.py`: 230 行，结构清晰
-- `worker_health.py`: 65 行，职责单一
-- 类型注解完整
-- 文档字符串完善
-- 无明显代码重复
-
-### ✅ 测试覆盖
-- **总测试数**: 316 个
-- **通过率**: 100%
-- **新增测试**: 16 个
-- **测试类型**: 单元测试 + 集成测试
-
-## 文档组织
-
-### ✅ 文档结构
-```
-docs/
-├── DEVELOPMENT_GUIDE.md           # 开发指南
-├── OPTIMIZATION_GUIDE.md          # 优化指南
-└── superpowers/
-    ├── specs/                     # 设计规格（8 个）
-    ├── plans/                     # 实现计划（9 个）
-    └── progress/                  # 进度报告（1 个）
-```
-
-### ✅ 文档完整性
-- 所有主要功能都有设计文档
-- 实现计划详细且可执行
-- 进度报告准确反映当前状态
-
-## 项目结构
-
-### ✅ 目录组织
-```
-pcbflow/
-├── src/pcbflow/              # 源代码
-├── tests/                    # 测试套件
-│   ├── unit/                 # 单元测试
-│   └── integration/          # 集成测试
-├── docs/                     # 文档
-├── alembic/                  # 数据库迁移
-└── examples/                 # 示例项目
-```
-
-### ✅ 配置文件
-- `pyproject.toml`: Python 项目配置
-- `.gitignore`: 版本控制忽略规则
-- `README.md`: 项目说明和使用指南
-
-## 代码度量
-
-### 源代码统计
-- **总文件数**: ~442 个（包括测试）
-- **核心代码**: ~5000 行
-- **测试代码**: ~3000 行
-- **文档**: ~8000 行
-
-### 复杂度评估
-- **模块化**: ✅ 优秀（单一职责原则）
-- **耦合度**: ✅ 低（依赖注入）
-- **内聚性**: ✅ 高（功能集中）
-
-## 依赖管理
-
-### ✅ 生产依赖
-- FastAPI: Web 框架
-- SQLAlchemy: ORM
-- Typer: CLI 框架
-- Pydantic: 数据验证
-
-### ✅ 开发依赖
-- pytest: 测试框架
-- hypothesis: 属性测试
-- pytest-cov: 覆盖率报告
-
-## 潜在优化建议
-
-### 短期（可选）
-1. **添加代码格式化工具**
-   - 建议: black 或 ruff format
-   - 目的: 统一代码风格
-
-2. **添加静态类型检查**
-   - 建议: mypy
-   - 目的: 编译时捕获类型错误
-
-3. **添加代码质量检查**
-   - 建议: ruff 或 pylint
-   - 目的: 发现潜在问题
-
-### 中期（未来功能）
-1. **性能分析**
-   - 工具: cProfile, py-spy
-   - 场景: 长时间运行的 Worker
-
-2. **监控集成**
-   - Prometheus metrics 导出
-   - 结构化日志输出（JSON）
-
-3. **文档生成**
-   - API 文档: Sphinx
-   - 代码文档: pdoc
-
-### 长期（架构演进）
-1. **插件系统**
-   - 支持自定义任务类型
-   - 扩展验证规则
-
-2. **分布式支持**
-   - Worker 集群
-   - 任务调度优化
-
-3. **云原生适配**
-   - Docker 容器化
-   - Kubernetes 部署
-
-## 当前状态总结
-
-### ✅ 代码质量
-- 结构清晰，易于维护
-- 测试覆盖充分
-- 文档完整准确
-
-### ✅ 项目健康度
-- 无技术债务
-- 无已知的严重 bug
-- 向后兼容性良好
-
-### ✅ Phase 5A Worker 基线就绪（历史记录）
-- 所有核心功能已实现
-- 测试通过率 100%
-- 文档齐全
-
-## 结论
-
-**PCBFlow 项目当前状态：优秀**
-
-在 Phase 5A Worker 范围内，项目代码整洁、结构合理、文档完善，已达到生产级任务执行基线。该历史结论不涵盖真实 LCEDA 写入、原生 DRC 或制造发布；当前边界以本页顶部 2026-08-10 复核记录为准。
-
-当前无需进行代码整理或重构工作。
+> 2026-08-03 及更早的 Phase 5A 自动质量报告已移除：其测试数量、代码行数与
+> "无需整理"等结论仅反映当时状态，保留会与上方的日期增量记录冲突。

@@ -1,6 +1,6 @@
 # PCBFlow Optimization Guide
 
-Updated: 2026-09-28
+Updated: 2026-09-29
 
 This guide records the optimization order for PCBFlow. The order is deliberate:
 preserve evidence and boundary contracts first, then reduce work on measured hot
@@ -14,6 +14,26 @@ external-tool trust boundary.
 3. Bound every database and memory optimization by an explicit limit.
 4. Measure before changing an I/O strategy whose behavior is security-sensitive.
 5. Run focused tests first, then the complete suite and coverage gate.
+
+## 2026-09-29 Increment: Candidate Store Edges and Documentation Reorganization
+
+| Status | Priority | Area | Change | Acceptance condition |
+| --- | --- | --- | --- | --- |
+| Complete | P1 | Candidate store edge paths | 15 tests added (`test_pcb_candidate_store_edges.py`): public-input resolution (missing base revision, missing LCEDA authority, unavailable BoardIR digest, capability digest resolved from evidence, blocked without evidence), creation guards (non-tuple operations, unverified output_kind, seed validation inside algorithm evidence, stale base revision enforced both pre-transaction and inside `BEGIN IMMEDIATE`), and IntegrityError race recovery (in-transaction replay after a hidden pre-lookup, replay and conflict mapping after a forced candidate-row flush failure). | Focused file green; `pcb_candidate_store` coverage rose from 82% to 87% (the remaining misses are release-state transition and mirror branches). |
+| Complete | P2 | Documentation reorganization | README restructured: positioning moved to the top, journal sections moved to `PROJECT_STATUS.md`, environment variables merged into one table that matches `config.py` (including five previously undocumented `PCBFLOW_MAX_KICAD_*`/`PCBFLOW_TASK_RETRY_*` variables), English sections translated, MCP server section added. `QUICK_REFERENCE.md` slimmed to troubleshooting/deployment/tuning. The stale 2026-08-03 auto-generated quality report removed from `PROJECT_STATUS.md`. | Docs describe the shipped surface only; numbers match measured values. |
+| Complete | P2 | Known quirk recorded | pytest-cov submodule coverage targets (e.g. `--cov=pcbflow.approvals`) fail during collection under coverage 7.15.2 with numpy's "cannot load module more than once per process"; the full-package target `--cov=pcbflow` is unaffected, so CI and the documented commands are safe. | README documents the quirk and the workaround. |
+| Rejected | P2 | mypy `disallow_untyped_defs` | Measured: enabling it surfaces 80 missing-annotation errors across 20 files. Fixing those is mechanical churn with no behavioral gain while `check_untyped_defs` already checks those bodies. | Revisit only if the package adopts full strict mode deliberately. |
+
+Deferred from the 2026-09-28 increment (state corrected 2026-09-29):
+
+- The POSIX workspace-copy branch needs a POSIX test runner (the advisory
+  `test-posix` CI job now accumulates that evidence) before its coverage can
+  rise on Windows-only runs.
+- The earlier note named `proposal_store.py` (83%) and `approvals.py` (84%) as
+  the next gaps; the 2026-09-28 edge tests already landed before that note was
+  written, and the measured full-suite numbers are 99% and 91%. The actual
+  next-largest Windows-reachable gaps are `schematic/adapter.py` (84%),
+  `lceda_pro.py` (81%), and `kicad_export.py` (83%).
 
 ## 2026-09-28 Increment: MCP Contract and Coverage Hardening
 
@@ -155,8 +175,18 @@ benchmarks exist:
 
 ## Latest Verification Run
 
-Run on 2026-09-28 against the working tree containing this guide (Python 3.13.9,
-pytest 8.4.2, Windows):
+Run on 2026-09-29 against the working tree containing this guide (Python 3.13.9,
+Windows):
+
+- `python -m pytest -q -n auto --cov=pcbflow --cov-report=term-missing --cov-fail-under=90`:
+  1024 passed, 1 skipped (LCEDA Pro bridge contract, machine lacks a verified
+  bridge) in 234.78 s; total coverage 91.86%; zero warnings under
+  `filterwarnings = ["error"]`; exit 0.
+- `ruff check src tests` and `mypy src/pcbflow` (with `check_untyped_defs`):
+  clean, 70 source files.
+- `git diff --check`: clean.
+
+Run on 2026-09-28 (Python 3.13.9, pytest 8.4.2, Windows):
 
 - `python -m pytest -q -n auto --cov=pcbflow --cov-report=term --cov-fail-under=90`:
   1009 passed, 1 skipped (LCEDA Pro bridge contract, machine lacks a verified
