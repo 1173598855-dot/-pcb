@@ -365,7 +365,7 @@ remain disabled; run the worker in a trusted local process instead.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m pytest --cov=pcbflow --cov-report=term-missing --cov-fail-under=88
+.\.venv\Scripts\python.exe -m pytest --cov=pcbflow --cov-report=term-missing --cov-fail-under=90
 .\.venv\Scripts\python.exe -m pytest -m kicad -v
 .\.venv\Scripts\pcbflow.exe doctor --json
 .\.venv\Scripts\python.exe -m pcbflow --help
