@@ -4,13 +4,14 @@ from pathlib import Path
 
 import pytest
 
+from pcbflow.board.adapter import UnsupportedEdaOperationError
 from pcbflow.domain import EdaOperation
 from pcbflow.lceda_pro import (
     LcedaProAdapter,
     LcedaProCapabilityError,
     OfficialBridgeVerification,
 )
-from pcbflow.process import ProcessResult
+from pcbflow.process import ProcessResult, ProcessTimeoutError
 
 
 class FakeRunner:
@@ -318,3 +319,292 @@ def test_probe_discards_stale_evidence_when_a_bridge_changes_the_executable(
     assert capability.operations == frozenset()
     assert capability.write_verified is False
     assert capability.reason == "executable_changed"
+
+
+class _FailingRunner:
+    """A runner that always fails like a broken spawn would."""
+
+    def __init__(self, exception: Exception) -> None:
+        self._exception = exception
+
+    def run(
+        self, argv: list[str], cwd: Path, timeout_seconds: float
+    ) -> ProcessResult:
+        raise self._exception
+
+
+class _ExitCodeRunner:
+    """A runner reporting an executable that exits nonzero."""
+
+    def __init__(self, returncode: int, stderr: str) -> None:
+        self._returncode = returncode
+        self._stderr = stderr
+
+    def run(
+        self, argv: list[str], cwd: Path, timeout_seconds: float
+    ) -> ProcessResult:
+        return ProcessResult(tuple(argv), self._returncode, "", self._stderr, False)
+
+
+class _MutatingTimeoutRunner:
+    """A runner that swaps the executable and then times out."""
+
+    def __init__(self, mutate: Path) -> None:
+        self._mutate = mutate
+
+    def run(
+        self, argv: list[str], cwd: Path, timeout_seconds: float
+    ) -> ProcessResult:
+        self._mutate.write_bytes(b"changed")
+        raise ProcessTimeoutError(tuple(argv), timeout_seconds)
+
+
+class UnidentifiedBridge(OfficialBridge):
+    def identify(self, executable: Path, version: str) -> bool:
+        return False
+
+
+class RaiseIdentifyBridge(OfficialBridge):
+    def identify(self, executable: Path, version: str) -> bool:
+        raise RuntimeError("bridge identify failed")
+
+
+class MutateThenValidBridge(OfficialBridge):
+    def verify_minimal_contract(
+        self, executable: Path, version: str, fixture_dir: Path
+    ) -> OfficialBridgeVerification:
+        executable.write_bytes(b"changed")
+        return OfficialBridgeVerification(
+            create_save_reopen_snapshot_verified=True,
+            verified_operations=frozenset({EdaOperation.SNAPSHOT}),
+        )
+
+
+class ForeignContractBridge(OfficialBridge):
+    def verify_minimal_contract(
+        self, executable: Path, version: str, fixture_dir: Path
+    ) -> OfficialBridgeVerification:
+        return object()  # type: ignore[return-value]
+
+
+def _deny_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    def raise_oserror(_executable: Path) -> str:
+        raise OSError("read denied")
+
+    monkeypatch.setattr(LcedaProAdapter, "_hash_executable", staticmethod(raise_oserror))
+
+
+def _fixture_file(tmp_path: Path) -> Path:
+    fixture = tmp_path / "minimal-fixture.txt"
+    fixture.write_text("not a directory", encoding="utf-8")
+    return fixture
+
+
+def test_probe_reports_an_unreadable_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "lceda-pro.exe"
+    executable.write_bytes(b"fixture")
+    _deny_hash(monkeypatch)
+
+    capability = LcedaProAdapter(FakeRunner("3.2.166"), executable).probe()
+
+    assert capability.available is False
+    assert capability.reason == "executable_read_failed"
+
+
+def test_probe_reports_a_version_command_timeout(tmp_path: Path) -> None:
+    executable = tmp_path / "lceda-pro.exe"
+    executable.write_bytes(b"fixture")
+
+    capability = LcedaProAdapter(
+        _FailingRunner(ProcessTimeoutError(("lceda-pro.exe", "--version"), 120.0)),
+        executable,
+    ).probe()
+
+    assert capability.available is False
+    assert capability.reason == "version_command_timeout"
+    assert capability.executable_digest is not None
+
+
+def test_probe_reports_a_failed_version_spawn(tmp_path: Path) -> None:
+    executable = tmp_path / "lceda-pro.exe"
+    executable.write_bytes(b"fixture")
+
+    capability = LcedaProAdapter(
+        _FailingRunner(OSError("spawning failed")), executable
+    ).probe()
+
+    assert capability.available is False
+    assert capability.reason == "version_command_failed"
+
+
+def test_probe_reports_a_nonzero_version_exit(tmp_path: Path) -> None:
+    executable = tmp_path / "lceda-pro.exe"
+    executable.write_bytes(b"fixture")
+
+    capability = LcedaProAdapter(_ExitCodeRunner(2, "crashed"), executable).probe()
+
+    assert capability.available is False
+    assert capability.reason == "version_command_failed"
+    assert capability.executable_digest is not None
+
+
+def test_probe_discards_evidence_when_the_executable_changes_before_version_output(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "lceda-pro.exe"
+    executable.write_bytes(b"fixture")
+
+    capability = LcedaProAdapter(_MutatingTimeoutRunner(executable), executable).probe()
+
+    assert capability.available is False
+    assert capability.reason == "executable_changed"
+    assert capability.executable_digest is None
+
+
+@pytest.mark.parametrize(
+    "fixture_factory",
+    [
+        lambda tmp_path: None,
+        lambda tmp_path: tmp_path / "missing-minimal-dir",
+        lambda tmp_path: _fixture_file(tmp_path),
+    ],
+    ids=["unset", "missing-dir", "file-instead-of-dir"],
+)
+def test_probe_reports_a_missing_verification_fixture(
+    tmp_path: Path, fixture_factory
+) -> None:
+    executable = tmp_path / "lceda-pro.exe"
+    executable.write_bytes(b"fixture")
+    fixture_dir = fixture_factory(tmp_path)
+
+    capability = LcedaProAdapter(
+        FakeRunner("3.2.166"),
+        executable,
+        official_bridge=OfficialBridge(),
+        fixture_dir=fixture_dir,
+    ).probe()
+
+    assert capability.available is True
+    assert capability.write_verified is False
+    assert capability.reason == "fixture_unavailable"
+
+
+def test_probe_reports_an_unidentified_bridge(tmp_path: Path) -> None:
+    executable = tmp_path / "lceda-pro.exe"
+    executable.write_bytes(b"fixture")
+    fixture_dir = tmp_path / "minimal"
+    fixture_dir.mkdir()
+
+    capability = LcedaProAdapter(
+        FakeRunner("3.2.166"),
+        executable,
+        official_bridge=UnidentifiedBridge(),
+        fixture_dir=fixture_dir,
+    ).probe()
+
+    assert capability.write_verified is False
+    assert capability.reason == "official_bridge_unidentified"
+
+
+def test_probe_reports_a_bridge_contract_failure_without_mutation(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "lceda-pro.exe"
+    executable.write_bytes(b"fixture")
+    fixture_dir = tmp_path / "minimal"
+    fixture_dir.mkdir()
+
+    capability = LcedaProAdapter(
+        FakeRunner("3.2.166"),
+        executable,
+        official_bridge=RaiseIdentifyBridge(),
+        fixture_dir=fixture_dir,
+    ).probe()
+
+    assert capability.available is True
+    assert capability.executable_digest is not None
+    assert capability.reason == "official_bridge_contract_failed"
+
+
+def test_probe_discards_evidence_when_a_valid_contract_changes_the_executable(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "lceda-pro.exe"
+    executable.write_bytes(b"fixture")
+    fixture_dir = tmp_path / "minimal"
+    fixture_dir.mkdir()
+
+    capability = LcedaProAdapter(
+        FakeRunner("3.2.166"),
+        executable,
+        official_bridge=MutateThenValidBridge(),
+        fixture_dir=fixture_dir,
+    ).probe()
+
+    assert capability.available is False
+    assert capability.reason == "executable_changed"
+
+
+def test_probe_rejects_a_foreign_contract_result(tmp_path: Path) -> None:
+    executable = tmp_path / "lceda-pro.exe"
+    executable.write_bytes(b"fixture")
+    fixture_dir = tmp_path / "minimal"
+    fixture_dir.mkdir()
+
+    capability = LcedaProAdapter(
+        FakeRunner("3.2.166"),
+        executable,
+        official_bridge=ForeignContractBridge(),
+        fixture_dir=fixture_dir,
+    ).probe()
+
+    assert capability.write_verified is False
+    assert capability.reason == "official_bridge_contract_incomplete"
+
+
+def test_executable_matches_treats_an_unreadable_file_as_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _deny_hash(monkeypatch)
+
+    assert LcedaProAdapter._executable_matches(Path("unused.exe"), "sha256:x") is False
+
+
+def test_verified_bridge_operations_still_fail_closed_on_unimplemented_native_calls(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "lceda-pro.exe"
+    executable.write_bytes(b"fixture")
+    fixture_dir = tmp_path / "minimal"
+    fixture_dir.mkdir()
+    adapter = LcedaProAdapter(
+        FakeRunner("3.2.166"),
+        executable,
+        official_bridge=OfficialBridge(),
+        fixture_dir=fixture_dir,
+    )
+
+    with pytest.raises(
+        UnsupportedEdaOperationError, match="LCEDA_PRO_SNAPSHOT_BRIDGE_UNIMPLEMENTED"
+    ):
+        adapter.load_snapshot(tmp_path)
+    with pytest.raises(
+        UnsupportedEdaOperationError, match="LCEDA_PRO_CANDIDATE_BRIDGE_UNIMPLEMENTED"
+    ):
+        adapter.create_candidate(tmp_path, tmp_path)
+    with pytest.raises(
+        UnsupportedEdaOperationError, match="LCEDA_PRO_WRITE_BRIDGE_UNIMPLEMENTED"
+    ):
+        adapter.apply_operations(None, (), None)
+    # RUN_DRC and EXPORT_RELEASE are outside the frozen minimal-lifecycle
+    # contract: even a fully verified bridge cannot authorize them here.
+    with pytest.raises(
+        LcedaProCapabilityError, match="LCEDA_PRO_WRITE_CAPABILITY_UNVERIFIED"
+    ):
+        adapter.run_drc(None)
+    with pytest.raises(
+        LcedaProCapabilityError, match="LCEDA_PRO_WRITE_CAPABILITY_UNVERIFIED"
+    ):
+        adapter.export_release(None, None)
