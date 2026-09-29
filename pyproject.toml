@@ -45,7 +45,14 @@ testpaths = ["tests"]
 # pythonpath makes "from tests.component_fixtures import ..." work for any
 # pytest entry point (python -m pytest and the console script alike).
 pythonpath = ["."]
+# The legacy .pytest_cache directory has unrecoverable Windows ACLs (see
+# docs/OPTIMIZATION_GUIDE.md); use a fresh cache location instead.
+cache_dir = ".pytest-cache"
 addopts = "-ra --strict-markers --timeout=600"
+# The suite is expected to be warning-free: the per-test gc.collect() probe in
+# tests/conftest.py makes abandoned-connection ResourceWarnings deterministic,
+# so any warning is a regression to fix, not noise to ignore.
+filterwarnings = ["error"]
 markers = [
   "kicad: requires a real supported kicad-cli",
   "lceda_pro: requires a verified official LCEDA Pro automation bridge",
@@ -71,5 +78,8 @@ select = ["E4", "E7", "E9", "F", "I", "B", "SIM", "UP"]
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
+# Function bodies without annotations are still checked; the package is
+# fully annotated, so this only guards against future regressions.
+check_untyped_defs = true
 # Enforced: the package type-checks clean; keep it that way.
 

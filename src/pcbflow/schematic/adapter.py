@@ -25,6 +25,7 @@ from pcbflow.schematic.cst import (
     CstDocument,
     CstEdit,
     CstList,
+    CstNode,
     apply_edits,
     insert_before_close,
     make_atom,
@@ -1011,7 +1012,7 @@ def _make_sheet_nodes(
     port_bindings,
     before,
 ):
-    children = [
+    children: list[CstNode] = [
         make_atom("sheet"),
         make_list(make_atom("at"), make_atom(_number_text(placement.x)), make_atom(_number_text(placement.y))),
         make_list(make_atom("size"), make_atom("50"), make_atom("25")),
