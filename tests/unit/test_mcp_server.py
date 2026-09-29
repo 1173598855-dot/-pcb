@@ -8,11 +8,16 @@ network access.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import io
+import json
+import time
 import urllib.error
 import urllib.request
 
 import pytest
 
+import pcbflow.mcp_server as mcp_module
 from pcbflow.mcp_server import (
     CircuitBreakerState,
     CollaborationChain,
@@ -20,7 +25,9 @@ from pcbflow.mcp_server import (
     MCPCollaborationServer,
     ModelConfig,
     ModelEndpoint,
+    ModelHealthState,
     MultiModelRouter,
+    _post_json,
     _post_json_sync,
 )
 
@@ -274,3 +281,346 @@ def test_health_check_against_unreachable_url_is_false() -> None:
     )
 
     assert router._check_health_sync(model.health_check_url) is False
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes = b'{"ok": true}', status: int = 200) -> None:
+        self.status = status
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        return False
+
+
+def test_post_json_sync_decodes_json_response(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["timeout"] = timeout
+        return _FakeResponse(b'{"ok": true}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = _post_json_sync(
+        "http://example/api", {"a": 1}, {"Content-Type": "application/json"}, "Test"
+    )
+
+    assert result == {"ok": True}
+    assert seen["url"] == "http://example/api"
+
+
+def test_post_json_sync_reports_http_error_detail(monkeypatch) -> None:
+    def raise_http_error(request, timeout):
+        raise urllib.error.HTTPError(
+            "http://example/api",
+            500,
+            "Internal Server Error",
+            hdrs=None,
+            fp=io.BytesIO(b'{"detail": "exploded"}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_http_error)
+
+    with pytest.raises(RuntimeError, match="Test API error 500") as excinfo:
+        _post_json_sync(
+            "http://example/api", {}, {"Content-Type": "application/json"}, "Test"
+        )
+
+    assert "exploded" in str(excinfo.value)
+
+
+def test_post_json_sync_reports_timeout(monkeypatch) -> None:
+    def raise_timeout(request, timeout):
+        raise TimeoutError()
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_timeout)
+
+    with pytest.raises(RuntimeError, match="timed out after 30"):
+        _post_json_sync(
+            "http://example/api", {}, {"Content-Type": "application/json"}, "Test"
+        )
+
+
+def test_post_json_dispatches_blocking_call_to_worker_thread(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_sync(url, payload, headers, label):
+        calls.append(url)
+        return {"ok": True}
+
+    monkeypatch.setattr(mcp_module, "_post_json_sync", fake_sync)
+
+    result = asyncio.run(_post_json("http://example/api", {}, {}, "Test"))
+
+    assert result == {"ok": True}
+    assert calls == ["http://example/api"]
+
+
+def test_call_model_routes_local_endpoint_through_post_json(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def fake_post(url, payload, headers, label):
+        calls.append((url, label))
+        return {"content": "hello"}
+
+    monkeypatch.setattr(mcp_module, "_post_json", fake_post)
+
+    router = MultiModelRouter({})
+    result = asyncio.run(router._call_model(_model("local-mistral"), {"task": 1}, {"ctx": 2}))
+
+    assert result == {"content": "hello", "model": "local-mistral"}
+    assert calls == [("http://localhost/v1/chat/completions", "Local model")]
+
+
+def test_call_model_routes_azure_endpoint_through_post_json(monkeypatch) -> None:
+    labels: list[str] = []
+
+    async def fake_post(url, payload, headers, label):
+        labels.append(label)
+        return {"content": "azure-hello"}
+
+    monkeypatch.setattr(mcp_module, "_post_json", fake_post)
+
+    router = MultiModelRouter({})
+    model = ModelConfig(
+        name="az",
+        endpoint_type=ModelEndpoint.AZURE,
+        endpoint_url="https://example/openai/deployments/d",
+        api_key_env="TEST_KEY",
+        model_name="az",
+    )
+    result = asyncio.run(router._call_model(model, {}))
+
+    assert result == {"content": "azure-hello", "model": "az"}
+    assert labels == ["Azure model"]
+
+
+def test_call_model_rejects_unhealthy_model() -> None:
+    router = MultiModelRouter({})
+    model = _model("a")
+    router._health[model.name] = ModelHealthState(
+        healthy=False, last_check=time.monotonic()
+    )
+
+    with pytest.raises(RuntimeError, match="not healthy"):
+        asyncio.run(router._call_model(model, {}))
+
+    assert router._health["a"].healthy is False
+
+
+def test_unhealthy_model_is_rechecked_after_cooldown(monkeypatch) -> None:
+    async def fake_post(url, payload, headers, label):
+        return {"content": "recovered"}
+
+    monkeypatch.setattr(mcp_module, "_post_json", fake_post)
+
+    router = MultiModelRouter({})
+    model = _model("a")
+    router._health[model.name] = ModelHealthState(
+        healthy=False, last_check=time.monotonic() - 301
+    )
+
+    result = asyncio.run(router._call_model(model, {}))
+
+    assert result["model"] == "a"
+    assert router._health["a"].healthy is True
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("openai") is not None, reason="openai is installed"
+)
+def test_missing_openai_sdk_is_reported_as_runtime_error() -> None:
+    router = MultiModelRouter({})
+    model = ModelConfig(
+        name="g",
+        endpoint_type=ModelEndpoint.OPENAI,
+        endpoint_url="https://example/v1",
+        api_key_env="TEST_KEY",
+        model_name="g",
+    )
+
+    with pytest.raises(RuntimeError, match="openai package is not installed"):
+        asyncio.run(router._call_openai(model, {}))
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("anthropic") is not None, reason="anthropic is installed"
+)
+def test_missing_anthropic_sdk_is_reported_as_runtime_error() -> None:
+    router = MultiModelRouter({})
+    model = ModelConfig(
+        name="c",
+        endpoint_type=ModelEndpoint.ANTHROPIC,
+        endpoint_url="https://example/v1",
+        api_key_env="TEST_KEY",
+        model_name="c",
+    )
+
+    with pytest.raises(RuntimeError, match="anthropic package is not installed"):
+        asyncio.run(router._call_anthropic(model, {}))
+
+
+def test_health_check_returns_true_for_http_200(monkeypatch) -> None:
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda request, timeout: _FakeResponse(status=200)
+    )
+
+    assert MultiModelRouter({})._check_health_sync("http://example/health") is True
+
+
+def test_record_success_closes_half_open_breaker() -> None:
+    router = MultiModelRouter({"t": _chain("t", "a")})
+    router._circuit_breakers["t"] = CircuitBreakerState(
+        state="half-open", failure_count=2
+    )
+
+    asyncio.run(router._record_success("a", "t"))
+
+    breaker = router._circuit_breakers["t"]
+    assert breaker.state == "closed"
+    assert breaker.success_count == 1
+
+
+def test_record_success_leaves_closed_breaker_untouched() -> None:
+    router = MultiModelRouter({"t": _chain("t", "a")})
+    router._circuit_breakers["t"] = CircuitBreakerState(state="closed")
+
+    asyncio.run(router._record_success("a", "t"))
+
+    assert router._circuit_breakers["t"].state == "closed"
+
+
+def test_register_project_tool_reports_created_project() -> None:
+    payload = json.loads(
+        asyncio.run(
+            mcp_module.pcbflow_register_project(
+                path="C:\\work\\demo", type="kicad", description="demo board"
+            )
+        )
+    )
+
+    assert payload["status"] == "created"
+    assert payload["name"] == "demo"
+    assert payload["eda_type"] == "kicad"
+    assert payload["project_id"].startswith("proj_")
+
+
+def test_run_workflow_tool_falls_back_until_local_model_answers(monkeypatch) -> None:
+    async def fake_post(url, payload, headers, label):
+        return {"content": "planned"}
+
+    monkeypatch.setattr(mcp_module, "_post_json", fake_post)
+    monkeypatch.setattr(mcp_module, "_collab_server", None)
+
+    payload = json.loads(
+        asyncio.run(
+            mcp_module.pcbflow_run_workflow(
+                project_id="prj_1",
+                workflow_name="plan",
+                parameters={"goal": "plan"},
+            )
+        )
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["result"]["model"] == "mistral-large"
+
+
+def test_query_chains_tool_lists_all_and_single_chain() -> None:
+    everything = json.loads(asyncio.run(mcp_module.pcbflow_query_chains()))
+    assert set(everything["chains"]) == {
+        "task_planning",
+        "code_generation",
+        "design_review",
+    }
+
+    single = json.loads(
+        asyncio.run(mcp_module.pcbflow_query_chains(chain_name="code_generation"))
+    )
+    assert single["chain_name"] == "code_generation"
+    assert single["primary_model"]["name"] == "codellama-34b"
+    assert single["fallback_models"][0]["name"] == "gpt-4o"
+
+    missing = json.loads(
+        asyncio.run(mcp_module.pcbflow_query_chains(chain_name="nope"))
+    )
+    assert missing == {"error": "Chain not found: nope"}
+
+
+def test_list_history_tool_returns_recorded_collaborations(monkeypatch) -> None:
+    monkeypatch.setattr(mcp_module, "_collab_server", None)
+    server = mcp_module._init_collab_server()
+    asyncio.run(
+        server._persistence.append_history(
+            {"collaboration_id": "collab_x", "model": "a"}
+        )
+    )
+
+    payload = json.loads(
+        asyncio.run(
+            mcp_module.pcbflow_list_history(collaboration_id="collab_x", limit=5)
+        )
+    )
+
+    assert payload["total"] == 1
+    assert payload["entries"][0]["collaboration_id"] == "collab_x"
+
+
+def test_list_projects_and_read_artifacts_tools_return_empty_placeholders() -> None:
+    projects = json.loads(asyncio.run(mcp_module.pcbflow_list_projects()))
+    assert projects["total"] == 0
+    assert projects["projects"] == []
+
+    artifacts = json.loads(
+        asyncio.run(
+            mcp_module.pcbflow_read_artifacts(project_id="prj_1", artifact_type="drc")
+        )
+    )
+    assert artifacts["project_id"] == "prj_1"
+    assert artifacts["total"] == 0
+
+
+def test_query_eda_capabilities_tool_filters_by_type() -> None:
+    everything = json.loads(asyncio.run(mcp_module.pcbflow_query_eda_capabilities()))
+    assert set(everything["eda_capabilities"]) == {
+        "kicad",
+        "lceda",
+        "easyeda",
+        "zhongan",
+        "others",
+    }
+
+    filtered = json.loads(
+        asyncio.run(mcp_module.pcbflow_query_eda_capabilities(eda_type="kicad"))
+    )
+    assert set(filtered["eda_capabilities"]) == {"kicad"}
+
+    unknown = json.loads(
+        asyncio.run(mcp_module.pcbflow_query_eda_capabilities(eda_type="mystery"))
+    )
+    assert unknown["eda_capabilities"] == {"mystery": {}}
+
+
+def test_init_collab_server_creates_and_caches_singleton(monkeypatch) -> None:
+    monkeypatch.setattr(mcp_module, "_collab_server", None)
+
+    first = mcp_module._init_collab_server()
+    second = mcp_module._init_collab_server()
+
+    assert first is second
+
+
+def test_main_runs_the_server(monkeypatch) -> None:
+    ran: list[bool] = []
+    monkeypatch.setattr(mcp_module.app, "run", lambda: ran.append(True))
+
+    mcp_module.main()
+
+    assert ran == [True]

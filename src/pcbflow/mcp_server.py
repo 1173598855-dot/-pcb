@@ -13,7 +13,6 @@ from enum import Enum
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
-from mcp.types import CallToolResult, TextContent
 
 logger = logging.getLogger(__name__)
 
@@ -592,46 +591,45 @@ class MCPCollaborationServer:
             }
 
 
-def _text_result(payload: dict[str, Any]) -> CallToolResult:
-    return CallToolResult(
-        content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
-    )
-
-
-async def _handle_register_project(args: dict[str, Any]) -> CallToolResult:
+async def _handle_register_project(args: dict[str, Any]) -> dict[str, Any]:
     project_id = f"proj_{hash(str(args.get('path', ''))) % 10000}"
     result = {
         "project_id": project_id,
-        "name": args.get("path", "").rsplit("\\", 1)[-1],
-        "eda_type": args.get("type", "kicad"),
+        "name": str(args.get("path") or "").rsplit("\\", 1)[-1],
+        # Tool wrappers pass omitted arguments as explicit None values, so
+        # defaults must use truthiness rather than dict.get defaults.
+        "eda_type": args.get("type") or "kicad",
         "description": args.get("description"),
         "status": "created",
-        "collaboration_mode": args.get("collaboration_mode", "auto"),
+        "collaboration_mode": args.get("collaboration_mode") or "auto",
         "created_at": datetime.now(UTC).strftime(ISO_FORMAT),
         "supported_ai": ["claude-3-5-sonnet", "gpt-4o", "mistral-large", "codellama-34b"],
     }
-    return _text_result(result)
+    return result
 
 
-async def _handle_run_workflow(args: dict[str, Any], server: MCPCollaborationServer) -> CallToolResult:
-    chain_name = args.get("collaboration_chain", "task_planning")
+async def _handle_run_workflow(
+    args: dict[str, Any], server: MCPCollaborationServer
+) -> dict[str, Any]:
+    chain_name = args.get("collaboration_chain") or "task_planning"
     project_context = {"project_id": args.get("project_id"), "workflow_name": args.get("workflow_name")}
     task_data = {
-        "parameters": args.get("parameters", {}),
-        "language": args.get("language", "en"),
-        "use_primary_only": args.get("use_primary_only", False),
+        "parameters": args.get("parameters") or {},
+        "language": args.get("language") or "en",
+        "use_primary_only": bool(args.get("use_primary_only", False)),
     }
-    result = await server.process_task(chain_name, task_data, project_context)
-    return _text_result(result)
+    return await server.process_task(chain_name, task_data, project_context)
 
 
-async def _handle_query_chains(args: dict[str, Any], server: MCPCollaborationServer) -> CallToolResult:
+async def _handle_query_chains(
+    args: dict[str, Any], server: MCPCollaborationServer
+) -> dict[str, Any]:
     chain_name = args.get("chain_name")
     chains = server._router._chains
 
     if chain_name:
         if chain_name not in chains:
-            return _text_result({"error": f"Chain not found: {chain_name}"})
+            return {"error": f"Chain not found: {chain_name}"}
         chain = chains[chain_name]
         result = {
             "chain_name": chain.chain_name,
@@ -672,29 +670,28 @@ async def _handle_query_chains(args: dict[str, Any], server: MCPCollaborationSer
                 }
                 for name, chain in chains.items()
             }
-        }
-    return _text_result(result)
+            }
+    return result
 
 
-async def _handle_list_history(args: dict[str, Any], server: MCPCollaborationServer) -> CallToolResult:
+async def _handle_list_history(
+    args: dict[str, Any], server: MCPCollaborationServer
+) -> dict[str, Any]:
     collab_id = args.get("collaboration_id")
     limit = int(args.get("limit", 10))
     history = await server._persistence.get_history(collab_id, limit)
-    result = {"collaboration_id": collab_id, "total": len(history), "limit": limit, "entries": history}
-    return _text_result(result)
+    return {"collaboration_id": collab_id, "total": len(history), "limit": limit, "entries": history}
 
 
-async def _handle_list_projects(args: dict[str, Any]) -> CallToolResult:
-    result: dict[str, Any] = {"projects": [], "total": 0, "note": "No persistent project store in this MCP server"}
-    return _text_result(result)
+async def _handle_list_projects(args: dict[str, Any]) -> dict[str, Any]:
+    return {"projects": [], "total": 0, "note": "No persistent project store in this MCP server"}
 
 
-async def _handle_read_artifacts(args: dict[str, Any]) -> CallToolResult:
-    result: dict[str, Any] = {"project_id": args.get("project_id"), "artifacts": [], "total": 0}
-    return _text_result(result)
+async def _handle_read_artifacts(args: dict[str, Any]) -> dict[str, Any]:
+    return {"project_id": args.get("project_id"), "artifacts": [], "total": 0}
 
 
-async def _handle_query_capabilities(args: dict[str, Any]) -> CallToolResult:
+async def _handle_query_capabilities(args: dict[str, Any]) -> dict[str, Any]:
     capabilities = {
         "kicad": {"supported": True, "ai_assisted": True, "features": ["DRC", "ERC", "3D", "gerber"]},
         "lceda": {"supported": True, "ai_assisted": False, "features": ["DFM", "simulation", "import-export"]},
@@ -702,9 +699,8 @@ async def _handle_query_capabilities(args: dict[str, Any]) -> CallToolResult:
         "zhongan": {"supported": False, "ai_assisted": True, "features": ["AI algorithm", "patent detection"]},
         "others": {"supported": True, "ai_assisted": True, "features": ["third-party EDA integration"]},
     }
-    eda_type = args.get("eda_type", "all")
-    result = {"eda_capabilities": capabilities if eda_type == "all" else {eda_type: capabilities.get(eda_type, {})}}
-    return _text_result(result)
+    eda_type = args.get("eda_type") or "all"
+    return {"eda_capabilities": capabilities if eda_type == "all" else {eda_type: capabilities.get(eda_type, {})}}
 
 
 app = MCPServer(
