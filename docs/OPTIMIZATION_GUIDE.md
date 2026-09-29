@@ -15,6 +15,16 @@ external-tool trust boundary.
 4. Measure before changing an I/O strategy whose behavior is security-sensitive.
 5. Run focused tests first, then the complete suite and coverage gate.
 
+## 2026-09-29 Increment: Export and Probe Failure-Contract Hardening
+
+| Status | Priority | Area | Change | Acceptance condition |
+| --- | --- | --- | --- | --- |
+| Complete | P1 | Manufacturing export failure contracts | 13 tests added (`test_kicad_export_edges.py`) with a scripted `ProcessPort` stub: frozen `kicad-cli` argv contract (all five commands, output paths, cwd, layer list), missing executable/board before any command, timeout and nonzero-exit mapping to `KicadExportError` attributes, degraded optional position/BOM artifacts, fail-closed on missing DRC report or empty Gerber/drill output, and blank layer-name rejection. `kicad_export` coverage 83% → 100%. | Focused file green; real-KiCad contract tests unchanged. |
+| Complete | P1 | LCEDA probe failure contracts | 12 tests added to `test_lceda_pro.py`: unreadable executable, version-command timeout/spawn-failure/nonzero-exit, executable swapped before version output, missing verification fixture, unidentified bridge, bridge contract failure without mutation, valid contract that swaps the executable, foreign contract result, `_executable_matches` OSError, and the five native operations failing closed with a verified minimal-lifecycle bridge — including that `RUN_DRC`/`EXPORT_RELEASE` stay outside the frozen contract. `lceda_pro` coverage 81% → 99% (the two remaining lines raise behind a bridge that verifies DRC/export evidence, which the frozen minimal contract forbids). | Focused file green. |
+
+Next-largest Windows-reachable gaps after this increment: `schematic/adapter.py`
+(84%), `pcb_candidate_store.py` (87%), `workspaces.py` (71%, POSIX-only branch).
+
 ## 2026-09-29 Increment: Candidate Store Edges and Documentation Reorganization
 
 | Status | Priority | Area | Change | Acceptance condition |
@@ -175,8 +185,16 @@ benchmarks exist:
 
 ## Latest Verification Run
 
-Run on 2026-09-29 against the working tree containing this guide (Python 3.13.9,
-Windows):
+Run on 2026-09-29 (second increment, Python 3.13.9, Windows):
+
+- `python -m pytest -q -n auto --cov=pcbflow --cov-report=term-missing --cov-fail-under=90`:
+  1049 passed, 1 skipped (LCEDA Pro bridge contract, machine lacks a verified
+  bridge) in 285.44 s; total coverage 92.16%; zero warnings under
+  `filterwarnings = ["error"]`; exit 0. `kicad_export` 100%, `lceda_pro` 99%.
+- `ruff check src tests` and `mypy src/pcbflow` (with `check_untyped_defs`):
+  clean, 70 source files.
+
+Run on 2026-09-29 (Python 3.13.9, Windows):
 
 - `python -m pytest -q -n auto --cov=pcbflow --cov-report=term-missing --cov-fail-under=90`:
   1024 passed, 1 skipped (LCEDA Pro bridge contract, machine lacks a verified

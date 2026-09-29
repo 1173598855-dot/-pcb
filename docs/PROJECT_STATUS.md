@@ -1,5 +1,21 @@
 # PCBFlow 项目整理报告
 
+## 2026-09-29 发布导出与能力探针失败契约硬化
+
+- 新增 `tests/unit/test_kicad_export_edges.py`（13 个测试，脚本化 runner 桩）：
+  冻结 `kicad-cli` 全部五条导出命令的 argv 契约（输出路径、cwd、层清单）、
+  可执行文件/板文件缺失时零命令执行、超时与非零退出的错误映射、可选
+  position/BOM 工件的降级语义、DRC 报告缺失与空 Gerber/drill 输出的
+  fail-closed、空白层名拒绝。`kicad_export` 覆盖率 83% → 100%。
+- `tests/unit/test_lceda_pro.py` 新增 12 个探针失败分支测试：不可读可执行
+  文件、版本命令超时/派生失败/非零退出、版本输出前可执行文件被调包、
+  验证 fixture 缺失、桥无法识别、桥契约调用失败（无突变）、有效契约后
+  调包、异构契约返回值、`_executable_matches` OSError，以及五个原生操作
+  在最小生命周期桥验证通过后仍然 fail-closed——其中 `RUN_DRC`/`EXPORT_RELEASE`
+  被冻结契约排除在外，即使桥完全可信也保持未授权。
+  `lceda_pro` 覆盖率 81% → 99%。
+- 全量 gate：1049 passed, 1 skipped，总覆盖率 92.16%，零警告。
+
 ## 2026-09-29 文档整理与候选 store 边缘覆盖
 
 - README 全面重排：项目定位移到开头，两段日志式记录（2026-09-24、
