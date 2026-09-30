@@ -15,6 +15,21 @@ external-tool trust boundary.
 4. Measure before changing an I/O strategy whose behavior is security-sensitive.
 5. Run focused tests first, then the complete suite and coverage gate.
 
+## 2026-09-30 Increment: Schematic Adapter Edge-Path Hardening
+
+| Status | Priority | Area | Change | Acceptance condition |
+| --- | --- | --- | --- | --- |
+| Complete | P1 | Adapter apply guards | Tests added (`test_schematic_adapter_edges.py`) for unsupported KiCad majors on inspect/apply, empty command batches, multiple instantiate commands per apply, bound modules without a resolver, mixed unsupported operations, and projects that are not real directories. | All raise the documented errors before any file is touched. |
+| Complete | P1 | Property-write branches | Disallowed names outside the allowlist, stale expected values, duplicate `Reference` renames against the multi-unit golden, successful unique renames, insertion of missing `User.*` properties, and overlapping CST edits from duplicate same-property commands. | Each branch executes through the real adapter path. |
+| Complete | P1 | Label target resolution | Wire endpoint `2` success, missing endpoint selector, invalid selector, unknown wire UUID, global-label shape emission, and rollback of controlled-operation files when the semantic diff fails late. | Failures raise `LabelTargetError` with the exact production messages; rollback restores original bytes. |
+| Complete | P2 | Module render and binding guards | Crafted catalogs pin "template is not a KiCad schematic", ambiguous parameter properties, unknown parameter bindings, and port bindings on a portless module. | Catalog-load-time validation that makes the no-UUID render guard unreachable is recorded as dead defensive code. |
+
+`schematic/adapter.py` coverage rose from 84% to 89% (106 → 71 misses). The
+remaining misses are control-flow-unreachable defensive branches (268, 296,
+517, 596, 943, 953, 969-970), hierarchical-port and net-position resolution
+that the single-sheet fixtures cannot express (706-709, 749-819), and
+symlink/reparse-point guards needing OS-level setup.
+
 ## 2026-09-29 Increment: Export and Probe Failure-Contract Hardening
 
 | Status | Priority | Area | Change | Acceptance condition |
@@ -184,6 +199,15 @@ benchmarks exist:
 | Whole change | `python -m pytest -q`, coverage threshold, `python -m compileall src`, and `git diff --check`. |
 
 ## Latest Verification Run
+
+Run on 2026-09-30 (Python 3.13.9, Windows):
+
+- `python -m pytest -q -n auto --cov=pcbflow --cov-report=term-missing --cov-fail-under=90`:
+  1077 passed, 1 skipped (LCEDA Pro bridge contract, machine lacks a verified
+  bridge) in 275.24 s; total coverage 92.43%; zero warnings under
+  `filterwarnings = ["error"]`; exit 0. `schematic/adapter` 89%.
+- `ruff check src tests` and `mypy src/pcbflow` (with `check_untyped_defs`):
+  clean, 70 source files.
 
 Run on 2026-09-29 (second increment, Python 3.13.9, Windows):
 

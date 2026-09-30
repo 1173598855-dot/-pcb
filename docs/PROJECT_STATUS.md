@@ -1,5 +1,23 @@
 # PCBFlow 项目整理报告
 
+## 2026-09-30 原理图适配器边缘路径硬化
+
+- 新增 `tests/unit/test_schematic_adapter_edges.py`（26 个测试），按五个方向
+  钉住 CST 写适配器的防御分支：apply 层守卫（不支持的 KiCad major、空命令
+  批次、多条 instantiate 命令、无 resolver 的绑定模块、混合不支持操作、
+  非真实目录工程）、属性写入分支（allowlist 之外的名字、过期期望值、
+  Reference 重名拒绝与唯一重命名、缺失 `User.*` 属性插入、同属性双命令的
+  CST 编辑重叠）、label 目标解析（wire 端点选择器缺失/非法/未知、端点 "2"
+  解析、global label 的 shape 节点、语义 diff 晚期失败回滚受控操作文件）、
+  模块渲染与绑定守卫（非原理图模板、歧义参数属性、未知参数绑定、无端口
+  模块的端口绑定）。
+- 死防御分支记录：渲染期"模板无 UUID"守卫（adapter 953）被目录加载期校验
+  （modules.py 要求模板至少含一个规范 UUID）完全遮蔽，控制流不可达。
+- `schematic/adapter.py` 覆盖率 84% → 89%（缺失行 106 → 71）；剩余为不可达
+  防御分支、单表夹具无法表达的层级端口/网络位置解析、以及需要 OS 级设置的
+  符号链接/重解析点守卫。
+- 全量 gate：1077 passed, 1 skipped，总覆盖率 92.43%，零警告。
+
 ## 2026-09-29 发布导出与能力探针失败契约硬化
 
 - 新增 `tests/unit/test_kicad_export_edges.py`（13 个测试，脚本化 runner 桩）：
